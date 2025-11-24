@@ -2,6 +2,13 @@
 name = "exfat-slim"
 version = "0.1.0"
 edition = "2024"
+authors = ["David Haig"]
+license = "Apache-2.0"
+repository = "https://github.com/ninjasource/exfat-slim.git"
+description = "An exFAT file system library written in safe Rust for embedded environments"
+keywords = ["exfat", "embedded", "no_std"]
+categories = ["embedded", "no-std", "filesystem"]
+readme = "README.md"
 
 [dependencies]
 byteorder = "1.5.0"
