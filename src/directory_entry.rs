@@ -87,24 +87,6 @@ pub struct FileNameDirEntry {
     pub file_name: [u16; 15], // utf16 formatted
 }
 
-/*
-impl Into<u8> for EntryType {
-    fn into(self) -> u8 {
-        match self {
-            Self::UnusedOrEndOfDirectory => 0x00,
-            Self::AllocationBitmap => 0x81,
-            Self::UpcaseTable => 0x82,
-            Self::VolumeLabel => 0x83,
-            Self::FileAndDirectory => 0x85,
-            Self::VolumeGuid => 0xA0,
-            Self::TexFATPadding => 0xA1,
-            Self::StreamExtension => 0xC0,
-            Self::Filename => 0xC1,
-            Self::Reserved(x) => x,
-        }
-    }
-}*/
-
 impl From<u8> for EntryType {
     fn from(value: u8) -> Self {
         match value {

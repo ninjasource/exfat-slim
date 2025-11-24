@@ -135,14 +135,17 @@ impl ReadOnlyFile {
 async fn next_file_entry(
     io: &mut impl BlockDevice,
     entries: &mut DirectoryEntryChain,
-    filter: &impl FileNameFilter,
+    filter: &impl DirectoryEntryFilter,
 ) -> Result<Option<FileDetails>, ExFatError> {
     'outer: loop {
         if let Some(file_dir_entry) = next_file_dir_entry(io, entries).await? {
+            let is_directory = file_dir_entry
+                .file_attributes
+                .contains(FileAttributes::Directory);
             if let Some(stream_entry) = entries.next(io).await? {
                 // TODO: check entry type
                 let stream_entry: StreamExtensionDirEntry = stream_entry.into();
-                if !filter.hash(stream_entry.name_hash) {
+                if !filter.hash(stream_entry.name_hash, is_directory) {
                     continue 'outer;
                 }
 
@@ -200,15 +203,15 @@ fn decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
     Ok(decoded)
 }
 
-trait FileNameFilter {
-    fn hash(&self, file_name_hash: u16) -> bool;
+trait DirectoryEntryFilter {
+    fn hash(&self, file_name_hash: u16, is_directory: bool) -> bool;
     fn file_name(&self, file_name: &[u16]) -> bool;
 }
 
 struct AllPassFilter {}
 
-impl FileNameFilter for AllPassFilter {
-    fn hash(&self, _file_name_hash: u16) -> bool {
+impl DirectoryEntryFilter for AllPassFilter {
+    fn hash(&self, _file_name_hash: u16, _is_directory: bool) -> bool {
         true
     }
 
@@ -217,26 +220,28 @@ impl FileNameFilter for AllPassFilter {
     }
 }
 
-struct ExactFileNameFilter<'a> {
+struct ExactNameFilter<'a> {
     upcase_table: &'a UpcaseTable,
     file_name: Vec<u16>,
     file_name_hash: u16,
+    is_directory: bool,
 }
 
-impl<'a> ExactFileNameFilter<'a> {
-    pub fn new(file_name_str: &str, upcase_table: &'a UpcaseTable) -> Self {
+impl<'a> ExactNameFilter<'a> {
+    pub fn new(file_name_str: &str, upcase_table: &'a UpcaseTable, is_directory: bool) -> Self {
         let (file_name, file_name_hash) = get_utf16(file_name_str, upcase_table);
         Self {
             upcase_table,
             file_name,
             file_name_hash,
+            is_directory,
         }
     }
 }
 
-impl<'a> FileNameFilter for ExactFileNameFilter<'a> {
-    fn hash(&self, file_name_hash: u16) -> bool {
-        self.file_name_hash == file_name_hash
+impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
+    fn hash(&self, file_name_hash: u16, is_directory: bool) -> bool {
+        self.file_name_hash == file_name_hash && self.is_directory == is_directory
     }
 
     fn file_name(&self, file_name: &[u16]) -> bool {
@@ -258,6 +263,7 @@ async fn get_leaf_file_entry(
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     full_path: &str,
+    is_directory: bool,
 ) -> Result<Option<FileDetails>, ExFatError> {
     let mut splits = full_path
         .split(['/', '\\'])
@@ -269,14 +275,16 @@ async fn get_leaf_file_entry(
 
     while let Some(part) = splits.next() {
         let is_last = splits.peek().is_none();
-        let filter = ExactFileNameFilter::new(part, upcase_table);
+        let is_directory_filter = is_directory || !is_last;
+
+        let filter = ExactNameFilter::new(part, upcase_table, is_directory_filter);
         let mut entries = DirectoryEntryChain::new(cluster_id, fs);
         let file_details = next_file_entry(io, &mut entries, &filter).await?;
 
         match file_details {
             Some(file_details) => {
                 if is_last {
-                    // file or directory
+                    // file or directory (there might be a directory and a file with the same name but that would have been filtered out above)
                     return Ok(Some(file_details));
                 } else {
                     // directory
@@ -323,7 +331,7 @@ pub async fn directory_list(
     let cluster_id = if is_root_directory(full_path) {
         fs.first_cluster_of_root_dir
     } else {
-        match get_leaf_file_entry(io, fs, upcase_table, full_path).await? {
+        match get_leaf_file_entry(io, fs, upcase_table, full_path, true).await? {
             Some(file_details) => {
                 if file_details.attributes.contains(FileAttributes::Directory) {
                     file_details.first_cluster
@@ -360,7 +368,7 @@ pub async fn find_file(
     upcase_table: &UpcaseTable,
     full_path: &str,
 ) -> Result<FileDetails, ExFatError> {
-    match get_leaf_file_entry(io, fs, upcase_table, full_path).await? {
+    match get_leaf_file_entry(io, fs, upcase_table, full_path, false).await? {
         Some(file_details) => {
             if file_details.attributes.contains(FileAttributes::Archive) {
                 Ok(file_details)
