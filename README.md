@@ -61,7 +61,7 @@ Not yet implemented (soon though):
 - Dual async and blocking support
 
 No immediate intention of implementing:
-- Seekable read write file
+- Seekable read write file because it requires long term state management and some form of global locking which would then have to be added to everything else.
 
 ## Contribution
 

@@ -3,7 +3,7 @@ use core::str::from_utf8;
 
 use crate::{
     directory_entry::{
-        DirectoryEntryChain, FileAttributes, FileNameDirEntry, GeneralSecondaryFlags,
+        DirectoryEntryChain, FileAttributes, FileNameDirEntry, GeneralSecondaryFlags, Location,
         StreamExtensionDirEntry, next_file_dir_entry,
     },
     error::ExFatError,
@@ -11,36 +11,45 @@ use crate::{
     file_system::FileSystemDetails,
     io::{BLOCK_SIZE, BlockDevice},
     upcase_table::UpcaseTable,
-    utils::calc_hash_u16,
+    utils::{calc_dir_entry_set_len, encode_utf16_and_hash},
 };
 
 #[derive(Debug)]
 pub struct FileDetails {
     pub first_cluster: u32,
     pub data_length: u64,
+    pub valid_data_length: u64,
     pub attributes: FileAttributes,
-    pub no_fat_chain: bool,
     #[allow(dead_code)]
     pub name: String,
+    pub location: Location,
+    pub flags: GeneralSecondaryFlags,
 }
 
+impl FileDetails {
+    pub fn get_num_clusters(&self, bytes_per_cluster: u32) -> usize {
+        self.data_length.div_ceil(bytes_per_cluster as u64) as usize
+    }
+}
 pub struct ReadOnlyFile {
     fs: FileSystemDetails,
     no_fat_chain: bool,
     current_cluster: u32,
     cluster_offset: u32,
-    data_length: u64,
+    valid_data_length: u64,
     bytes_read: u64,
 }
 impl ReadOnlyFile {
     pub fn new(fs: &FileSystemDetails, file_details: &FileDetails) -> Self {
         Self {
             fs: fs.clone(),
-            no_fat_chain: file_details.no_fat_chain,
             current_cluster: file_details.first_cluster,
             cluster_offset: 0,
-            data_length: file_details.data_length,
+            valid_data_length: file_details.valid_data_length,
             bytes_read: 0,
+            no_fat_chain: file_details
+                .flags
+                .contains(GeneralSecondaryFlags::NoFatChain),
         }
     }
 
@@ -58,7 +67,7 @@ impl ReadOnlyFile {
                 self.current_cluster += 1;
                 self.cluster_offset = 0;
             } else if let Some(cluster_id) =
-                next_cluster_in_fat_chain(self.fs.fat_offset, self.current_cluster, io).await?
+                next_cluster_in_fat_chain(io, self.fs.fat_offset, self.current_cluster).await?
             {
                 self.current_cluster = cluster_id;
                 self.cluster_offset = 0;
@@ -79,7 +88,7 @@ impl ReadOnlyFile {
         io: &mut impl BlockDevice,
         buf: &mut [u8],
     ) -> Result<Option<usize>, ExFatError> {
-        let remainder_in_file = self.data_length - self.bytes_read;
+        let remainder_in_file = self.valid_data_length - self.bytes_read;
 
         // check for end of file
         if remainder_in_file == 0 {
@@ -111,7 +120,7 @@ impl ReadOnlyFile {
 
     pub async fn read_to_end(&mut self, io: &mut impl BlockDevice) -> Result<Vec<u8>, ExFatError> {
         let mut buf = vec![0; BLOCK_SIZE];
-        let mut contents = Vec::with_capacity(self.data_length as usize);
+        let mut contents = Vec::with_capacity(self.valid_data_length as usize);
 
         while let Some(len) = self.read(io, &mut buf).await? {
             contents.extend_from_slice(&buf[..len]);
@@ -132,17 +141,17 @@ impl ReadOnlyFile {
     }
 }
 
-async fn next_file_entry(
+pub async fn next_file_entry(
     io: &mut impl BlockDevice,
     entries: &mut DirectoryEntryChain,
     filter: &impl DirectoryEntryFilter,
 ) -> Result<Option<FileDetails>, ExFatError> {
     'outer: loop {
-        if let Some(file_dir_entry) = next_file_dir_entry(io, entries).await? {
+        if let Some((file_dir_entry, location)) = next_file_dir_entry(io, entries).await? {
             let is_directory = file_dir_entry
                 .file_attributes
                 .contains(FileAttributes::Directory);
-            if let Some(stream_entry) = entries.next(io).await? {
+            if let Some((stream_entry, _location)) = entries.next(io).await? {
                 // TODO: check entry type
                 let stream_entry: StreamExtensionDirEntry = stream_entry.into();
                 if !filter.hash(stream_entry.name_hash, is_directory) {
@@ -153,7 +162,7 @@ async fn next_file_entry(
                 let name_length = stream_entry.name_length as usize;
                 let mut file_name: Vec<u16> = Vec::with_capacity(name_length);
                 'inner: loop {
-                    if let Some(file_name_entry) = entries.next(io).await? {
+                    if let Some((file_name_entry, _location)) = entries.next(io).await? {
                         // TODO: check entry type
                         let file_name_entry: FileNameDirEntry = file_name_entry.into();
                         let len =
@@ -175,11 +184,11 @@ async fn next_file_entry(
                 let file_details = FileDetails {
                     attributes: file_dir_entry.file_attributes,
                     data_length: stream_entry.data_length,
+                    valid_data_length: stream_entry.valid_data_length,
                     first_cluster: stream_entry.first_cluster,
                     name,
-                    no_fat_chain: stream_entry
-                        .general_secondary_flags
-                        .contains(GeneralSecondaryFlags::NoFatChain),
+                    location,
+                    flags: stream_entry.general_secondary_flags,
                 };
                 return Ok(Some(file_details));
             } else {
@@ -203,12 +212,12 @@ fn decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
     Ok(decoded)
 }
 
-trait DirectoryEntryFilter {
+pub trait DirectoryEntryFilter {
     fn hash(&self, file_name_hash: u16, is_directory: bool) -> bool;
     fn file_name(&self, file_name: &[u16]) -> bool;
 }
 
-struct AllPassFilter {}
+pub struct AllPassFilter {}
 
 impl DirectoryEntryFilter for AllPassFilter {
     fn hash(&self, _file_name_hash: u16, _is_directory: bool) -> bool {
@@ -220,7 +229,7 @@ impl DirectoryEntryFilter for AllPassFilter {
     }
 }
 
-struct ExactNameFilter<'a> {
+pub struct ExactNameFilter<'a> {
     upcase_table: &'a UpcaseTable,
     file_name: Vec<u16>,
     file_name_hash: u16,
@@ -229,7 +238,7 @@ struct ExactNameFilter<'a> {
 
 impl<'a> ExactNameFilter<'a> {
     pub fn new(file_name_str: &str, upcase_table: &'a UpcaseTable, is_directory: bool) -> Self {
-        let (file_name, file_name_hash) = get_utf16(file_name_str, upcase_table);
+        let (file_name, file_name_hash) = encode_utf16_and_hash(file_name_str, upcase_table);
         Self {
             upcase_table,
             file_name,
@@ -302,16 +311,6 @@ async fn get_leaf_file_entry(
     Ok(None)
 }
 
-fn get_utf16(s: &str, upcase_table: &UpcaseTable) -> (Vec<u16>, u16) {
-    let mut file_name: Vec<u16> = s.encode_utf16().collect();
-    for c in file_name.iter_mut() {
-        *c = upcase_table.upcase(*c)
-    }
-    let file_name_hash = calc_hash_u16(file_name.as_slice());
-
-    (file_name, file_name_hash)
-}
-
 fn is_root_directory(path: &str) -> bool {
     let mut splits = path
         .split(['/', '\\'])
@@ -357,12 +356,22 @@ impl DirectoryIterator {
         io: &mut impl BlockDevice,
     ) -> Result<Option<FileDetails>, ExFatError> {
         let filter = AllPassFilter {};
-        let file_details = next_file_entry(io, &mut self.entries, &filter).await?;
-        Ok(file_details)
+        next_file_entry(io, &mut self.entries, &filter).await
     }
 }
 
 pub async fn find_file(
+    io: &mut impl BlockDevice,
+    fs: &FileSystemDetails,
+    upcase_table: &UpcaseTable,
+    full_path: &str,
+) -> Result<FileDetails, ExFatError> {
+    let file_details = find_file_inner(io, fs, upcase_table, full_path).await?;
+    Ok(file_details)
+}
+
+// TODO: figure out visibility (pub or private)
+pub async fn find_file_inner(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,

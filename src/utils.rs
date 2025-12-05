@@ -1,6 +1,6 @@
 use alloc::{string::String, vec, vec::Vec};
 
-use crate::error::ExFatError;
+use crate::{error::ExFatError, upcase_table::UpcaseTable};
 
 pub fn read_u16_le<const INDEX: usize, const N: usize>(value: &[u8; N]) -> u16 {
     let mut tmp = [0u8; size_of::<u16>()];
@@ -18,6 +18,22 @@ pub fn read_u64_le<const INDEX: usize, const N: usize>(value: &[u8; N]) -> u64 {
     let mut tmp = [0u8; size_of::<u64>()];
     tmp.copy_from_slice(&value[INDEX..INDEX + size_of::<u64>()]);
     u64::from_le_bytes(tmp)
+}
+
+/// calculate the number of 32 byte chunks required for the directory entry set
+pub fn calc_dir_entry_set_len(name: &[u16]) -> usize {
+    // file_dir + stream_extension + file_name entries in blocks of 15 characters
+    2 + (name.len() as u32).div_ceil(15) as usize
+}
+
+pub fn encode_utf16_and_hash(s: &str, upcase_table: &UpcaseTable) -> (Vec<u16>, u16) {
+    let mut file_name: Vec<u16> = s.encode_utf16().collect();
+    for c in file_name.iter_mut() {
+        *c = upcase_table.upcase(*c)
+    }
+    let file_name_hash = calc_hash_u16(file_name.as_slice());
+
+    (file_name, file_name_hash)
 }
 
 pub fn calc_hash_u16(utf16_file_name: &[u16]) -> u16 {

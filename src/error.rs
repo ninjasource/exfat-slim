@@ -36,4 +36,7 @@ pub enum ExFatError {
 
     #[error("invalid utf8 bytes ({0})")]
     Utf8Error(#[from] core::str::Utf8Error),
+
+    #[error("disk is full")]
+    DiskFull,
 }

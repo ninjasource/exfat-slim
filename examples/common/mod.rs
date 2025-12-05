@@ -12,7 +12,7 @@ pub struct InMemoryBlockDevice {
 }
 
 impl BlockDevice for InMemoryBlockDevice {
-    async fn read_sector(&mut self, sector_id: u32) -> Result<&Block, Error> {
+    async fn read_sector(&mut self, sector_id: u32) -> Result<&mut Block, Error> {
         let sector_id_with_offset = sector_id + self.sector_offset;
 
         if sector_id >= 4096 {
@@ -29,7 +29,11 @@ impl BlockDevice for InMemoryBlockDevice {
         self.data_block
             .copy_from_slice(&self.image[pos..pos + BLOCK_SIZE]);
 
-        Ok(&self.data_block)
+        Ok(&mut self.data_block)
+    }
+
+    async fn write_sector(&mut self, _sector_id: u32, _block: &Block) -> Result<(), Error> {
+        todo!()
     }
 }
 

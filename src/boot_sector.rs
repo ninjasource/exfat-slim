@@ -66,10 +66,10 @@ pub struct BootSector {
     pub percent_in_use: u8,
 }
 
-impl TryFrom<&[u8; 512]> for BootSector {
+impl TryFrom<&mut [u8; 512]> for BootSector {
     type Error = Error;
 
-    fn try_from(value: &[u8; 512]) -> Result<Self, Self::Error> {
+    fn try_from(value: &mut [u8; 512]) -> Result<Self, Self::Error> {
         let mut jump_boot = [0u8; 3]; // should be [0xEB, 0x76, 0x90]
         jump_boot.copy_from_slice(&value[..3]); // should be "EXFAT   "
         let mut file_system_name = heapless::String::<8>::new();

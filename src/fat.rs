@@ -5,9 +5,9 @@ use crate::{
 
 /// gets the next cluster_id in the fat chain
 pub async fn next_cluster_in_fat_chain(
-    fat_offset: u32,
-    cluster_id: u32,
     io: &mut impl BlockDevice,
+    fat_offset: u32, // from boot_sector
+    cluster_id: u32,
 ) -> Result<Option<u32>, ExFatError> {
     const ENTRY_SIZE: usize = size_of::<u32>();
     const NUM_ENTRIES: usize = BLOCK_SIZE / ENTRY_SIZE;
