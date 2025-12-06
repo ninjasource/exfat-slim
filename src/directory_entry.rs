@@ -513,7 +513,7 @@ pub fn is_end_of_directory(directory_entry: &[u8; 32]) -> bool {
 }
 
 #[inline(always)]
-fn checksum_next(checksum: u16, value: u8) -> u16 {
+fn checksum_next_old(checksum: u16, value: u8) -> u16 {
     if checksum & 1 > 0 { 0x8000u16 } else { 0u16 }
         .wrapping_add(checksum >> 1)
         .wrapping_add(value as u16)
@@ -521,19 +521,19 @@ fn checksum_next(checksum: u16, value: u8) -> u16 {
 
 /// calculates the checksum for a file directory set
 /// we assume that this directly set has at least 3 entries
-pub fn calc_checksum(dir_entry_set: &[RawDirEntry]) -> u16 {
+pub fn calc_checksum_old(dir_entry_set: &[RawDirEntry]) -> u16 {
     let file_dir = &dir_entry_set[0];
     let mut checksum = 0u16;
     for value in &file_dir[..2] {
-        checksum = checksum_next(checksum, *value)
+        checksum = checksum_next_old(checksum, *value)
     }
     // skip indexes 2 and 3 as that is the checksum itself
     for value in &file_dir[4..] {
-        checksum = checksum_next(checksum, *value)
+        checksum = checksum_next_old(checksum, *value)
     }
     for dir_entry in &dir_entry_set[1..] {
         for value in dir_entry {
-            checksum = checksum_next(checksum, *value)
+            checksum = checksum_next_old(checksum, *value)
         }
     }
 

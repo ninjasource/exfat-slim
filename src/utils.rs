@@ -1,4 +1,4 @@
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{collections::btree_map::Range, string::String, vec, vec::Vec};
 
 use crate::{error::ExFatError, upcase_table::UpcaseTable};
 

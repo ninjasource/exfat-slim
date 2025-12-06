@@ -12,7 +12,7 @@ pub enum Error {
 }
 
 pub trait BlockDevice {
-    fn read_sector(&mut self, sector_id: u32) -> impl Future<Output = Result<&mut Block, Error>>;
+    fn read_sector(&mut self, sector_id: u32) -> impl Future<Output = Result<&Block, Error>>;
     fn write_sector(
         &mut self,
         sector_id: u32,

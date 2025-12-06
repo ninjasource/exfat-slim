@@ -2,11 +2,11 @@ use alloc::{boxed::Box, string::String, vec::Vec};
 
 use crate::{
     allocation_bitmap::{Allocation, AllocationBitmap},
-    boot_sector::BootSector,
+    boot_sector::{BootSector, VolumeFlags},
     directory_entry::{
         AllocationBitmapDirEntry, DirectoryEntryChain, EntryType, FileAttributes, FileDirEntry,
         FileNameDirEntry, GeneralSecondaryFlags, Location, RAW_ENTRY_LEN, RawDirEntry,
-        StreamExtensionDirEntry, UpcaseTableDirEntry, VolumeLabelDirEntry, calc_checksum,
+        StreamExtensionDirEntry, UpcaseTableDirEntry, VolumeLabelDirEntry, calc_checksum_old,
         is_end_of_directory,
     },
     error::ExFatError,
@@ -17,7 +17,7 @@ use crate::{
     },
     io::{BLOCK_SIZE, Block, BlockDevice},
     upcase_table::UpcaseTable,
-    utils::{calc_dir_entry_set_len, encode_utf16_and_hash},
+    utils::{calc_dir_entry_set_len, encode_utf16_and_hash, read_u16_le},
 };
 use thiserror::Error;
 
@@ -147,6 +147,24 @@ impl FileSystem {
         directory_list(io, &self.details, &self.upcase_table, full_path).await
     }
 
+    async fn set_volume_dirty(
+        &self,
+        io: &mut impl BlockDevice,
+        is_dirty: bool,
+    ) -> Result<(), ExFatError> {
+        let sector_id = 0; // boot sector
+        let mut sector = [0u8; BLOCK_SIZE];
+        sector.copy_from_slice(io.read_sector(sector_id).await?);
+        let mut volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(&sector));
+        volume_flags.set(VolumeFlags::VolumeDirty, is_dirty);
+        sector[106..108].copy_from_slice(&volume_flags.bits().to_le_bytes());
+
+        // TODO: do we need to update a checkum somewhere as a result of this?
+
+        io.write_sector(sector_id, &sector).await?;
+        Ok(())
+    }
+
     async fn get_all_clusters_from(
         &self,
         io: &mut impl BlockDevice,
@@ -182,7 +200,8 @@ impl FileSystem {
             let mut sector_id = file_details.location.sector_id;
             let dir_entry_offset = file_details.location.dir_entry_offset;
 
-            let mut sector = io.read_sector(file_details.location.sector_id).await?;
+            let mut sector = [0u8; BLOCK_SIZE];
+            sector.copy_from_slice(io.read_sector(file_details.location.sector_id).await?);
             let (dir_entries, _remainder) = sector.as_chunks_mut::<RAW_ENTRY_LEN>();
 
             let file_dir_entry = FileDirEntry::from(&dir_entries[dir_entry_offset]);
@@ -192,7 +211,6 @@ impl FileSystem {
             // zero out all directory entries in the directory entry set
             // directory entries can spill over to the next sector but not to the next cluster
             let mut from = dir_entry_offset + 1;
-            let mut tmp: Box<Block> = Box::new([0u8; BLOCK_SIZE]);
             loop {
                 let (dir_entries, _remainder) = sector.as_chunks_mut::<RAW_ENTRY_LEN>();
                 let to = (from + count).min(dir_entries.len());
@@ -202,14 +220,15 @@ impl FileSystem {
                 }
 
                 // we need to do this to acount multiple mutable borrows due to the loop
-                tmp.copy_from_slice(sector.as_slice());
-                io.write_sector(sector_id, &tmp).await?;
+                //  tmp.copy_from_slice(sector.as_slice());
+                io.write_sector(sector_id, &sector).await?;
 
                 if count == 0 {
                     break;
                 } else {
                     sector_id += 1;
-                    sector = io.read_sector(sector_id).await?;
+                    let block = io.read_sector(sector_id).await?;
+                    sector.copy_from_slice(block);
                     from = 0;
                 }
             }
@@ -253,14 +272,26 @@ impl FileSystem {
             // let location = find_empty_dir_entry_set(io, directory_cluster_id, dir_entry_set_len).await?;
             let contents = contents.as_ref();
             let num_clusters =
-                (contents.len() as u64).div_ceil(self.details.cluster_length as u64) as usize;
+                (contents.len() as u64).div_ceil(self.details.cluster_length as u64) as u32;
             let allocation = self
                 .alloc_bitmap
                 .find_free_clusters(io, &self.details, num_clusters, false)
                 .await?;
             match allocation {
                 Allocation::Contiguous { first_cluster } => {
-                    let cluster_id = create_file_dir_entry_at(
+                    self.set_volume_dirty(io, true).await?;
+
+                    self.alloc_bitmap
+                        .mark_allocated_contiguous(
+                            io,
+                            &self.details,
+                            first_cluster,
+                            num_clusters,
+                            true,
+                        )
+                        .await?;
+
+                    create_file_dir_entry_at(
                         io,
                         &self.upcase_table,
                         file_name,
@@ -272,6 +303,22 @@ impl FileSystem {
                         contents.len() as u64,
                     )
                     .await?;
+
+                    // write all blocks one after the next
+                    let mut sector_id = self.details.get_heap_sector_id(first_cluster)?;
+                    let (chunks, remainder) = contents.as_chunks::<BLOCK_SIZE>();
+                    for block in chunks {
+                        io.write_sector(sector_id, block).await?;
+                        sector_id += 1;
+                    }
+                    if remainder.len() > 0 {
+                        let mut block = [0u8; BLOCK_SIZE];
+                        block[..remainder.len()].copy_from_slice(remainder);
+                        io.write_sector(sector_id, &block).await?;
+                    }
+
+                    // TODO: figure out what to do if we fail half way through
+                    self.set_volume_dirty(io, false).await?;
                 }
                 Allocation::FatChain { first_cluster } => {}
             }
@@ -417,7 +464,7 @@ async fn create_file_dir_entry_at(
     }
 
     // calculate and update the set_checksum field
-    let set_checksum = calc_checksum(&dir_entries);
+    let set_checksum = calc_checksum_old(&dir_entries);
     dir_entries[0][2..4].copy_from_slice(&set_checksum.to_le_bytes());
 
     // write to disk

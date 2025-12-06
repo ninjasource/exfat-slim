@@ -1,10 +1,12 @@
+use core::num;
+
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 
 use crate::{
     directory_entry::AllocationBitmapDirEntry,
     error::ExFatError,
     file_system::FileSystemDetails,
-    io::{BLOCK_SIZE, BlockDevice},
+    io::{BLOCK_SIZE, Block, BlockDevice},
 };
 
 #[derive(Debug)]
@@ -58,10 +60,47 @@ impl AllocationBitmap {
                 .push(index);
         }
 
+        self.mark_allocated_by_sector(io, fs, &by_sector_id, allocated)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn mark_allocated_contiguous(
+        &self,
+        io: &mut impl BlockDevice,
+        fs: &FileSystemDetails,
+        first_cluster: u32,
+        num_clusters: u32,
+        allocated: bool,
+    ) -> Result<(), ExFatError> {
+        let mut by_sector_id = BTreeMap::<u32, Vec<usize>>::new();
+        for cluster_id in first_cluster..first_cluster + num_clusters {
+            let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
+            let sector_id = first_sector_id + (cluster_id - 2) / BLOCK_SIZE as u32;
+            let index = (cluster_id as usize - 2) % BLOCK_SIZE;
+            by_sector_id
+                .entry(sector_id)
+                .or_insert(Vec::new())
+                .push(index);
+        }
+
+        self.mark_allocated_by_sector(io, fs, &by_sector_id, allocated)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn mark_allocated_by_sector(
+        &self,
+        io: &mut impl BlockDevice,
+        fs: &FileSystemDetails,
+        by_sector_id: &BTreeMap<u32, Vec<usize>>,
+        allocated: bool,
+    ) -> Result<(), ExFatError> {
         for (sector_id, indices) in by_sector_id {
-            let sector = io.read_sector(sector_id).await?;
+            let mut block = [0u8; BLOCK_SIZE];
+            block.copy_from_slice(io.read_sector(*sector_id).await?);
             for index in indices {
-                let byte = &mut sector[index / 8];
+                let byte = &mut block[index / 8];
                 let bit_offset = 8 - index % 8; // count bits from right to left
                 if allocated {
                     // set the bit
@@ -71,7 +110,9 @@ impl AllocationBitmap {
                     *byte &= !(1 << bit_offset);
                 }
             }
+            io.write_sector(*sector_id, &block).await?;
         }
+
         Ok(())
     }
 
@@ -80,7 +121,7 @@ impl AllocationBitmap {
         &self,
         io: &mut impl BlockDevice,
         fs: &FileSystemDetails,
-        num_clusters: usize,
+        num_clusters: u32,
         only_fat_chain: bool,
     ) -> Result<Allocation, ExFatError> {
         let sector_id = fs.get_heap_sector_id(self.first_cluster)?;
