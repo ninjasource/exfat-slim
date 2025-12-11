@@ -14,17 +14,7 @@ pub struct InMemoryBlockDevice {
 impl BlockDevice for InMemoryBlockDevice {
     async fn read_sector(&mut self, sector_id: u32) -> Result<&Block, Error> {
         let sector_id_with_offset = sector_id + self.sector_offset;
-
-        if sector_id >= 4096 {
-            let cluster_id = ((sector_id - 4096) / 64) + 2;
-            info!(
-                "READ sector {} cluster {}",
-                sector_id_with_offset, cluster_id
-            );
-        } else {
-            info!("READ sector {}", sector_id_with_offset);
-        }
-
+        print("READ", sector_id_with_offset, sector_id);
         let pos = sector_id_with_offset as usize * BLOCK_SIZE;
         self.data_block
             .copy_from_slice(&self.image[pos..pos + BLOCK_SIZE]);
@@ -32,8 +22,24 @@ impl BlockDevice for InMemoryBlockDevice {
         Ok(&mut self.data_block)
     }
 
-    async fn write_sector(&mut self, _sector_id: u32, _block: &Block) -> Result<(), Error> {
-        todo!()
+    async fn write_sector(&mut self, sector_id: u32, block: &Block) -> Result<(), Error> {
+        let sector_id_with_offset = sector_id + self.sector_offset;
+        print("WRITE", sector_id_with_offset, sector_id);
+        let pos = sector_id_with_offset as usize * BLOCK_SIZE;
+        self.image[pos..pos + BLOCK_SIZE].copy_from_slice(block);
+        Ok(())
+    }
+}
+
+fn print(direction: &str, sector_id_with_offset: u32, sector_id: u32) {
+    if sector_id >= 4096 {
+        let cluster_id = ((sector_id - 4096) / 64) + 2;
+        info!(
+            "{} sector {} cluster {}",
+            direction, sector_id_with_offset, cluster_id
+        );
+    } else {
+        info!("{} sector {}", direction, sector_id_with_offset);
     }
 }
 

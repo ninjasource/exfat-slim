@@ -33,6 +33,19 @@ pub fn encode_utf16_and_hash(s: &str, upcase_table: &UpcaseTable) -> (Vec<u16>, 
     }
     let file_name_hash = calc_hash_u16(file_name.as_slice());
 
+    // this copy is not upcased
+    let file_name: Vec<u16> = s.encode_utf16().collect();
+
+    (file_name, file_name_hash)
+}
+
+pub fn encode_utf16_upcase_and_hash(s: &str, upcase_table: &UpcaseTable) -> (Vec<u16>, u16) {
+    let mut file_name: Vec<u16> = s.encode_utf16().collect();
+    for c in file_name.iter_mut() {
+        *c = upcase_table.upcase(*c)
+    }
+    let file_name_hash = calc_hash_u16(file_name.as_slice());
+
     (file_name, file_name_hash)
 }
 

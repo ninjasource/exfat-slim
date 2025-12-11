@@ -1,6 +1,6 @@
 use core::num;
 
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
+use alloc::{collections::btree_map::BTreeMap, vec, vec::Vec};
 
 use crate::{
     directory_entry::AllocationBitmapDirEntry,
@@ -20,8 +20,13 @@ pub struct AllocationBitmap {
 }
 
 pub enum Allocation {
-    Contiguous { first_cluster: u32 },
-    FatChain { first_cluster: u32 },
+    Contiguous {
+        first_cluster: u32,
+        num_clusters: u32,
+    },
+    FatChain {
+        clusters: Vec<u32>,
+    },
 }
 
 impl AllocationBitmap {
@@ -42,6 +47,15 @@ impl AllocationBitmap {
         }
     }
 
+    fn clc_allocation_position(
+        first_sector_id: u32,
+        cluster_id: u32,
+    ) -> Result<(u32, usize), ExFatError> {
+        let sector_id = first_sector_id + (cluster_id - 2) / BLOCK_SIZE as u32;
+        let index = (cluster_id as usize - 2) % BLOCK_SIZE;
+        Ok((sector_id, index))
+    }
+
     pub async fn mark_allocated(
         &self,
         io: &mut impl BlockDevice,
@@ -50,10 +64,10 @@ impl AllocationBitmap {
         allocated: bool,
     ) -> Result<(), ExFatError> {
         let mut by_sector_id = BTreeMap::<u32, Vec<usize>>::new();
+        let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
+
         for cluster_id in cluster_ids {
-            let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
-            let sector_id = first_sector_id + (cluster_id - 2) / BLOCK_SIZE as u32;
-            let index = (*cluster_id as usize - 2) % BLOCK_SIZE;
+            let (sector_id, index) = Self::clc_allocation_position(first_sector_id, *cluster_id)?;
             by_sector_id
                 .entry(sector_id)
                 .or_insert(Vec::new())
@@ -74,10 +88,10 @@ impl AllocationBitmap {
         allocated: bool,
     ) -> Result<(), ExFatError> {
         let mut by_sector_id = BTreeMap::<u32, Vec<usize>>::new();
+        let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
+
         for cluster_id in first_cluster..first_cluster + num_clusters {
-            let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
-            let sector_id = first_sector_id + (cluster_id - 2) / BLOCK_SIZE as u32;
-            let index = (cluster_id as usize - 2) % BLOCK_SIZE;
+            let (sector_id, index) = Self::clc_allocation_position(first_sector_id, cluster_id)?;
             by_sector_id
                 .entry(sector_id)
                 .or_insert(Vec::new())
@@ -101,7 +115,7 @@ impl AllocationBitmap {
             block.copy_from_slice(io.read_sector(*sector_id).await?);
             for index in indices {
                 let byte = &mut block[index / 8];
-                let bit_offset = 8 - index % 8; // count bits from right to left
+                let bit_offset = 7 - index % 8; // count bits from right to left
                 if allocated {
                     // set the bit
                     *byte |= 1 << bit_offset;
@@ -172,6 +186,7 @@ impl AllocationBitmap {
                             if counter == num_clusters {
                                 return Ok(Allocation::Contiguous {
                                     first_cluster: cluster_id,
+                                    num_clusters,
                                 });
                             }
                         } else {
@@ -188,7 +203,7 @@ impl AllocationBitmap {
         // we could not find a contiguous block of clusters
         return match first_free {
             Some(first_free) if first_free <= self.max_cluster_id => Ok(Allocation::FatChain {
-                first_cluster: first_free,
+                clusters: vec![first_free],
             }),
             _ => Err(ExFatError::DiskFull),
         };

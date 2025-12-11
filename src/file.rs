@@ -11,7 +11,7 @@ use crate::{
     file_system::FileSystemDetails,
     io::{BLOCK_SIZE, BlockDevice},
     upcase_table::UpcaseTable,
-    utils::{calc_dir_entry_set_len, encode_utf16_and_hash},
+    utils::{calc_dir_entry_set_len, encode_utf16_upcase_and_hash},
 };
 
 #[derive(Debug)]
@@ -238,7 +238,7 @@ pub struct ExactNameFilter<'a> {
 
 impl<'a> ExactNameFilter<'a> {
     pub fn new(file_name_str: &str, upcase_table: &'a UpcaseTable, is_directory: bool) -> Self {
-        let (file_name, file_name_hash) = encode_utf16_and_hash(file_name_str, upcase_table);
+        let (file_name, file_name_hash) = encode_utf16_upcase_and_hash(file_name_str, upcase_table);
         Self {
             upcase_table,
             file_name,
