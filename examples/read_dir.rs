@@ -12,7 +12,7 @@ async fn main() -> Result<(), ExFatError> {
     let mut io = InMemoryBlockDevice::new();
     let fs = FileSystem::new(&mut io).await?;
 
-    let path = ""; // or "/temp2/hello2"
+    let path = "/";
     let mut list = fs.read_dir(&mut io, path).await?;
     while let Some(item) = list.next(&mut io).await? {
         info!("{:?}", item);

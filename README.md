@@ -59,7 +59,7 @@ Implemented so far:
 - Support fo multiple nested directories
 - Delete a file
 - Write a file
-- Create a direcory
+- Create a directory
 
 Not yet implemented (soon though):
 - Dual async and blocking support

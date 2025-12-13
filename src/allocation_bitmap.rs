@@ -9,14 +9,15 @@ use crate::{
     io::{BLOCK_SIZE, Block, BlockDevice},
 };
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug)]
 pub struct AllocationBitmap {
     /// start of the allocation bitmap table
     pub first_cluster: u32,
     /// size, in sectors, of the allocation bitmap
-    num_sectors: u32,
+    pub num_sectors: u32,
     /// max cluster_id in the bitmap table
-    max_cluster_id: u32,
+    pub max_cluster_id: u32,
 }
 
 pub enum Allocation {
@@ -31,12 +32,8 @@ pub enum Allocation {
 
 impl AllocationBitmap {
     pub fn new(alloc_bitmap: &AllocationBitmapDirEntry) -> Self {
-        let extra_sector = if alloc_bitmap.data_length as usize % BLOCK_SIZE > 0 {
-            1
-        } else {
-            0
-        };
-        let num_sectors = (alloc_bitmap.data_length as u32 / BLOCK_SIZE as u32) + extra_sector;
+        let num_sectors = alloc_bitmap.data_length.div_ceil(BLOCK_SIZE as u64) as u32;
+
         // the allocation bitmap starts at cluster id 2
         let max_cluster_id = alloc_bitmap.data_length as u32 * size_of::<u8>() as u32 + 2;
 

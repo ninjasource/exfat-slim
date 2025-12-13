@@ -1,3 +1,4 @@
+use crate::debug;
 use alloc::{string::String, vec, vec::Vec};
 use core::str::from_utf8;
 
@@ -332,6 +333,7 @@ pub async fn directory_list(
     } else {
         match get_leaf_file_entry(io, fs, upcase_table, full_path, true).await? {
             Some(file_details) => {
+                debug!("{file_details:?}");
                 if file_details.attributes.contains(FileAttributes::Directory) {
                     file_details.first_cluster
                 } else {

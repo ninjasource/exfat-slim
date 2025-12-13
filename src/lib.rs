@@ -14,3 +14,9 @@ pub mod io;
 pub mod mocks;
 pub mod upcase_table;
 pub mod utils;
+
+#[cfg(feature = "defmt")]
+pub use defmt::*;
+
+#[cfg(not(feature = "defmt"))]
+pub use log::*;

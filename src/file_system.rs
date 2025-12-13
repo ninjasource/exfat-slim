@@ -29,6 +29,7 @@ pub enum Error {
     InvalidClusterId(u32),
 }
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone)]
 pub struct FileSystemDetails {
     /// volume-relative sector offset of the cluster heap
@@ -71,6 +72,7 @@ impl FileSystemDetails {
     }
 }
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug)]
 pub struct FileSystem {
     fs: FileSystemDetails,
@@ -678,4 +680,57 @@ async fn read_root_dir(
     let file_system = FileSystem::new_inner(details, upcase_table, alloc_bitmap);
 
     Ok(file_system)
+}
+
+#[cfg(test)]
+mod tests {
+
+    use alloc::vec;
+
+    use super::*;
+    use crate::allocation_bitmap;
+    use crate::directory_entry::BitmapFlags;
+    use crate::mocks::InMemoryBlockDevice;
+
+    fn dummy_fs() -> FileSystem {
+        let fs = FileSystemDetails {
+            cluster_heap_offset: 3,
+            fat_offset: 1,          // fat table will consime 2 sectors
+            sectors_per_cluster: 2, // very small cluster size
+            cluster_length: 200,
+            first_cluster_of_root_dir: 4,
+        };
+
+        let upcase_table = UpcaseTable::default();
+
+        let alloc_bitmap = AllocationBitmap {
+            first_cluster: 2,
+            num_sectors: fs.cluster_length.div_ceil(BLOCK_SIZE as u32),
+            max_cluster_id: fs.cluster_length,
+        };
+
+        FileSystem {
+            fs,
+            upcase_table,
+            alloc_bitmap,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_empty_dir_in_root() -> Result<(), ExFatError> {
+        color_backtrace::install();
+        let mut sectors = vec![[0; BLOCK_SIZE]; 100];
+        let mut io = InMemoryBlockDevice {
+            sectors: &mut sectors,
+        };
+
+        let fs = dummy_fs();
+
+        fs.create_directory(&mut io, "/hello").await?;
+        let exists = fs.exists(&mut io, "/hello").await?;
+
+        assert!(exists);
+
+        Ok(())
+    }
 }
