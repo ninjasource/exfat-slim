@@ -1,7 +1,8 @@
 use bitflags::bitflags;
 use thiserror::Error;
 
-use crate::{
+use super::{
+    bisync,
     error::ExFatError,
     fat::next_cluster_in_fat_chain,
     file_system::FileSystemDetails,
@@ -444,6 +445,7 @@ impl DirectoryEntryChain {
         Ok(sector_id)
     }
 
+    #[bisync]
     pub async fn next<'a>(
         &'a mut self,
         io: &mut impl BlockDevice,
@@ -484,6 +486,7 @@ impl DirectoryEntryChain {
     }
 }
 
+#[bisync]
 pub async fn next_file_dir_entry(
     io: &mut impl BlockDevice,
     entries: &mut DirectoryEntryChain,

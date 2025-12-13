@@ -3,7 +3,7 @@ use core::str::{Utf8Error, from_utf8};
 use bitflags::bitflags;
 use thiserror::Error;
 
-use crate::utils::{read_u16_le, read_u32_le, read_u64_le};
+use super::utils::{read_u16_le, read_u32_le, read_u64_le};
 
 #[derive(Error, Debug)]
 pub enum Error {

@@ -1,8 +1,9 @@
+use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
 use log::info;
 
+use crate::common::asynchronous::InMemoryBlockDevice;
+
 mod common;
-use crate::common::InMemoryBlockDevice;
-use exfat_slim::{error::ExFatError, file_system::FileSystem};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), ExFatError> {
@@ -13,9 +14,12 @@ async fn main() -> Result<(), ExFatError> {
     info!("reading boot sector of file system");
     let mut io = InMemoryBlockDevice::new();
     let fs = FileSystem::new(&mut io).await?;
+    info!("fs {:?}", fs);
 
+    // TODO: figure put why this does not work
     //let directory = "/bubble/gum";
     //let full_path = format!("{directory}/blue.txt");
+
     let directory = "/temp2/hello2/shoe";
     let full_path = format!("{directory}/test1.txt");
 
@@ -45,9 +49,9 @@ async fn main() -> Result<(), ExFatError> {
     info!("{full_path} file exists: {exists}");
 
     // create an empty directory
-    //info!("creating empty directory: my_dir");
-    //fs.create_directory(&mut io, &format!("{directory}/my_dir"))
-    //    .await?;
+    info!("creating empty directory: my_dir");
+    fs.create_directory(&mut io, &format!("{directory}/my_dir"))
+        .await?;
 
     // confirm that the file was created in the directory
     info!("list entries in directory {directory}");

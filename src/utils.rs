@@ -1,6 +1,6 @@
 use alloc::{collections::btree_map::Range, string::String, vec, vec::Vec};
 
-use crate::{error::ExFatError, upcase_table::UpcaseTable};
+use super::{error::ExFatError, upcase_table::UpcaseTable};
 
 pub fn read_u16_le<const INDEX: usize, const N: usize>(value: &[u8; N]) -> u16 {
     let mut tmp = [0u8; size_of::<u16>()];

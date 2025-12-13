@@ -2,7 +2,8 @@ use crate::debug;
 use alloc::{string::String, vec, vec::Vec};
 use core::str::from_utf8;
 
-use crate::{
+use super::{
+    bisync,
     directory_entry::{
         DirectoryEntryChain, FileAttributes, FileNameDirEntry, GeneralSecondaryFlags, Location,
         StreamExtensionDirEntry, next_file_dir_entry,
@@ -57,6 +58,7 @@ impl ReadOnlyFile {
     // we assume that we have already checked for the end of file condition
     // if not then the fat chain will return an error variant for end of fat chain.
     // worse, if there is no fat chain then the current cluster will be set to data not part of this file
+    #[bisync]
     async fn get_current_or_next_cluster(
         &mut self,
         io: &mut impl BlockDevice,
@@ -84,6 +86,7 @@ impl ReadOnlyFile {
         self.cluster_offset += num_bytes as u32;
     }
 
+    #[bisync]
     pub async fn read(
         &mut self,
         io: &mut impl BlockDevice,
@@ -119,6 +122,7 @@ impl ReadOnlyFile {
         Ok(Some(num_bytes))
     }
 
+    #[bisync]
     pub async fn read_to_end(&mut self, io: &mut impl BlockDevice) -> Result<Vec<u8>, ExFatError> {
         let mut buf = vec![0; BLOCK_SIZE];
         let mut contents = Vec::with_capacity(self.valid_data_length as usize);
@@ -130,6 +134,7 @@ impl ReadOnlyFile {
         Ok(contents)
     }
 
+    #[bisync]
     pub async fn read_to_string(
         &mut self,
         io: &mut impl BlockDevice,
@@ -142,6 +147,7 @@ impl ReadOnlyFile {
     }
 }
 
+#[bisync]
 pub async fn next_file_entry(
     io: &mut impl BlockDevice,
     entries: &mut DirectoryEntryChain,
@@ -149,13 +155,10 @@ pub async fn next_file_entry(
 ) -> Result<Option<FileDetails>, ExFatError> {
     'outer: loop {
         if let Some((file_dir_entry, location)) = next_file_dir_entry(io, entries).await? {
-            let is_directory = file_dir_entry
-                .file_attributes
-                .contains(FileAttributes::Directory);
             if let Some((stream_entry, _location)) = entries.next(io).await? {
                 // TODO: check entry type
                 let stream_entry: StreamExtensionDirEntry = stream_entry.into();
-                if !filter.hash(stream_entry.name_hash, is_directory) {
+                if !filter.hash(stream_entry.name_hash, file_dir_entry.file_attributes) {
                     continue 'outer;
                 }
 
@@ -214,14 +217,14 @@ fn decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
 }
 
 pub trait DirectoryEntryFilter {
-    fn hash(&self, file_name_hash: u16, is_directory: bool) -> bool;
+    fn hash(&self, file_name_hash: u16, file_attributes: FileAttributes) -> bool;
     fn file_name(&self, file_name: &[u16]) -> bool;
 }
 
 pub struct AllPassFilter {}
 
 impl DirectoryEntryFilter for AllPassFilter {
-    fn hash(&self, _file_name_hash: u16, _is_directory: bool) -> bool {
+    fn hash(&self, _file_name_hash: u16, _file_attributes: FileAttributes) -> bool {
         true
     }
 
@@ -234,24 +237,33 @@ pub struct ExactNameFilter<'a> {
     upcase_table: &'a UpcaseTable,
     file_name: Vec<u16>,
     file_name_hash: u16,
-    is_directory: bool,
+    file_attributes: Option<FileAttributes>,
 }
 
 impl<'a> ExactNameFilter<'a> {
-    pub fn new(file_name_str: &str, upcase_table: &'a UpcaseTable, is_directory: bool) -> Self {
+    pub fn new(
+        file_name_str: &str,
+        upcase_table: &'a UpcaseTable,
+        file_attributes: Option<FileAttributes>,
+    ) -> Self {
         let (file_name, file_name_hash) = encode_utf16_upcase_and_hash(file_name_str, upcase_table);
         Self {
             upcase_table,
             file_name,
             file_name_hash,
-            is_directory,
+            file_attributes,
         }
     }
 }
 
 impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
-    fn hash(&self, file_name_hash: u16, is_directory: bool) -> bool {
-        self.file_name_hash == file_name_hash && self.is_directory == is_directory
+    fn hash(&self, file_name_hash: u16, file_attributes: FileAttributes) -> bool {
+        match self.file_attributes {
+            Some(attributes) => {
+                self.file_name_hash == file_name_hash && file_attributes.contains(attributes)
+            }
+            None => self.file_name_hash == file_name_hash,
+        }
     }
 
     fn file_name(&self, file_name: &[u16]) -> bool {
@@ -268,12 +280,13 @@ impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
     }
 }
 
+#[bisync]
 async fn get_leaf_file_entry(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     full_path: &str,
-    is_directory: bool,
+    file_attributes: Option<FileAttributes>,
 ) -> Result<Option<FileDetails>, ExFatError> {
     let mut splits = full_path
         .split(['/', '\\'])
@@ -285,9 +298,15 @@ async fn get_leaf_file_entry(
 
     while let Some(part) = splits.next() {
         let is_last = splits.peek().is_none();
-        let is_directory_filter = is_directory || !is_last;
+        let attributes = if is_last {
+            file_attributes
+        } else {
+            Some(FileAttributes::Directory)
+        };
 
-        let filter = ExactNameFilter::new(part, upcase_table, is_directory_filter);
+        //let is_directory_filter = is_directory || !is_last;
+
+        let filter = ExactNameFilter::new(part, upcase_table, attributes);
         let mut entries = DirectoryEntryChain::new(cluster_id, fs);
         let file_details = next_file_entry(io, &mut entries, &filter).await?;
 
@@ -322,6 +341,7 @@ fn is_root_directory(path: &str) -> bool {
     splits.peek().is_none()
 }
 
+#[bisync]
 pub async fn directory_list(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
@@ -331,7 +351,15 @@ pub async fn directory_list(
     let cluster_id = if is_root_directory(full_path) {
         fs.first_cluster_of_root_dir
     } else {
-        match get_leaf_file_entry(io, fs, upcase_table, full_path, true).await? {
+        match get_leaf_file_entry(
+            io,
+            fs,
+            upcase_table,
+            full_path,
+            Some(FileAttributes::Directory),
+        )
+        .await?
+        {
             Some(file_details) => {
                 debug!("{file_details:?}");
                 if file_details.attributes.contains(FileAttributes::Directory) {
@@ -353,6 +381,7 @@ pub struct DirectoryIterator {
 }
 
 impl DirectoryIterator {
+    #[bisync]
     pub async fn next(
         &mut self,
         io: &mut impl BlockDevice,
@@ -362,30 +391,35 @@ impl DirectoryIterator {
     }
 }
 
-pub async fn find_file(
+#[bisync]
+pub async fn find_file_or_directory(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     full_path: &str,
+    file_attributes: Option<FileAttributes>,
 ) -> Result<FileDetails, ExFatError> {
-    let file_details = find_file_inner(io, fs, upcase_table, full_path).await?;
+    let file_details = find_file_inner(io, fs, upcase_table, full_path, file_attributes).await?;
     Ok(file_details)
 }
 
 // TODO: figure out visibility (pub or private)
+#[bisync]
 pub async fn find_file_inner(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     full_path: &str,
+    file_attributes: Option<FileAttributes>,
 ) -> Result<FileDetails, ExFatError> {
-    match get_leaf_file_entry(io, fs, upcase_table, full_path, false).await? {
+    match get_leaf_file_entry(io, fs, upcase_table, full_path, file_attributes).await? {
         Some(file_details) => {
-            if file_details.attributes.contains(FileAttributes::Archive) {
-                Ok(file_details)
-            } else {
-                Err(ExFatError::FileNotFound)
-            }
+            Ok(file_details)
+            // if file_details.attributes.contains(FileAttributes::Archive) {
+            //     Ok(file_details)
+            // } else {
+            //     Err(ExFatError::FileNotFound)
+            // }
         }
         None => Err(ExFatError::FileNotFound),
     }

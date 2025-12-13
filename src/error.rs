@@ -1,11 +1,11 @@
 use thiserror::Error;
 
-use crate::{boot_sector, directory_entry, file_system, io};
+use super::{boot_sector, directory_entry, file_system, io};
 
 #[derive(Error, Debug)]
 pub enum ExFatError {
     #[error("io")]
-    Io(#[from] io::Error),
+    Io(#[from] io::IoError),
 
     #[error("directory entry ({0:?})")]
     DirectoryEntry(#[from] directory_entry::Error),

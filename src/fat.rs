@@ -1,9 +1,11 @@
-use crate::{
+use super::{
+    bisync,
     error::ExFatError,
     io::{BLOCK_SIZE, BlockDevice},
 };
 
 /// gets the next cluster_id in the fat chain
+#[bisync]
 pub async fn next_cluster_in_fat_chain(
     io: &mut impl BlockDevice,
     fat_offset: u32, // from boot_sector

@@ -2,11 +2,13 @@ use core::num;
 
 use alloc::{collections::btree_map::BTreeMap, vec, vec::Vec};
 
-use crate::{
+use super::{
+    bisync,
     directory_entry::AllocationBitmapDirEntry,
     error::ExFatError,
     file_system::FileSystemDetails,
     io::{BLOCK_SIZE, Block, BlockDevice},
+    only_async,
 };
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -53,6 +55,7 @@ impl AllocationBitmap {
         Ok((sector_id, index))
     }
 
+    #[bisync]
     pub async fn mark_allocated(
         &self,
         io: &mut impl BlockDevice,
@@ -76,6 +79,7 @@ impl AllocationBitmap {
         Ok(())
     }
 
+    #[bisync]
     pub async fn mark_allocated_contiguous(
         &self,
         io: &mut impl BlockDevice,
@@ -100,6 +104,7 @@ impl AllocationBitmap {
         Ok(())
     }
 
+    #[bisync]
     pub async fn mark_allocated_by_sector(
         &self,
         io: &mut impl BlockDevice,
@@ -128,6 +133,7 @@ impl AllocationBitmap {
     }
 
     /// locates the next free set of contiguous clusters
+    #[bisync]
     pub async fn find_free_clusters(
         &self,
         io: &mut impl BlockDevice,
@@ -136,6 +142,7 @@ impl AllocationBitmap {
         only_fat_chain: bool,
     ) -> Result<Allocation, ExFatError> {
         let sector_id = fs.get_heap_sector_id(self.first_cluster)?;
+        crate::debug!("find_free_clusters sector_id {}", sector_id);
 
         let mut counter = 0;
         let mut cluster_id: Option<u32> = None;
@@ -147,11 +154,19 @@ impl AllocationBitmap {
             let (bytes, _remainder) = buf.as_chunks::<4>();
             for (index, bytes) in bytes.iter().enumerate() {
                 let val = u32::from_be_bytes(*bytes);
+                crate::debug!("find_free_clusters index {} val {}", index, val);
                 // fast batch check for a free cluster
                 if val != u32::MAX {
                     // locate the first free cluster
-                    for bit in (0..u32::BITS).rev() {
-                        if val & (1 << bit) == 0 {
+                    for bit in 0..u32::BITS {
+                        crate::debug!(
+                            "find_free_clusters bit {} val & (1 << (u32::BITS - bit - 1)) {:032b}",
+                            bit,
+                            val & (1 << (u32::BITS - bit - 1))
+                        );
+
+                        // the most significant bit is position 0
+                        if val & (1 << (u32::BITS - bit - 1)) == 0 {
                             // happy path
                             let cluster_id = match cluster_id {
                                 Some(cluster_id) => {
@@ -160,8 +175,17 @@ impl AllocationBitmap {
                                 }
                                 None => {
                                     let cluster_id = sector_offset as u32 * BLOCK_SIZE as u32
-                                        + index as u32 * bit as u32
-                                        + 2;
+                                        + index as u32 * u32::BITS
+                                        + bit as u32;
+
+                                    // TODO: figure out why following the spec here seems to break things
+                                    // position 0 cluster_id starts at 2 (apparently for historical reasons)
+                                    //if cluster_id < 2 {
+                                    //    continue;
+                                    //}
+                                    //let cluster_id = cluster_id - 2;
+
+                                    crate::debug!("found free cluster_id {}", cluster_id);
 
                                     if first_free.is_none() {
                                         // keep track of the first free cluster we ever found
@@ -175,7 +199,7 @@ impl AllocationBitmap {
                                 }
                             };
 
-                            // abandon attepting to
+                            // abandon attepting to find an allocation
                             if cluster_id > self.max_cluster_id {
                                 break;
                             }
@@ -207,12 +231,12 @@ impl AllocationBitmap {
     }
 }
 
+#[only_async]
 #[cfg(test)]
 mod tests {
 
+    use super::super::{directory_entry::BitmapFlags, mocks::InMemoryBlockDevice};
     use super::*;
-    use crate::directory_entry::BitmapFlags;
-    use crate::mocks::InMemoryBlockDevice;
 
     #[tokio::test]
     async fn find_free_clusteres_test() {
@@ -237,6 +261,5 @@ mod tests {
             .find_free_clusters(&mut io, &fs, 1, false)
             .await
             .unwrap();
-        //fut.poll();
     }
 }

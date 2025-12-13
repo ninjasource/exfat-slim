@@ -1,13 +1,14 @@
 mod common;
-use crate::common::InMemoryBlockDevice;
-use exfat_slim::{error::ExFatError, file_system::FileSystem};
+use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
 use log::info;
+
+use crate::common::asynchronous::InMemoryBlockDevice;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), ExFatError> {
     env_logger::init();
     color_backtrace::install();
-    info!("reading directory list");
+    info!("reading root dir");
 
     let mut io = InMemoryBlockDevice::new();
     let fs = FileSystem::new(&mut io).await?;

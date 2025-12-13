@@ -1,6 +1,6 @@
-use crate::{
-    directory_entry::UpcaseTableDirEntry, error::ExFatError, file_system::FileSystemDetails,
-    io::BlockDevice,
+use super::{
+    bisync, directory_entry::UpcaseTableDirEntry, error::ExFatError,
+    file_system::FileSystemDetails, io::BlockDevice,
 };
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -26,6 +26,7 @@ impl Default for UpcaseTable {
 }
 
 impl UpcaseTable {
+    #[bisync]
     pub async fn load(
         &mut self,
         dir_entry: &UpcaseTableDirEntry,

@@ -1,7 +1,8 @@
 use alloc::{boxed::Box, string::String, vec::Vec};
 
-use crate::{
+use super::{
     allocation_bitmap::{Allocation, AllocationBitmap},
+    bisync,
     boot_sector::{BootSector, VolumeFlags},
     directory_entry::{
         AllocationBitmapDirEntry, DirectoryEntryChain, EntryType, FileAttributes, FileDirEntry,
@@ -12,10 +13,11 @@ use crate::{
     error::ExFatError,
     fat::next_cluster_in_fat_chain,
     file::{
-        DirectoryIterator, ExactNameFilter, FileDetails, ReadOnlyFile, directory_list, find_file,
-        find_file_inner, next_file_entry,
+        DirectoryIterator, ExactNameFilter, FileDetails, ReadOnlyFile, directory_list,
+        find_file_inner, find_file_or_directory, next_file_entry,
     },
     io::{BLOCK_SIZE, Block, BlockDevice},
+    only_async,
     upcase_table::UpcaseTable,
     utils::{
         calc_dir_entry_set_len, encode_utf16_and_hash, encode_utf16_upcase_and_hash, read_u16_le,
@@ -93,6 +95,7 @@ impl FileSystem {
         }
     }
 
+    #[bisync]
     pub async fn new(io: &mut impl BlockDevice) -> Result<Self, ExFatError> {
         // the boot sector is always at sector_id 0 and everything is relative from there
         // you need to offset the sector_id in your block device if there is a master boot record before this
@@ -102,22 +105,31 @@ impl FileSystem {
         Ok(fs)
     }
 
+    #[bisync]
     pub async fn open(
         &self,
         io: &mut impl BlockDevice,
         full_path: &str,
     ) -> Result<ReadOnlyFile, ExFatError> {
-        let file_details = find_file(io, &self.fs, &self.upcase_table, full_path).await?;
+        let file_details = find_file_or_directory(
+            io,
+            &self.fs,
+            &self.upcase_table,
+            full_path,
+            Some(FileAttributes::Archive),
+        )
+        .await?;
         let file = ReadOnlyFile::new(&self.fs, &file_details);
         Ok(file)
     }
 
+    #[bisync]
     pub async fn exists(
         &self,
         io: &mut impl BlockDevice,
         full_path: &str,
     ) -> Result<bool, ExFatError> {
-        match find_file(io, &self.fs, &self.upcase_table, full_path).await {
+        match find_file_or_directory(io, &self.fs, &self.upcase_table, full_path, None).await {
             Ok(_file) => Ok(true),
             Err(ExFatError::FileNotFound) => Ok(false),
             Err(ExFatError::DirectoryNotFound) => Ok(false),
@@ -125,6 +137,7 @@ impl FileSystem {
         }
     }
 
+    #[bisync]
     pub async fn read(
         &self,
         io: &mut impl BlockDevice,
@@ -134,6 +147,7 @@ impl FileSystem {
         file.read_to_end(io).await
     }
 
+    #[bisync]
     pub async fn read_to_string(
         &self,
         io: &mut impl BlockDevice,
@@ -143,6 +157,7 @@ impl FileSystem {
         file.read_to_string(io).await
     }
 
+    #[bisync]
     pub async fn read_dir(
         &self,
         io: &mut impl BlockDevice,
@@ -151,6 +166,7 @@ impl FileSystem {
         directory_list(io, &self.fs, &self.upcase_table, full_path).await
     }
 
+    #[bisync]
     async fn set_volume_dirty(
         &self,
         io: &mut impl BlockDevice,
@@ -166,6 +182,7 @@ impl FileSystem {
         Ok(())
     }
 
+    #[bisync]
     async fn get_all_clusters_from(
         &self,
         io: &mut impl BlockDevice,
@@ -185,6 +202,7 @@ impl FileSystem {
         Ok(clusters)
     }
 
+    #[bisync]
     async fn delete_inner(
         &self,
         io: &mut impl BlockDevice,
@@ -243,18 +261,27 @@ impl FileSystem {
     /// deletes a file
     /// returns an error if the file does not exist or something else failed
     /// this will not delete the containing directory
+    #[bisync]
     pub async fn delete(
         &self,
         io: &mut impl BlockDevice,
         full_path: &str,
     ) -> Result<(), ExFatError> {
         // TODO: check if we are required to mark the file system as dirty during this operation
-        let file_details = find_file_inner(io, &self.fs, &self.upcase_table, full_path).await?;
+        let file_details = find_file_inner(
+            io,
+            &self.fs,
+            &self.upcase_table,
+            full_path,
+            Some(FileAttributes::Archive),
+        )
+        .await?;
         self.delete_inner(io, &file_details).await?;
         Ok(())
     }
 
     /// creates a directory recursively (the dir path can be nested)
+    #[bisync]
     pub async fn create_directory(
         &self,
         io: &mut impl BlockDevice,
@@ -277,6 +304,7 @@ impl FileSystem {
     /// the file will be overwritten if it already exists.
     /// this function will create any directories in the path that do not already exist.
     /// relative paths are not supported.
+    #[bisync]
     pub async fn write(
         &self,
         io: &mut impl BlockDevice,
@@ -284,7 +312,15 @@ impl FileSystem {
         contents: impl AsRef<[u8]>,
     ) -> Result<(), ExFatError> {
         // delete the file if it already exists
-        match find_file_inner(io, &self.fs, &self.upcase_table, full_path).await {
+        match find_file_inner(
+            io,
+            &self.fs,
+            &self.upcase_table,
+            full_path,
+            Some(FileAttributes::Archive),
+        )
+        .await
+        {
             Ok(file_details) => self.delete_inner(io, &file_details).await?,
             Err(ExFatError::FileNotFound) => {
                 // ignore
@@ -352,6 +388,7 @@ impl FileSystem {
                     if remainder.len() > 0 {
                         let mut block = [0u8; BLOCK_SIZE];
                         block[..remainder.len()].copy_from_slice(remainder);
+                        crate::debug!("last sector {}", sector_id);
                         io.write_sector(sector_id, &block).await?;
                     }
 
@@ -375,6 +412,7 @@ fn path_to_iter(full_path: &str) -> impl Iterator<Item = &str> {
         .map(|c| c.trim())
 }
 
+#[bisync]
 async fn get_or_create_directory(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
@@ -388,7 +426,7 @@ async fn get_or_create_directory(
     while let Some(dir_name) = names.next() {
         let is_last = names.peek().is_none();
 
-        let filter = ExactNameFilter::new(dir_name, upcase_table, true);
+        let filter = ExactNameFilter::new(dir_name, upcase_table, Some(FileAttributes::Directory));
         let mut entries = DirectoryEntryChain::new(cluster_id, fs);
         let file_details = next_file_entry(io, &mut entries, &filter).await?;
 
@@ -396,6 +434,11 @@ async fn get_or_create_directory(
             Some(file_details) => {
                 // directory already exists
                 cluster_id = file_details.first_cluster;
+                crate::debug!(
+                    "directory '{}' already exists at cluster {}",
+                    dir_name,
+                    cluster_id
+                )
             }
             None => {
                 // directory does not exist, create it
@@ -421,7 +464,13 @@ async fn get_or_create_directory(
                 )
                 .await?;
 
+                // mark cluster used to store the directory as allocated
+                alloc_bitmap
+                    .mark_allocated(io, fs, &[cluster_id], true)
+                    .await?;
+
                 cluster_id = first_cluster;
+                crate::debug!("directory '{}' created at cluster {}", dir_name, cluster_id)
             }
         }
 
@@ -437,6 +486,7 @@ async fn get_or_create_directory(
 /// assume that the file dir entry does NOT already exist
 /// TODO: this is a fairly dangerous assumption, try to enforse it without redundant checks
 /// assume that name is valid
+#[bisync]
 async fn create_file_dir_entry_at(
     io: &mut impl BlockDevice,
     upcase_table: &UpcaseTable,
@@ -452,7 +502,12 @@ async fn create_file_dir_entry_at(
     let dir_entry_set_len = calc_dir_entry_set_len(&utf16_name);
     let location =
         find_empty_dir_entry_set(io, directory_cluster_id, dir_entry_set_len, fs).await?;
-
+    crate::debug!(
+        "create_file_dir_entry_at directory_cluster_id {} first_cluster {} location {:?}",
+        directory_cluster_id,
+        first_cluster,
+        location
+    );
     let mut dir_entries: Vec<RawDirEntry> = Vec::with_capacity(dir_entry_set_len);
 
     // write file directory entry set
@@ -505,11 +560,18 @@ async fn create_file_dir_entry_at(
     let set_checksum = calc_checksum_old(&dir_entries);
     dir_entries[0][2..4].copy_from_slice(&set_checksum.to_le_bytes());
 
+    crate::debug!(
+        "writing entries to location {:?}: {:?}",
+        location,
+        dir_entries
+    );
+
     // write to disk
     write_dir_entries_to_disk(io, location, dir_entries).await?;
     Ok(())
 }
 
+#[bisync]
 async fn write_dir_entries_to_disk(
     io: &mut impl BlockDevice,
     location: Location,
@@ -548,6 +610,7 @@ async fn write_dir_entries_to_disk(
     Ok(())
 }
 
+#[bisync]
 async fn find_empty_dir_entry_set(
     io: &mut impl BlockDevice,
     cluster_id: u32,
@@ -591,6 +654,7 @@ fn split_path(full_path: &str) -> Option<(&str, &str)> {
         .map(|index| (full_path[..index].trim(), full_path[index + 1..].trim()))
 }
 
+#[bisync]
 async fn read_boot_sector(
     io: &mut impl BlockDevice,
     sector_id: u32,
@@ -601,6 +665,7 @@ async fn read_boot_sector(
     Ok(boot_sector)
 }
 
+#[bisync]
 async fn read_root_dir(
     io: &mut impl BlockDevice,
     details: FileSystemDetails,
@@ -682,53 +747,60 @@ async fn read_root_dir(
     Ok(file_system)
 }
 
+#[only_async]
 #[cfg(test)]
 mod tests {
 
     use alloc::vec;
 
-    use super::*;
-    use crate::allocation_bitmap;
-    use crate::directory_entry::BitmapFlags;
-    use crate::mocks::InMemoryBlockDevice;
+    use crate::asynchronous::{
+        allocation_bitmap::AllocationBitmap,
+        error::ExFatError,
+        file_system::{FileSystem, FileSystemDetails},
+        io::BLOCK_SIZE,
+        mocks::InMemoryBlockDevice,
+        upcase_table::UpcaseTable,
+    };
 
     fn dummy_fs() -> FileSystem {
-        let fs = FileSystemDetails {
-            cluster_heap_offset: 3,
+        let details = FileSystemDetails {
+            cluster_heap_offset: 2,
             fat_offset: 1,          // fat table will consime 2 sectors
-            sectors_per_cluster: 2, // very small cluster size
-            cluster_length: 200,
-            first_cluster_of_root_dir: 4,
+            sectors_per_cluster: 1, // very small cluster size
+            cluster_length: 15,
+            first_cluster_of_root_dir: 3,
         };
 
         let upcase_table = UpcaseTable::default();
 
         let alloc_bitmap = AllocationBitmap {
             first_cluster: 2,
-            num_sectors: fs.cluster_length.div_ceil(BLOCK_SIZE as u32),
-            max_cluster_id: fs.cluster_length,
+            num_sectors: details.cluster_length.div_ceil(BLOCK_SIZE as u32),
+            max_cluster_id: details.cluster_length,
         };
 
-        FileSystem {
-            fs,
-            upcase_table,
-            alloc_bitmap,
-        }
+        FileSystem::new_inner(details, upcase_table, alloc_bitmap)
     }
 
     #[tokio::test]
     async fn create_empty_dir_in_root() -> Result<(), ExFatError> {
-        color_backtrace::install();
-        let mut sectors = vec![[0; BLOCK_SIZE]; 100];
+        //   env_logger::init();
+        let mut sectors = vec![[0; BLOCK_SIZE]; 20];
+        sectors[2][0] = 0xF0; // mark the first 4 clusters as used
+
         let mut io = InMemoryBlockDevice {
             sectors: &mut sectors,
         };
 
         let fs = dummy_fs();
+        let directory = "/hello";
 
-        fs.create_directory(&mut io, "/hello").await?;
-        let exists = fs.exists(&mut io, "/hello").await?;
+        let exists = fs.exists(&mut io, directory).await?;
+        assert!(!exists);
 
+        fs.create_directory(&mut io, directory).await?;
+
+        let exists = fs.exists(&mut io, directory).await?;
         assert!(exists);
 
         Ok(())

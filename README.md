@@ -57,12 +57,12 @@ Implemented so far:
 - List all directory entries (files and directories)
 - Check if file or directory exists
 - Support fo multiple nested directories
-- Delete a file
-- Write a file
-- Create a directory
+- Delete a file (WIP)
+- Write a file (WIP)
+- Create a directory (WIP)
+- Dual async and blocking support
 
 Not yet implemented (soon though):
-- Dual async and blocking support
 - Appending to a file
 - Delete an empty directory
 
