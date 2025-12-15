@@ -336,7 +336,6 @@ impl FileSystem {
             let num_clusters =
                 (contents.len() as u64).div_ceil(self.fs.cluster_length as u64) as u32;
 
-            crate::debug!("about to create file");
             // find free space on the drive, preferring contiguous clusters
             let allocation = self
                 .alloc_bitmap
@@ -382,7 +381,6 @@ impl FileSystem {
                     if remainder.len() > 0 {
                         let mut block = [0u8; BLOCK_SIZE];
                         block[..remainder.len()].copy_from_slice(remainder);
-                        crate::debug!("last sector {}", sector_id);
                         io.write_sector(sector_id, &block).await?;
                     }
 
@@ -428,11 +426,6 @@ async fn get_or_create_directory(
             Some(file_details) => {
                 // directory already exists
                 cluster_id = file_details.first_cluster;
-                crate::debug!(
-                    "directory '{}' already exists at cluster {}",
-                    dir_name,
-                    cluster_id
-                )
             }
             None => {
                 // directory does not exist, create it
@@ -464,11 +457,6 @@ async fn get_or_create_directory(
                     .await?;
 
                 cluster_id = first_cluster;
-                crate::debug!(
-                    "directory '{}' created at cluster {}",
-                    dir_name,
-                    first_cluster
-                )
             }
         }
 
@@ -500,12 +488,6 @@ async fn create_file_dir_entry_at(
     let dir_entry_set_len = calc_dir_entry_set_len(&utf16_name);
     let location =
         find_empty_dir_entry_set(io, directory_cluster_id, dir_entry_set_len, fs).await?;
-    crate::debug!(
-        "create_file_dir_entry_at directory_cluster_id {} first_cluster {} location {:?}",
-        directory_cluster_id,
-        first_cluster,
-        location
-    );
     let mut dir_entries: Vec<RawDirEntry> = Vec::with_capacity(dir_entry_set_len);
 
     // write file directory entry set
@@ -557,12 +539,6 @@ async fn create_file_dir_entry_at(
     // calculate and update the set_checksum field
     let set_checksum = calc_checksum_old(&dir_entries);
     dir_entries[0][2..4].copy_from_slice(&set_checksum.to_le_bytes());
-
-    crate::debug!(
-        "writing entries to location {:?}: {:?}",
-        location,
-        dir_entries
-    );
 
     // write to disk
     write_dir_entries_to_disk(io, location, dir_entries).await?;

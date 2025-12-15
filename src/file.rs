@@ -1,4 +1,3 @@
-use crate::debug;
 use alloc::{string::String, vec, vec::Vec};
 use core::str::from_utf8;
 
@@ -361,7 +360,6 @@ pub async fn directory_list(
         .await?
         {
             Some(file_details) => {
-                debug!("{file_details:?}");
                 if file_details.attributes.contains(FileAttributes::Directory) {
                     file_details.first_cluster
                 } else {

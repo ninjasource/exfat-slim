@@ -48,7 +48,6 @@ pub enum Allocation {
 
 impl AllocationBitmap {
     pub fn new(alloc_bitmap: &AllocationBitmapDirEntry) -> Self {
-        crate::debug!("{:?}", alloc_bitmap);
         let num_sectors = alloc_bitmap.data_length.div_ceil(BLOCK_SIZE as u64) as u32;
 
         // the allocation bitmap starts at cluster id 2
@@ -87,12 +86,6 @@ impl AllocationBitmap {
 
         for cluster_id in cluster_ids {
             let (sector_id, index) = Self::calc_allocation_position(first_sector_id, *cluster_id)?;
-            crate::debug!(
-                "mark_allocated for cluster_id {} sector_id {} index {}",
-                cluster_id,
-                sector_id,
-                index
-            );
             by_sector_id
                 .entry(sector_id)
                 .or_insert(Vec::new())
@@ -118,12 +111,6 @@ impl AllocationBitmap {
 
         for cluster_id in first_cluster..first_cluster + num_clusters {
             let (sector_id, index) = Self::calc_allocation_position(first_sector_id, cluster_id)?;
-            crate::debug!(
-                "mark_allocated_contiguous for cluster_id {} sector_id {} index {}",
-                cluster_id,
-                sector_id,
-                index
-            );
             by_sector_id
                 .entry(sector_id)
                 .or_insert(Vec::new())
@@ -150,21 +137,14 @@ impl AllocationBitmap {
                 let byte = &mut block[index / 8];
                 let bit = index % 8;
                 if allocated {
-                    crate::debug!("allocated at {} index {}", bit, index);
                     // set the bit
                     *byte |= 1 << bit;
                 } else {
                     // unset the bit
-                    crate::debug!("cleared at {} index {}", bit, index);
                     *byte &= !(1 << bit);
                 }
             }
 
-            crate::debug!(
-                "mark_allocated_by_sector sector_id {} block {:?}",
-                sector_id,
-                block
-            );
             io.write_sector(*sector_id, &block).await?;
         }
 
@@ -181,7 +161,6 @@ impl AllocationBitmap {
         only_fat_chain: bool,
     ) -> Result<Allocation, ExFatError> {
         let sector_id = fs.get_heap_sector_id(self.first_cluster)?;
-        crate::debug!("find_free_clusters sector_id {}", sector_id);
 
         let mut counter = 0;
         let mut cluster_id: Option<u32> = None;
@@ -210,8 +189,6 @@ impl AllocationBitmap {
                                             + byte_index as u32 * u8::BITS
                                             + bit as u32
                                             + 2;
-
-                                        crate::debug!("found free cluster_id {}", cluster_id);
 
                                         if first_free.is_none() {
                                             // keep track of the first free cluster we ever found
