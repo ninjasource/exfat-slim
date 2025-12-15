@@ -57,9 +57,9 @@ Implemented so far:
 - List all directory entries (files and directories)
 - Check if file or directory exists
 - Support fo multiple nested directories
-- Delete a file (WIP)
-- Write a file (WIP)
-- Create a directory (WIP)
+- Delete a file
+- Write a file
+- Create a directory
 - Dual async and blocking support
 
 Not yet implemented (soon though):
