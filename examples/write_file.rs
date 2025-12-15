@@ -1,7 +1,7 @@
 mod common;
-use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
-
 use crate::common::asynchronous::InMemoryBlockDevice;
+use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
+use log::info;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), ExFatError> {
@@ -10,9 +10,12 @@ async fn main() -> Result<(), ExFatError> {
 
     let mut io = InMemoryBlockDevice::new();
     let fs = FileSystem::new(&mut io).await?;
+    let full_path = "/temp2/test7.txt";
 
-    fs.write(&mut io, "/temp2/hello2/shoe/test1.txt", b"hello")
-        .await?;
+    // this will create any folders that do not exist
+    fs.write(&mut io, full_path, b"hello").await?;
+
+    info!("file created: {}", fs.exists(&mut io, full_path).await?);
 
     Ok(())
 }

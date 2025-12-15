@@ -413,14 +413,7 @@ pub async fn find_file_inner(
     file_attributes: Option<FileAttributes>,
 ) -> Result<FileDetails, ExFatError> {
     match get_leaf_file_entry(io, fs, upcase_table, full_path, file_attributes).await? {
-        Some(file_details) => {
-            Ok(file_details)
-            // if file_details.attributes.contains(FileAttributes::Archive) {
-            //     Ok(file_details)
-            // } else {
-            //     Err(ExFatError::FileNotFound)
-            // }
-        }
+        Some(file_details) => Ok(file_details),
         None => Err(ExFatError::FileNotFound),
     }
 }

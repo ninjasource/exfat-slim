@@ -1,8 +1,8 @@
 mod common;
-use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
-use log::info;
 
 use crate::common::asynchronous::InMemoryBlockDevice;
+use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
+use log::info;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), ExFatError> {
@@ -13,7 +13,7 @@ async fn main() -> Result<(), ExFatError> {
     let mut io = InMemoryBlockDevice::new();
     let fs = FileSystem::new(&mut io).await?;
 
-    let path = "/";
+    let path = "/temp2/hello2/shoe";
     let mut list = fs.read_dir(&mut io, path).await?;
     while let Some(item) = list.next(&mut io).await? {
         info!("{:?}", item);

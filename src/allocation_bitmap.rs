@@ -1,3 +1,17 @@
+/// the allocation bitmap signals whether or not a cluster is in use.
+/// the AllocationBitmapDirEntry identifies where to locate the bitmap.
+/// for example, first_cluster 2 means that the allocation bitmap is the very first cluster in the cluster heap (cluster id 0 and 1 are not valid)
+/// each bit in the allocation bitmap points to a cluster (starting at cluster 2).
+/// therefore the following bits (as they are layed out in memory) map to the following clusters
+///         [byte 0                ][byte 1                ][byte 2                ][byte 3                ]
+/// bit      7  6  5  4  3  2  1  0  7  6  5  4  3  2  1  0  7  6  5  4  3  2  1  0  7  6  5  4  3  2  1  0
+/// cluster  9  8  7  6  5  4  3  2 17 16 15 14 13 12 11 10 25 24 23 22 21 20 19 18 33 32 31 30 29 28 27 26
+/// NOTE: the above layout is not obvious from the spec but it has been confirmed with how the windows implementation writes the bits.
+/// for example an allocation bitmap of this bit string "11111111 11111111 00000111" means that clusters 2 - 20 inclusive are allocated. That is 19 clusters in total.
+///
+/// NOTE: I encountered what appears to be a logic error in the linux kernel exfat implementation where bits are incorrectly counted from MSB to LSB and not the other way around when locating free allocations.
+/// this does not affect the allocation bitmap write consistency but could possibly lead to unnecessary fragmentation
+///
 use core::num;
 
 use alloc::{collections::btree_map::BTreeMap, vec, vec::Vec};
@@ -34,6 +48,7 @@ pub enum Allocation {
 
 impl AllocationBitmap {
     pub fn new(alloc_bitmap: &AllocationBitmapDirEntry) -> Self {
+        crate::debug!("{:?}", alloc_bitmap);
         let num_sectors = alloc_bitmap.data_length.div_ceil(BLOCK_SIZE as u64) as u32;
 
         // the allocation bitmap starts at cluster id 2
@@ -46,10 +61,14 @@ impl AllocationBitmap {
         }
     }
 
-    fn clc_allocation_position(
+    fn calc_allocation_position(
         first_sector_id: u32,
         cluster_id: u32,
     ) -> Result<(u32, usize), ExFatError> {
+        if cluster_id < 2 {
+            return Err(ExFatError::InvalidClusterId(cluster_id));
+        }
+
         let sector_id = first_sector_id + (cluster_id - 2) / BLOCK_SIZE as u32;
         let index = (cluster_id as usize - 2) % BLOCK_SIZE;
         Ok((sector_id, index))
@@ -67,7 +86,13 @@ impl AllocationBitmap {
         let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
 
         for cluster_id in cluster_ids {
-            let (sector_id, index) = Self::clc_allocation_position(first_sector_id, *cluster_id)?;
+            let (sector_id, index) = Self::calc_allocation_position(first_sector_id, *cluster_id)?;
+            crate::debug!(
+                "mark_allocated for cluster_id {} sector_id {} index {}",
+                cluster_id,
+                sector_id,
+                index
+            );
             by_sector_id
                 .entry(sector_id)
                 .or_insert(Vec::new())
@@ -92,7 +117,13 @@ impl AllocationBitmap {
         let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
 
         for cluster_id in first_cluster..first_cluster + num_clusters {
-            let (sector_id, index) = Self::clc_allocation_position(first_sector_id, cluster_id)?;
+            let (sector_id, index) = Self::calc_allocation_position(first_sector_id, cluster_id)?;
+            crate::debug!(
+                "mark_allocated_contiguous for cluster_id {} sector_id {} index {}",
+                cluster_id,
+                sector_id,
+                index
+            );
             by_sector_id
                 .entry(sector_id)
                 .or_insert(Vec::new())
@@ -117,15 +148,23 @@ impl AllocationBitmap {
             block.copy_from_slice(io.read_sector(*sector_id).await?);
             for index in indices {
                 let byte = &mut block[index / 8];
-                let bit_offset = 7 - index % 8; // count bits from right to left
+                let bit = index % 8;
                 if allocated {
+                    crate::debug!("allocated at {} index {}", bit, index);
                     // set the bit
-                    *byte |= 1 << bit_offset;
+                    *byte |= 1 << bit;
                 } else {
                     // unset the bit
-                    *byte &= !(1 << bit_offset);
+                    crate::debug!("cleared at {} index {}", bit, index);
+                    *byte &= !(1 << bit);
                 }
             }
+
+            crate::debug!(
+                "mark_allocated_by_sector sector_id {} block {:?}",
+                sector_id,
+                block
+            );
             io.write_sector(*sector_id, &block).await?;
         }
 
@@ -152,68 +191,56 @@ impl AllocationBitmap {
         'outer: for sector_offset in 0..self.num_sectors {
             let buf = io.read_sector(sector_id + sector_offset).await?;
             let (bytes, _remainder) = buf.as_chunks::<4>();
-            for (index, bytes) in bytes.iter().enumerate() {
-                let val = u32::from_be_bytes(*bytes);
-                crate::debug!("find_free_clusters index {} val {}", index, val);
+            for (chunk_index, chunk) in bytes.iter().enumerate() {
                 // fast batch check for a free cluster
-                if val != u32::MAX {
-                    // locate the first free cluster
-                    for bit in 0..u32::BITS {
-                        crate::debug!(
-                            "find_free_clusters bit {} val & (1 << (u32::BITS - bit - 1)) {:032b}",
-                            bit,
-                            val & (1 << (u32::BITS - bit - 1))
-                        );
-
-                        // the most significant bit is position 0
-                        if val & (1 << (u32::BITS - bit - 1)) == 0 {
-                            // happy path
-                            let cluster_id = match cluster_id {
-                                Some(cluster_id) => {
-                                    counter += 1;
-                                    cluster_id
-                                }
-                                None => {
-                                    let cluster_id = sector_offset as u32 * BLOCK_SIZE as u32
-                                        + index as u32 * u32::BITS
-                                        + bit as u32;
-
-                                    // TODO: figure out why following the spec here seems to break things
-                                    // position 0 cluster_id starts at 2 (apparently for historical reasons)
-                                    //if cluster_id < 2 {
-                                    //    continue;
-                                    //}
-                                    //let cluster_id = cluster_id - 2;
-
-                                    crate::debug!("found free cluster_id {}", cluster_id);
-
-                                    if first_free.is_none() {
-                                        // keep track of the first free cluster we ever found
-                                        first_free = Some(cluster_id);
-                                        if only_fat_chain {
-                                            break 'outer;
-                                        }
+                if u32::from_le_bytes(*chunk) != u32::MAX {
+                    for (byte_index, byte) in chunk.iter().enumerate() {
+                        for bit in 0..u8::BITS {
+                            if *byte & 1 << bit == 0 {
+                                // happy path
+                                let cluster_id = match cluster_id {
+                                    Some(cluster_id) => {
+                                        counter += 1;
+                                        cluster_id
                                     }
-                                    counter = 1;
-                                    cluster_id
+                                    None => {
+                                        // position 0 cluster_id starts at 2 (for historical reasons they say)
+                                        let cluster_id = sector_offset as u32 * BLOCK_SIZE as u32
+                                            + chunk_index as u32 * u32::BITS
+                                            + byte_index as u32 * u8::BITS
+                                            + bit as u32
+                                            + 2;
+
+                                        crate::debug!("found free cluster_id {}", cluster_id);
+
+                                        if first_free.is_none() {
+                                            // keep track of the first free cluster we ever found
+                                            first_free = Some(cluster_id);
+                                            if only_fat_chain {
+                                                break 'outer;
+                                            }
+                                        }
+                                        counter = 1;
+                                        cluster_id
+                                    }
+                                };
+
+                                // abandon attepting to find an allocation
+                                if cluster_id > self.max_cluster_id {
+                                    break;
                                 }
-                            };
 
-                            // abandon attepting to find an allocation
-                            if cluster_id > self.max_cluster_id {
-                                break;
-                            }
-
-                            if counter == num_clusters {
-                                return Ok(Allocation::Contiguous {
-                                    first_cluster: cluster_id,
-                                    num_clusters,
-                                });
-                            }
-                        } else {
-                            if cluster_id.is_some() {
-                                cluster_id = None;
-                                counter = 0;
+                                if counter == num_clusters {
+                                    return Ok(Allocation::Contiguous {
+                                        first_cluster: cluster_id,
+                                        num_clusters,
+                                    });
+                                }
+                            } else {
+                                if cluster_id.is_some() {
+                                    cluster_id = None;
+                                    counter = 0;
+                                }
                             }
                         }
                     }

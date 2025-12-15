@@ -1,7 +1,7 @@
 mod common;
-use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
 
 use crate::common::asynchronous::InMemoryBlockDevice;
+use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), ExFatError> {

@@ -13,9 +13,6 @@ pub enum ExFatError {
     #[error("boot sector ({0:?})")]
     BootSector(#[from] boot_sector::Error),
 
-    #[error("file system ({0:?})")]
-    FileSystem(#[from] file_system::Error),
-
     #[error("end of fat chain")]
     EndOfFatChain,
 
@@ -39,4 +36,7 @@ pub enum ExFatError {
 
     #[error("disk is full")]
     DiskFull,
+
+    #[error("invalid cluster id ({0})")]
+    InvalidClusterId(u32),
 }

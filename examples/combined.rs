@@ -1,9 +1,8 @@
-use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
-use log::info;
+mod common;
 
 use crate::common::asynchronous::InMemoryBlockDevice;
-
-mod common;
+use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
+use log::info;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), ExFatError> {
@@ -16,12 +15,8 @@ async fn main() -> Result<(), ExFatError> {
     let fs = FileSystem::new(&mut io).await?;
     info!("fs {:?}", fs);
 
-    // TODO: figure put why this does not work
-    //let directory = "/bubble/gum";
-    //let full_path = format!("{directory}/blue.txt");
-
-    let directory = "/temp2/hello2/shoe";
-    let full_path = format!("{directory}/test1.txt");
+    let directory = "/bubble/gum";
+    let full_path = format!("{directory}/blue.txt");
 
     // confirm that the directory does not yet exist
     info!("checking if directory exists");

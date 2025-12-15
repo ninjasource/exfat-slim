@@ -23,13 +23,6 @@ use super::{
         calc_dir_entry_set_len, encode_utf16_and_hash, encode_utf16_upcase_and_hash, read_u16_le,
     },
 };
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("invalid cluster id ({0})")]
-    InvalidClusterId(u32),
-}
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone)]
@@ -63,9 +56,9 @@ impl FileSystemDetails {
         }
     }
 
-    pub fn get_heap_sector_id(&self, cluster_id: u32) -> Result<u32, Error> {
+    pub fn get_heap_sector_id(&self, cluster_id: u32) -> Result<u32, ExFatError> {
         if cluster_id < 2 {
-            return Err(Error::InvalidClusterId(cluster_id));
+            return Err(ExFatError::InvalidClusterId(cluster_id));
         }
 
         let sector_id =
@@ -77,7 +70,7 @@ impl FileSystemDetails {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug)]
 pub struct FileSystem {
-    fs: FileSystemDetails,
+    pub fs: FileSystemDetails,
     upcase_table: UpcaseTable,
     alloc_bitmap: AllocationBitmap,
 }
@@ -343,6 +336,7 @@ impl FileSystem {
             let num_clusters =
                 (contents.len() as u64).div_ceil(self.fs.cluster_length as u64) as u32;
 
+            crate::debug!("about to create file");
             // find free space on the drive, preferring contiguous clusters
             let allocation = self
                 .alloc_bitmap
@@ -466,11 +460,15 @@ async fn get_or_create_directory(
 
                 // mark cluster used to store the directory as allocated
                 alloc_bitmap
-                    .mark_allocated(io, fs, &[cluster_id], true)
+                    .mark_allocated(io, fs, &[first_cluster], true)
                     .await?;
 
                 cluster_id = first_cluster;
-                crate::debug!("directory '{}' created at cluster {}", dir_name, cluster_id)
+                crate::debug!(
+                    "directory '{}' created at cluster {}",
+                    dir_name,
+                    first_cluster
+                )
             }
         }
 
