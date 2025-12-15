@@ -159,103 +159,11 @@ impl FileSystem {
         directory_list(io, &self.fs, &self.upcase_table, full_path).await
     }
 
-    #[bisync]
-    async fn set_volume_dirty(
-        &self,
-        io: &mut impl BlockDevice,
-        is_dirty: bool,
-    ) -> Result<(), ExFatError> {
-        let sector_id = 0; // boot sector
-        let mut sector = [0u8; BLOCK_SIZE];
-        sector.copy_from_slice(io.read_sector(sector_id).await?);
-        let mut volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(&sector));
-        volume_flags.set(VolumeFlags::VolumeDirty, is_dirty);
-        sector[106..108].copy_from_slice(&volume_flags.bits().to_le_bytes());
-        io.write_sector(sector_id, &sector).await?;
-        Ok(())
-    }
-
-    #[bisync]
-    async fn get_all_clusters_from(
-        &self,
-        io: &mut impl BlockDevice,
-        file_details: &FileDetails,
-    ) -> Result<Vec<u32>, ExFatError> {
-        let mut cluster_id = file_details.first_cluster;
-        let num_clusters = file_details.get_num_clusters(self.fs.cluster_length);
-
-        let mut clusters = Vec::with_capacity(num_clusters);
-        clusters.push(cluster_id);
-
-        while let Some(x) = next_cluster_in_fat_chain(io, self.fs.fat_offset, cluster_id).await? {
-            cluster_id = x;
-            clusters.push(cluster_id);
-        }
-
-        Ok(clusters)
-    }
-
-    #[bisync]
-    async fn delete_inner(
-        &self,
-        io: &mut impl BlockDevice,
-        file_details: &FileDetails,
-    ) -> Result<(), ExFatError> {
-        if file_details.attributes.contains(FileAttributes::Archive) {
-            let cluster_ids = self.get_all_clusters_from(io, file_details).await?;
-            self.alloc_bitmap
-                .mark_allocated(io, &self.fs, &cluster_ids, false)
-                .await?;
-
-            let mut sector_id = file_details.location.sector_id;
-            let dir_entry_offset = file_details.location.dir_entry_offset;
-
-            let mut sector = [0u8; BLOCK_SIZE];
-            sector.copy_from_slice(io.read_sector(file_details.location.sector_id).await?);
-            let (dir_entries, _remainder) = sector.as_chunks_mut::<RAW_ENTRY_LEN>();
-
-            let file_dir_entry = FileDirEntry::from(&dir_entries[dir_entry_offset]);
-            let mut count = file_dir_entry.secondary_count as usize;
-            dir_entries[dir_entry_offset].fill(0);
-
-            // zero out all directory entries in the directory entry set
-            // directory entries can spill over to the next sector but not to the next cluster
-            let mut from = dir_entry_offset + 1;
-            loop {
-                let (dir_entries, _remainder) = sector.as_chunks_mut::<RAW_ENTRY_LEN>();
-                let to = (from + count).min(dir_entries.len());
-                for dir_entry in &mut dir_entries[from..to] {
-                    dir_entry.fill(0);
-                    count -= 1;
-                }
-
-                // we need to do this to acount multiple mutable borrows due to the loop
-                //  tmp.copy_from_slice(sector.as_slice());
-                io.write_sector(sector_id, &sector).await?;
-
-                if count == 0 {
-                    break;
-                } else {
-                    sector_id += 1;
-                    let block = io.read_sector(sector_id).await?;
-                    sector.copy_from_slice(block);
-                    from = 0;
-                }
-            }
-
-            // TODO: keep rreading past sector, remember to save sector first
-        } else if file_details.attributes.contains(FileAttributes::Directory) {
-            // TODO: delete directory
-        }
-
-        Ok(())
-    }
-
     /// deletes a file
     /// returns an error if the file does not exist or something else failed
     /// this will not delete the containing directory
     #[bisync]
-    pub async fn delete(
+    pub async fn remove_file(
         &self,
         io: &mut impl BlockDevice,
         full_path: &str,
@@ -293,6 +201,83 @@ impl FileSystem {
         Ok(())
     }
 
+    /// rename a file or folder
+    /// this will not work if you change the parent directory of the file or directory you want to rename
+    #[bisync]
+    pub async fn rename(
+        &self,
+        io: &mut impl BlockDevice,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<(), ExFatError> {
+        // TODO: locate file directory set
+        // TODO: clear the directory set
+        // TODO: write a new directory set with the same details, just updated name. This can go back in the same slot if it still fits.
+        unimplemented!();
+    }
+
+    /// removes an empty directory
+    #[bisync]
+    pub async fn remove_dir(
+        &self,
+        io: &mut impl BlockDevice,
+        full_path: &str,
+        contents: impl AsRef<[u8]>,
+    ) -> Result<(), ExFatError> {
+        // TODO: locate directory set for directory
+        // TODO: check if directory is empty
+        // TODO: update allocation_bitmap to mark first_cluster (an chain) an not allocated
+        // TODO: mark all directory entries in set as unused
+        unimplemented!();
+    }
+
+    /// appends the entire contents to a file.
+    /// the file will be created if it does not already exist.
+    /// this function will create any directories in the path that do not already exist.
+    /// relative paths are not supported.
+    #[bisync]
+    pub async fn append(
+        &self,
+        io: &mut impl BlockDevice,
+        full_path: &str,
+        contents: impl AsRef<[u8]>,
+    ) -> Result<(), ExFatError> {
+        // delete the file if it already exists
+        let file_details = match find_file_inner(
+            io,
+            &self.fs,
+            &self.upcase_table,
+            full_path,
+            Some(FileAttributes::Archive),
+        )
+        .await
+        {
+            Ok(file_details) => file_details,
+            Err(ExFatError::FileNotFound) => {
+                self.write_inner(io, full_path, contents).await?;
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+
+        let unused_space = file_details.data_length - file_details.valid_data_length;
+        let contents = contents.as_ref();
+
+        if contents.len() <= unused_space as usize {
+            // there is enough space left in the last cluster of the file to fit the contents
+            // TODO: find last sector and offset using fat chain or continuous clusters
+            // TODO: write the contents to the last cluster
+        } else {
+            // TODO: if this is no-fat-chain then check if there are enough free clusters following the last one in this file
+            // TODO: if not enough free clusters then switch to fat chain and update the FAT and directory entry accordingly
+            // TODO: write data, from last byte in last cluster of file, followed by any other newly allocated clusters
+            // TODO: update allocation_bitmap
+        }
+
+        // TODO: update file detail directory entry with updated valid_data_length
+        unimplemented!();
+    }
+
     /// writes the entire contents to a file.
     /// the file will be overwritten if it already exists.
     /// this function will create any directories in the path that do not already exist.
@@ -321,6 +306,18 @@ impl FileSystem {
             Err(e) => return Err(e),
         }
 
+        self.write_inner(io, full_path, contents).await?;
+        Ok(())
+    }
+
+    /// assume that the file does not already exist
+    #[bisync]
+    async fn write_inner(
+        &self,
+        io: &mut impl BlockDevice,
+        full_path: &str,
+        contents: impl AsRef<[u8]>,
+    ) -> Result<(), ExFatError> {
         if let Some((dir_path, file_name)) = split_path(full_path) {
             // find directory or recursively create it if it does not already exist
             let directory_cluster_id = get_or_create_directory(
@@ -391,6 +388,99 @@ impl FileSystem {
                     unimplemented!("writing to a file using the fat chain is not yet supported")
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    #[bisync]
+    async fn set_volume_dirty(
+        &self,
+        io: &mut impl BlockDevice,
+        is_dirty: bool,
+    ) -> Result<(), ExFatError> {
+        let sector_id = 0; // boot sector
+        let mut sector = [0u8; BLOCK_SIZE];
+        sector.copy_from_slice(io.read_sector(sector_id).await?);
+        let mut volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(&sector));
+        volume_flags.set(VolumeFlags::VolumeDirty, is_dirty);
+        sector[106..108].copy_from_slice(&volume_flags.bits().to_le_bytes());
+        io.write_sector(sector_id, &sector).await?;
+        Ok(())
+    }
+
+    #[bisync]
+    async fn get_all_clusters_from(
+        &self,
+        io: &mut impl BlockDevice,
+        file_details: &FileDetails,
+    ) -> Result<Vec<u32>, ExFatError> {
+        let mut cluster_id = file_details.first_cluster;
+        let num_clusters = file_details.get_num_clusters(self.fs.cluster_length);
+
+        let mut clusters = Vec::with_capacity(num_clusters);
+        clusters.push(cluster_id);
+
+        while let Some(x) = next_cluster_in_fat_chain(io, self.fs.fat_offset, cluster_id).await? {
+            cluster_id = x;
+            clusters.push(cluster_id);
+        }
+
+        Ok(clusters)
+    }
+
+    #[bisync]
+    async fn delete_inner(
+        &self,
+        io: &mut impl BlockDevice,
+        file_details: &FileDetails,
+    ) -> Result<(), ExFatError> {
+        if file_details.attributes.contains(FileAttributes::Archive) {
+            // TODO: if this is no-fat-chain then dont use the FAT
+            let cluster_ids = self.get_all_clusters_from(io, file_details).await?;
+            self.alloc_bitmap
+                .mark_allocated(io, &self.fs, &cluster_ids, false)
+                .await?;
+
+            let mut sector_id = file_details.location.sector_id;
+            let dir_entry_offset = file_details.location.dir_entry_offset;
+
+            let mut sector = [0u8; BLOCK_SIZE];
+            sector.copy_from_slice(io.read_sector(file_details.location.sector_id).await?);
+            let (dir_entries, _remainder) = sector.as_chunks_mut::<RAW_ENTRY_LEN>();
+
+            let file_dir_entry = FileDirEntry::from(&dir_entries[dir_entry_offset]);
+            let mut count = file_dir_entry.secondary_count as usize;
+            dir_entries[dir_entry_offset].fill(0);
+
+            // zero out all directory entries in the directory entry set
+            // directory entries can spill over to the next sector but not to the next cluster
+            let mut from = dir_entry_offset + 1;
+            loop {
+                let (dir_entries, _remainder) = sector.as_chunks_mut::<RAW_ENTRY_LEN>();
+                let to = (from + count).min(dir_entries.len());
+                for dir_entry in &mut dir_entries[from..to] {
+                    dir_entry.fill(0);
+                    count -= 1;
+                }
+
+                // we need to do this to acount multiple mutable borrows due to the loop
+                //  tmp.copy_from_slice(sector.as_slice());
+                io.write_sector(sector_id, &sector).await?;
+
+                if count == 0 {
+                    break;
+                } else {
+                    sector_id += 1;
+                    let block = io.read_sector(sector_id).await?;
+                    sector.copy_from_slice(block);
+                    from = 0;
+                }
+            }
+
+            // TODO: keep rreading past sector, remember to save sector first
+        } else if file_details.attributes.contains(FileAttributes::Directory) {
+            // TODO: delete directory
         }
 
         Ok(())

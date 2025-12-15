@@ -12,7 +12,8 @@ async fn main() -> Result<(), ExFatError> {
 
     let mut io = InMemoryBlockDevice::new();
     let fs = FileSystem::new(&mut io).await?;
-    fs.delete(&mut io, "/temp2/hello2/shoe/test.txt").await?;
+    fs.remove_file(&mut io, "/temp2/hello2/shoe/test.txt")
+        .await?;
 
     Ok(())
 }

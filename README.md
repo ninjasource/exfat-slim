@@ -56,7 +56,7 @@ Implemented so far:
 - Read a file
 - List all directory entries (files and directories)
 - Check if file or directory exists
-- Support fo multiple nested directories
+- Support for multiple nested directories
 - Delete a file
 - Write a file
 - Create a directory
@@ -65,6 +65,7 @@ Implemented so far:
 Not yet implemented (soon though):
 - Appending to a file
 - Delete an empty directory
+- Rename a file or directory
 
 No immediate intention of implementing:
 - Seekable read write file because it requires long term state management and some form of global locking which would then have to be added to everything else.
