@@ -61,11 +61,12 @@ Implemented so far:
 - Write a file
 - Create a directory
 - Dual async and blocking support
-- Rename a file or directory
+- Rename a file or directory (equivalent to move if parent directories change)
 
 Not yet implemented (soon though):
 - Appending to a file
 - Delete an empty directory
+- Copy a file
 
 No immediate intention of implementing:
 - Seekable read write file because it requires long term state management and some form of global locking which would then have to be added to everything else.

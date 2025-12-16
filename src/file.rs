@@ -25,6 +25,7 @@ pub struct FileDetails {
     pub name: String,
     pub location: Location,
     pub flags: GeneralSecondaryFlags,
+    pub secondary_count: u8,
 }
 
 impl FileDetails {
@@ -192,6 +193,7 @@ pub async fn next_file_entry(
                     name,
                     location,
                     flags: stream_entry.general_secondary_flags,
+                    secondary_count: file_dir_entry.secondary_count,
                 };
                 return Ok(Some(file_details));
             } else {

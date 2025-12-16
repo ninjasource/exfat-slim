@@ -65,16 +65,6 @@ impl FileSystemDetails {
             self.cluster_heap_offset + (cluster_id - 2) * self.sectors_per_cluster as u32;
         Ok(sector_id)
     }
-
-    pub fn get_heap_cluster_id(&self, sector_id: u32) -> Result<u32, ExFatError> {
-        if sector_id < self.cluster_heap_offset {
-            return Err(ExFatError::InvalidSectorId(sector_id));
-        }
-        let cluster_id =
-            ((sector_id - self.cluster_heap_offset) / self.sectors_per_cluster as u32) + 2;
-
-        Ok(cluster_id)
-    }
 }
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -212,50 +202,59 @@ impl FileSystem {
     }
 
     /// rename a file or folder
-    /// the full path is the old file or directory path (including all sub directories)
-    /// the new_name is the name of the file or directory only. The parent directory will remain unchanged
+    /// the from_path is the old file or directory path (including all sub directories)
+    /// the to_path is the new file or directory path (including all sub directories)
+    /// if the file or directory changes parent directories then this is conidered to be a file move, otherwide a rename
     #[bisync]
     pub async fn rename(
         &self,
         io: &mut impl BlockDevice,
-        full_path: &str,
-        new_name: &str,
+        from_path: &str,
+        to_path: &str,
     ) -> Result<(), ExFatError> {
         // in exFAT a directory cannot have a directory and file with the same name in it so no need to filter here
         let file_details =
-            find_file_inner(io, &self.fs, &self.upcase_table, full_path, None).await?;
+            find_file_inner(io, &self.fs, &self.upcase_table, from_path, None).await?;
 
-        if new_name.contains(['/', '\\']) {
-            return Err(ExFatError::InvalidFileName {
-                reason: "file name cannot have / or \\ characters in it",
-            });
-        }
-
-        let mut dir_entries = Vec::with_capacity(2 + file_details.name.len().div_ceil(15));
-        for _ in 0..dir_entries.capacity() {
+        // mark dir entries as free
+        let mut freed_dir_entries = Vec::with_capacity(1 + file_details.secondary_count as usize);
+        for _ in 0..freed_dir_entries.capacity() {
             let mut dir_entry = [0u8; RAW_ENTRY_LEN];
             dir_entry[0] = 0x01;
-            dir_entries.push(dir_entry);
+            freed_dir_entries.push(dir_entry);
         }
-        write_dir_entries_to_disk(io, file_details.location, dir_entries).await?;
 
-        let directory_cluster_id = self
-            .fs
-            .get_heap_cluster_id(file_details.location.sector_id)?;
+        if let Some((dir_path, file_or_dir_name)) = split_path(to_path) {
+            self.set_volume_dirty(io, true).await?;
 
-        create_file_dir_entry_at(
-            io,
-            &self.upcase_table,
-            new_name,
-            directory_cluster_id,
-            file_details.first_cluster,
-            file_details.attributes,
-            file_details.flags,
-            file_details.valid_data_length,
-            file_details.data_length,
-            &self.fs,
-        )
-        .await?;
+            write_dir_entries_to_disk(io, file_details.location, freed_dir_entries).await?;
+
+            // find directory or recursively create it if it does not already exist
+            let directory_cluster_id = get_or_create_directory(
+                io,
+                &self.fs,
+                &self.upcase_table,
+                &self.alloc_bitmap,
+                dir_path,
+            )
+            .await?;
+
+            create_file_dir_entry_at(
+                io,
+                &self.upcase_table,
+                file_or_dir_name,
+                directory_cluster_id,
+                file_details.first_cluster,
+                file_details.attributes,
+                file_details.flags,
+                file_details.valid_data_length,
+                file_details.data_length,
+                &self.fs,
+            )
+            .await?;
+
+            self.set_volume_dirty(io, false).await?;
+        }
 
         Ok(())
     }
