@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 use super::{
     allocation_bitmap::{Allocation, AllocationBitmap},
@@ -64,6 +64,16 @@ impl FileSystemDetails {
         let sector_id =
             self.cluster_heap_offset + (cluster_id - 2) * self.sectors_per_cluster as u32;
         Ok(sector_id)
+    }
+
+    pub fn get_heap_cluster_id(&self, sector_id: u32) -> Result<u32, ExFatError> {
+        if sector_id < self.cluster_heap_offset {
+            return Err(ExFatError::InvalidSectorId(sector_id));
+        }
+        let cluster_id =
+            ((sector_id - self.cluster_heap_offset) / self.sectors_per_cluster as u32) + 2;
+
+        Ok(cluster_id)
     }
 }
 
@@ -202,18 +212,52 @@ impl FileSystem {
     }
 
     /// rename a file or folder
-    /// this will not work if you change the parent directory of the file or directory you want to rename
+    /// the full path is the old file or directory path (including all sub directories)
+    /// the new_name is the name of the file or directory only. The parent directory will remain unchanged
     #[bisync]
     pub async fn rename(
         &self,
         io: &mut impl BlockDevice,
-        from_path: &str,
-        to_path: &str,
+        full_path: &str,
+        new_name: &str,
     ) -> Result<(), ExFatError> {
-        // TODO: locate file directory set
-        // TODO: clear the directory set
-        // TODO: write a new directory set with the same details, just updated name. This can go back in the same slot if it still fits.
-        unimplemented!();
+        // in exFAT a directory cannot have a directory and file with the same name in it so no need to filter here
+        let file_details =
+            find_file_inner(io, &self.fs, &self.upcase_table, full_path, None).await?;
+
+        if new_name.contains(['/', '\\']) {
+            return Err(ExFatError::InvalidFileName {
+                reason: "file name cannot have / or \\ characters in it",
+            });
+        }
+
+        let mut dir_entries = Vec::with_capacity(2 + file_details.name.len().div_ceil(15));
+        for _ in 0..dir_entries.capacity() {
+            let mut dir_entry = [0u8; RAW_ENTRY_LEN];
+            dir_entry[0] = 0x01;
+            dir_entries.push(dir_entry);
+        }
+        write_dir_entries_to_disk(io, file_details.location, dir_entries).await?;
+
+        let directory_cluster_id = self
+            .fs
+            .get_heap_cluster_id(file_details.location.sector_id)?;
+
+        create_file_dir_entry_at(
+            io,
+            &self.upcase_table,
+            new_name,
+            directory_cluster_id,
+            file_details.first_cluster,
+            file_details.attributes,
+            file_details.flags,
+            file_details.valid_data_length,
+            file_details.data_length,
+            &self.fs,
+        )
+        .await?;
+
+        Ok(())
     }
 
     /// removes an empty directory
@@ -359,6 +403,7 @@ impl FileSystem {
                         FileAttributes::Archive,
                         GeneralSecondaryFlags::AllocationPossible
                             | GeneralSecondaryFlags::NoFatChain,
+                        contents.len() as u64,
                         contents.len() as u64,
                         &self.fs,
                     )
@@ -537,6 +582,7 @@ async fn get_or_create_directory(
                     FileAttributes::Directory,
                     GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain,
                     fs.cluster_length as u64,
+                    fs.cluster_length as u64,
                     fs,
                 )
                 .await?;
@@ -571,6 +617,7 @@ async fn create_file_dir_entry_at(
     first_cluster: u32, // the directory or file that this entry points to
     file_attributes: FileAttributes,
     stream_ext_flags: GeneralSecondaryFlags,
+    valid_data_length: u64,
     data_length: u64,
     fs: &FileSystemDetails,
 ) -> Result<(), ExFatError> {
@@ -601,7 +648,7 @@ async fn create_file_dir_entry_at(
         general_secondary_flags: stream_ext_flags,
         name_length: utf16_name.len() as u8,
         name_hash,
-        valid_data_length: data_length,
+        valid_data_length,
         first_cluster,
         data_length,
     };

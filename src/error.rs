@@ -39,4 +39,7 @@ pub enum ExFatError {
 
     #[error("invalid cluster id ({0})")]
     InvalidClusterId(u32),
+
+    #[error("invalid sector id ({0})")]
+    InvalidSectorId(u32),
 }
