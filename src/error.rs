@@ -42,4 +42,7 @@ pub enum ExFatError {
 
     #[error("invalid sector id ({0})")]
     InvalidSectorId(u32),
+
+    #[error("directory is not empty")]
+    DirectoryNotEmpty,
 }

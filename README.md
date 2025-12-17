@@ -62,10 +62,10 @@ Implemented so far:
 - Create a directory
 - Dual async and blocking support
 - Rename a file or directory (equivalent to move if parent directories change)
+- Delete an empty directory
 
 Not yet implemented (soon though):
 - Appending to a file
-- Delete an empty directory
 - Copy a file
 
 No immediate intention of implementing:
