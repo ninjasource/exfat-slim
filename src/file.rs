@@ -1,7 +1,8 @@
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::str::from_utf8;
 
 use super::{
+    allocation_bitmap::AllocationBitmap,
     bisync,
     directory_entry::{
         DirectoryEntryChain, FileAttributes, FileNameDirEntry, GeneralSecondaryFlags, Location,
@@ -15,7 +16,7 @@ use super::{
     utils::{calc_dir_entry_set_len, encode_utf16_upcase_and_hash},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileDetails {
     pub first_cluster: u32,
     pub data_length: u64,
@@ -33,13 +34,67 @@ impl FileDetails {
         self.data_length.div_ceil(bytes_per_cluster as u64) as usize
     }
 }
+
+pub struct WriteOnlyFile {
+    fs: FileSystemDetails,
+    current_cluster: u32,
+    cluster_offset: u32, // in bytes
+    _data_length: Option<u64>,
+    _valid_data_length: u64,
+    alloc_bitmap: AllocationBitmap,
+    _buf: Option<Box<[u8; BLOCK_SIZE]>>,
+}
+
+impl WriteOnlyFile {
+    #[bisync]
+    pub async fn write(
+        &mut self,
+        io: &mut impl BlockDevice,
+        bytes: &[u8],
+    ) -> Result<(), ExFatError> {
+        if self.cluster_offset as usize % BLOCK_SIZE == 0 {
+            // no need to buffer writes here because they can be flushed immediately
+            let sector_id = self.fs.get_heap_sector_id(self.current_cluster)?
+                + self.cluster_offset / BLOCK_SIZE as u32;
+
+            let (blocks, remainder) = bytes.as_chunks::<BLOCK_SIZE>();
+            for block in blocks {
+                if self.cluster_offset == 0 {
+                    self.alloc_bitmap
+                        .mark_allocated(io, &self.fs, &[self.current_cluster], true)
+                        .await?;
+                }
+
+                io.write_sector(sector_id, block).await?;
+                self.cluster_offset += BLOCK_SIZE as u32;
+
+                if self.cluster_offset >= self.fs.cluster_length {
+                    // TODO: fix this clearly incorrect assumption that a growing file is no-fat-chain
+                    self.current_cluster += 1;
+                    self.cluster_offset = 0;
+                }
+            }
+
+            if remainder.len() > 0 {
+                unimplemented!("length must be multiple of BLOCK_SIZE")
+            }
+        } else {
+            unimplemented!("unalligned writes not supported")
+        }
+        Ok(())
+    }
+
+    pub fn new_append() -> Self {
+        unimplemented!()
+    }
+}
+
 pub struct ReadOnlyFile {
     fs: FileSystemDetails,
-    no_fat_chain: bool,
     current_cluster: u32,
     cluster_offset: u32,
-    valid_data_length: u64,
     bytes_read: u64,
+    pub(crate) file_details: FileDetails,
 }
 impl ReadOnlyFile {
     pub fn new(fs: &FileSystemDetails, file_details: &FileDetails) -> Self {
@@ -47,11 +102,8 @@ impl ReadOnlyFile {
             fs: fs.clone(),
             current_cluster: file_details.first_cluster,
             cluster_offset: 0,
-            valid_data_length: file_details.valid_data_length,
             bytes_read: 0,
-            no_fat_chain: file_details
-                .flags
-                .contains(GeneralSecondaryFlags::NoFatChain),
+            file_details: file_details.clone(),
         }
     }
 
@@ -65,7 +117,11 @@ impl ReadOnlyFile {
     ) -> Result<(u32, u32), ExFatError> {
         let remainder_in_cluster = (self.fs.cluster_length - self.cluster_offset) as u64;
         if remainder_in_cluster == 0 {
-            if self.no_fat_chain {
+            if self
+                .file_details
+                .flags
+                .contains(GeneralSecondaryFlags::NoFatChain)
+            {
                 // no fat chain so all clusters are consecutive for this file
                 self.current_cluster += 1;
                 self.cluster_offset = 0;
@@ -92,7 +148,7 @@ impl ReadOnlyFile {
         io: &mut impl BlockDevice,
         buf: &mut [u8],
     ) -> Result<Option<usize>, ExFatError> {
-        let remainder_in_file = self.valid_data_length - self.bytes_read;
+        let remainder_in_file = self.file_details.valid_data_length - self.bytes_read;
 
         // check for end of file
         if remainder_in_file == 0 {
@@ -125,7 +181,7 @@ impl ReadOnlyFile {
     #[bisync]
     pub async fn read_to_end(&mut self, io: &mut impl BlockDevice) -> Result<Vec<u8>, ExFatError> {
         let mut buf = vec![0; BLOCK_SIZE];
-        let mut contents = Vec::with_capacity(self.valid_data_length as usize);
+        let mut contents = Vec::with_capacity(self.file_details.valid_data_length as usize);
 
         while let Some(len) = self.read(io, &mut buf).await? {
             contents.extend_from_slice(&buf[..len]);

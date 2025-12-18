@@ -63,10 +63,8 @@ Implemented so far:
 - Dual async and blocking support
 - Rename a file or directory (equivalent to move if parent directories change)
 - Delete an empty directory
-
-Not yet implemented (soon though):
-- Appending to a file
 - Copy a file
+- Appending to a file (WIP)
 
 No immediate intention of implementing:
 - Seekable read write file because it requires long term state management and some form of global locking which would then have to be added to everything else.

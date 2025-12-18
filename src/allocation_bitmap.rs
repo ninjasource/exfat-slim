@@ -26,7 +26,7 @@ use super::{
 };
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AllocationBitmap {
     /// start of the allocation bitmap table
     pub first_cluster: u32,

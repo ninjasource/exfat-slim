@@ -204,6 +204,93 @@ impl FileSystem {
     /// the to_path is the new file or directory path (including all sub directories)
     /// if the file or directory changes parent directories then this is conidered to be a file move, otherwide a rename
     #[bisync]
+    pub async fn copy(
+        &self,
+        io: &mut impl BlockDevice,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<(), ExFatError> {
+        if from_path == to_path {
+            return Err(ExFatError::InvalidFileName {
+                reason: "cannot copy file to the same exact location",
+            });
+        }
+        let mut file = self.open(io, from_path).await?;
+
+        if let Some((dir_path, file_or_dir_name)) = split_path(to_path) {
+            let num_clusters = file
+                .file_details
+                .valid_data_length
+                .div_ceil(self.fs.cluster_length as u64) as u32;
+
+            // find free space on the drive, preferring contiguous clusters
+            let allocation = self
+                .alloc_bitmap
+                .find_free_clusters(io, &self.fs, num_clusters, false)
+                .await?;
+
+            self.set_volume_dirty(io, true).await?;
+
+            // find directory or recursively create it if it does not already exist
+            let directory_cluster_id = get_or_create_directory(
+                io,
+                &self.fs,
+                &self.upcase_table,
+                &self.alloc_bitmap,
+                dir_path,
+            )
+            .await?;
+
+            match allocation {
+                Allocation::Contiguous {
+                    first_cluster,
+                    num_clusters,
+                } => {
+                    let flags = GeneralSecondaryFlags::AllocationPossible
+                        | GeneralSecondaryFlags::NoFatChain;
+
+                    create_file_dir_entry_at(
+                        io,
+                        &self.upcase_table,
+                        file_or_dir_name,
+                        directory_cluster_id,
+                        first_cluster,
+                        file.file_details.attributes,
+                        flags,
+                        file.file_details.valid_data_length,
+                        file.file_details.data_length,
+                        &self.fs,
+                    )
+                    .await?;
+
+                    self.alloc_bitmap
+                        .mark_allocated_contiguous(io, &self.fs, first_cluster, num_clusters, true)
+                        .await?;
+
+                    let mut sector_id = self.fs.get_heap_sector_id(first_cluster)?;
+                    let mut buf = [0u8; BLOCK_SIZE];
+
+                    while let Some(len) = file.read(io, &mut buf).await? {
+                        io.write_sector(sector_id, &buf).await?;
+                        sector_id += 1;
+                    }
+                }
+                Allocation::FatChain { clusters } => {
+                    unimplemented!()
+                }
+            }
+
+            self.set_volume_dirty(io, false).await?;
+        }
+
+        Ok(())
+    }
+
+    /// rename a file or folder
+    /// the from_path is the old file or directory path (including all sub directories)
+    /// the to_path is the new file or directory path (including all sub directories)
+    /// if the file or directory changes parent directories then this is conidered to be a file move, otherwide a rename
+    #[bisync]
     pub async fn rename(
         &self,
         io: &mut impl BlockDevice,
@@ -280,53 +367,6 @@ impl FileSystem {
         .await?;
         self.delete_inner(io, &file_details).await?;
         Ok(())
-    }
-
-    /// appends the entire contents to a file.
-    /// the file will be created if it does not already exist.
-    /// this function will create any directories in the path that do not already exist.
-    /// relative paths are not supported.
-    #[bisync]
-    pub async fn append(
-        &self,
-        io: &mut impl BlockDevice,
-        full_path: &str,
-        contents: impl AsRef<[u8]>,
-    ) -> Result<(), ExFatError> {
-        // delete the file if it already exists
-        let file_details = match find_file_inner(
-            io,
-            &self.fs,
-            &self.upcase_table,
-            full_path,
-            Some(FileAttributes::Archive),
-        )
-        .await
-        {
-            Ok(file_details) => file_details,
-            Err(ExFatError::FileNotFound) => {
-                self.write_inner(io, full_path, contents).await?;
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
-
-        let unused_space = file_details.data_length - file_details.valid_data_length;
-        let contents = contents.as_ref();
-
-        if contents.len() <= unused_space as usize {
-            // there is enough space left in the last cluster of the file to fit the contents
-            // TODO: find last sector and offset using fat chain or continuous clusters
-            // TODO: write the contents to the last cluster
-        } else {
-            // TODO: if this is no-fat-chain then check if there are enough free clusters following the last one in this file
-            // TODO: if not enough free clusters then switch to fat chain and update the FAT and directory entry accordingly
-            // TODO: write data, from last byte in last cluster of file, followed by any other newly allocated clusters
-            // TODO: update allocation_bitmap
-        }
-
-        // TODO: update file detail directory entry with updated valid_data_length
-        unimplemented!();
     }
 
     /// writes the entire contents to a file.
