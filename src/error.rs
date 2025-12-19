@@ -45,4 +45,13 @@ pub enum ExFatError {
 
     #[error("directory is not empty")]
     DirectoryNotEmpty,
+
+    #[error("write not enabled")]
+    WriteNotEnabled,
+
+    #[error("read not enabled")]
+    ReadNotEnabled,
+
+    #[error("file already exists")]
+    AlreadyExists,
 }

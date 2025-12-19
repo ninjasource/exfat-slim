@@ -1,5 +1,6 @@
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
+use super::file::OpenOptions;
 use super::{
     allocation_bitmap::{Allocation, AllocationBitmap},
     bisync,
@@ -13,8 +14,8 @@ use super::{
     error::ExFatError,
     fat::next_cluster_in_fat_chain,
     file::{
-        DirectoryIterator, ExactNameFilter, FileDetails, ReadOnlyFile, directory_list,
-        find_file_inner, find_file_or_directory, next_file_entry,
+        DirectoryIterator, ExactNameFilter, File, FileDetails, directory_list, find_file_inner,
+        find_file_or_directory, next_file_entry,
     },
     io::{BLOCK_SIZE, Block, BlockDevice},
     only_async,
@@ -72,7 +73,7 @@ impl FileSystemDetails {
 pub struct FileSystem {
     pub fs: FileSystemDetails,
     upcase_table: UpcaseTable,
-    alloc_bitmap: AllocationBitmap,
+    pub alloc_bitmap: AllocationBitmap,
 }
 
 impl FileSystem {
@@ -102,8 +103,17 @@ impl FileSystem {
     pub async fn open(
         &self,
         io: &mut impl BlockDevice,
+        options: &OpenOptions,
         full_path: &str,
-    ) -> Result<ReadOnlyFile, ExFatError> {
+    ) -> Result<File, ExFatError> {
+        // The various options do the following:
+        // create => check if file exists and use that if it does otherwise open file
+        // create_new => check if file exists and return error if it does otherwise create file
+        // append => set cursor to end of file
+        // truncate => set cursor to start of file and data_length and valid_data_length to 0
+        // write => set cursor to start of file and enable writes
+        // read => set cursor to start of file and enable reads
+
         let file_details = find_file_or_directory(
             io,
             &self.fs,
@@ -112,7 +122,7 @@ impl FileSystem {
             Some(FileAttributes::Archive),
         )
         .await?;
-        let file = ReadOnlyFile::new(&self.fs, &file_details);
+        let file = File::new(&self, &file_details, options);
         Ok(file)
     }
 
@@ -136,7 +146,8 @@ impl FileSystem {
         io: &mut impl BlockDevice,
         full_path: &str,
     ) -> Result<Vec<u8>, ExFatError> {
-        let mut file = self.open(io, full_path).await?;
+        let options = OpenOptions::new().read(true).build();
+        let mut file = self.open(io, &options, full_path).await?;
         file.read_to_end(io).await
     }
 
@@ -146,7 +157,8 @@ impl FileSystem {
         io: &mut impl BlockDevice,
         full_path: &str,
     ) -> Result<String, ExFatError> {
-        let mut file = self.open(io, full_path).await?;
+        let options = OpenOptions::new().read(true).build();
+        let mut file = self.open(io, &options, full_path).await?;
         file.read_to_string(io).await
     }
 
@@ -215,11 +227,12 @@ impl FileSystem {
                 reason: "cannot copy file to the same exact location",
             });
         }
-        let mut file = self.open(io, from_path).await?;
+        let mut file = self
+            .open(io, OpenOptions::new().read(true), from_path)
+            .await?;
 
         if let Some((dir_path, file_or_dir_name)) = split_path(to_path) {
             let num_clusters = file
-                .file_details
                 .valid_data_length
                 .div_ceil(self.fs.cluster_length as u64) as u32;
 
@@ -255,10 +268,10 @@ impl FileSystem {
                         file_or_dir_name,
                         directory_cluster_id,
                         first_cluster,
-                        file.file_details.attributes,
+                        file.attributes,
                         flags,
-                        file.file_details.valid_data_length,
-                        file.file_details.data_length,
+                        file.valid_data_length,
+                        file.data_length,
                         &self.fs,
                     )
                     .await?;

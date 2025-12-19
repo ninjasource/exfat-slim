@@ -10,11 +10,92 @@ use super::{
     },
     error::ExFatError,
     fat::next_cluster_in_fat_chain,
+    file_system::FileSystem,
     file_system::FileSystemDetails,
     io::{BLOCK_SIZE, BlockDevice},
     upcase_table::UpcaseTable,
     utils::{calc_dir_entry_set_len, encode_utf16_upcase_and_hash},
 };
+
+#[derive(Clone, Debug)]
+pub struct OpenOptions {
+    pub read: bool,
+    pub write: bool,
+    pub append: bool,
+    pub truncate: bool,
+    pub create: bool,
+    pub create_new: bool,
+}
+
+impl OpenOptions {
+    pub fn new() -> Self {
+        OpenOptions {
+            read: false,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
+        }
+    }
+
+    /// Set option for read access
+    ///
+    /// If read it true the file should be readable if opened
+    pub fn read(&mut self, read: bool) -> &mut Self {
+        self.read = read;
+        self
+    }
+
+    /// Set option for write access
+    ///
+    /// If write is true the file should be writable if opened
+    pub fn write(&mut self, write: bool) -> &mut Self {
+        self.write = write;
+        self
+    }
+
+    /// Sets the option for append mode
+    ///
+    /// If append is true then writes will append to a file instead of overwriting its contents
+    /// Setting `.write(true).append(true)` has the same affect as only setting `.append(true)`
+    /// This option does not create a file if it does not exist, use create or create_new for that
+    pub fn append(&mut self, append: bool) -> &mut Self {
+        self.append = append;
+        self
+    }
+
+    /// Sets the option to truncate the previous file
+    ///
+    /// If truncate is true, opening the file will truncate the file length to 0 if it already exists.
+    /// The file must be opened with `.write(true)` for this to work.
+    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+        self.truncate = truncate;
+        self
+    }
+
+    /// Sets the option to create a new file or simply open it if it already exists
+    ///
+    /// In order for the file to be created either `.write(true)` or `.append(true)` must be used.
+    /// Calling `.create()` without `.write()` or `append()` will return an error on open
+    pub fn create(&mut self, create: bool) -> &mut Self {
+        self.create = create;
+        self
+    }
+
+    /// Sets the option to create a new file and failing if it already exists
+    ///
+    /// In order for the file to be created either `.write(true)` or `.append(true)` must be used.
+    /// If true `.create()` and `.truncate()` are ignored
+    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+        self.create_new = create_new;
+        self
+    }
+
+    pub fn build(&self) -> Self {
+        self.clone()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct FileDetails {
@@ -35,23 +116,49 @@ impl FileDetails {
     }
 }
 
-pub struct WriteOnlyFile {
+pub struct File {
     fs: FileSystemDetails,
     current_cluster: u32,
     cluster_offset: u32, // in bytes
-    _data_length: Option<u64>,
-    _valid_data_length: u64,
+    cursor: u64,
+    pub data_length: u64,
+    pub valid_data_length: u64,
+    pub attributes: FileAttributes,
     alloc_bitmap: AllocationBitmap,
-    _buf: Option<Box<[u8; BLOCK_SIZE]>>,
+    flags: GeneralSecondaryFlags,
+    open_options: OpenOptions,
 }
 
-impl WriteOnlyFile {
+impl File {
+    pub fn new(
+        file_system: &FileSystem,
+        file_details: &FileDetails,
+        open_options: &OpenOptions,
+    ) -> Self {
+        Self {
+            fs: file_system.fs.clone(),
+            current_cluster: file_details.first_cluster,
+            cluster_offset: 0,
+            cursor: 0,
+            alloc_bitmap: file_system.alloc_bitmap.clone(),
+            data_length: file_details.data_length,
+            flags: file_details.flags,
+            valid_data_length: file_details.valid_data_length,
+            attributes: file_details.attributes,
+            open_options: open_options.clone(),
+        }
+    }
+
     #[bisync]
     pub async fn write(
         &mut self,
         io: &mut impl BlockDevice,
         bytes: &[u8],
     ) -> Result<(), ExFatError> {
+        if !self.open_options.write {
+            return Err(ExFatError::WriteNotEnabled);
+        }
+
         if self.cluster_offset as usize % BLOCK_SIZE == 0 {
             // no need to buffer writes here because they can be flushed immediately
             let sector_id = self.fs.get_heap_sector_id(self.current_cluster)?
@@ -84,29 +191,6 @@ impl WriteOnlyFile {
         Ok(())
     }
 
-    pub fn new_append() -> Self {
-        unimplemented!()
-    }
-}
-
-pub struct ReadOnlyFile {
-    fs: FileSystemDetails,
-    current_cluster: u32,
-    cluster_offset: u32,
-    bytes_read: u64,
-    pub(crate) file_details: FileDetails,
-}
-impl ReadOnlyFile {
-    pub fn new(fs: &FileSystemDetails, file_details: &FileDetails) -> Self {
-        Self {
-            fs: fs.clone(),
-            current_cluster: file_details.first_cluster,
-            cluster_offset: 0,
-            bytes_read: 0,
-            file_details: file_details.clone(),
-        }
-    }
-
     // we assume that we have already checked for the end of file condition
     // if not then the fat chain will return an error variant for end of fat chain.
     // worse, if there is no fat chain then the current cluster will be set to data not part of this file
@@ -117,11 +201,7 @@ impl ReadOnlyFile {
     ) -> Result<(u32, u32), ExFatError> {
         let remainder_in_cluster = (self.fs.cluster_length - self.cluster_offset) as u64;
         if remainder_in_cluster == 0 {
-            if self
-                .file_details
-                .flags
-                .contains(GeneralSecondaryFlags::NoFatChain)
-            {
+            if self.flags.contains(GeneralSecondaryFlags::NoFatChain) {
                 // no fat chain so all clusters are consecutive for this file
                 self.current_cluster += 1;
                 self.cluster_offset = 0;
@@ -138,7 +218,7 @@ impl ReadOnlyFile {
     }
 
     fn move_file_cursor_by(&mut self, num_bytes: usize) {
-        self.bytes_read += num_bytes as u64;
+        self.cursor += num_bytes as u64;
         self.cluster_offset += num_bytes as u32;
     }
 
@@ -148,7 +228,11 @@ impl ReadOnlyFile {
         io: &mut impl BlockDevice,
         buf: &mut [u8],
     ) -> Result<Option<usize>, ExFatError> {
-        let remainder_in_file = self.file_details.valid_data_length - self.bytes_read;
+        if !self.open_options.read {
+            return Err(ExFatError::ReadNotEnabled);
+        }
+
+        let remainder_in_file = self.valid_data_length - self.cursor;
 
         // check for end of file
         if remainder_in_file == 0 {
@@ -181,7 +265,7 @@ impl ReadOnlyFile {
     #[bisync]
     pub async fn read_to_end(&mut self, io: &mut impl BlockDevice) -> Result<Vec<u8>, ExFatError> {
         let mut buf = vec![0; BLOCK_SIZE];
-        let mut contents = Vec::with_capacity(self.file_details.valid_data_length as usize);
+        let mut contents = Vec::with_capacity(self.valid_data_length as usize);
 
         while let Some(len) = self.read(io, &mut buf).await? {
             contents.extend_from_slice(&buf[..len]);
