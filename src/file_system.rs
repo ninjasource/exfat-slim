@@ -99,6 +99,8 @@ impl FileSystem {
         Ok(fs)
     }
 
+    /// Opens a file given some options
+    /// Currently under construction
     #[bisync]
     pub async fn open(
         &self,

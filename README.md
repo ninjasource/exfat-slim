@@ -64,10 +64,16 @@ Implemented so far:
 - Rename a file or directory (equivalent to move if parent directories change)
 - Delete an empty directory
 - Copy a file
-- Appending to a file (WIP)
+- Open File (WIP)
+    - Read
+    - Write
+    - Create
+    - Create New
+    - Append
+    - Truncate
 
-No immediate intention of implementing:
-- Seekable read write file because it requires long term state management and some form of global locking which would then have to be added to everything else.
+Not Implemented
+- File seek
 
 ## Contribution
 
