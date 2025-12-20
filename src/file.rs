@@ -268,15 +268,21 @@ impl File {
     }
 
     #[bisync]
-    pub async fn read_to_end(&mut self, io: &mut impl BlockDevice) -> Result<Vec<u8>, ExFatError> {
-        let mut buf = vec![0; BLOCK_SIZE];
-        let mut contents = Vec::with_capacity(self.valid_data_length as usize);
+    pub async fn read_to_end(
+        &mut self,
+        io: &mut impl BlockDevice,
+        buf: &mut Vec<u8>,
+    ) -> Result<usize, ExFatError> {
+        let len = self.valid_data_length as usize;
+        buf.resize(len, 0);
 
-        while let Some(len) = self.read(io, &mut buf).await? {
-            contents.extend_from_slice(&buf[..len]);
+        let (blocks, remainder) = buf.as_chunks_mut::<BLOCK_SIZE>();
+        for block in blocks {
+            self.read(io, block.as_mut_slice()).await?;
         }
+        self.read(io, remainder).await?;
 
-        Ok(contents)
+        Ok(len)
     }
 
     #[bisync]
@@ -286,8 +292,9 @@ impl File {
     ) -> Result<String, ExFatError> {
         // because multi byte characters may cross sector boundaries
         // I recon its safer to read the entire file into a buffer before decoding it
-        let contents = self.read_to_end(io).await?;
-        let decoded = from_utf8(&contents)?.into();
+        let mut buf = Vec::new();
+        let len = self.read_to_end(io, &mut buf).await?;
+        let decoded = from_utf8(&buf[..len])?.into();
         Ok(decoded)
     }
 }

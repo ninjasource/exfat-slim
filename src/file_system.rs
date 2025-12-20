@@ -295,7 +295,9 @@ impl FileSystem {
     ) -> Result<Vec<u8>, ExFatError> {
         let options = OpenOptions::new().read(true).build();
         let mut file = self.open(io, &options, full_path).await?;
-        file.read_to_end(io).await
+        let mut buf = Vec::new();
+        file.read_to_end(io, &mut buf).await?;
+        Ok(buf)
     }
 
     #[bisync]
