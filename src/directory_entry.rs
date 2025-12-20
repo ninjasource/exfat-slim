@@ -411,8 +411,7 @@ pub struct DirectoryEntryChain {
 }
 
 impl DirectoryEntryChain {
-    // TODO: maybe remove this
-    pub fn new_from_location(fs: &FileSystemDetails, location: &Location) -> Self {
+    pub fn new_from_location(location: &Location, fs: &FileSystemDetails) -> Self {
         let sector_id_from_start = location.sector_id - fs.cluster_heap_offset;
         let cluster_id = sector_id_from_start / fs.sectors_per_cluster as u32;
         let cluster_offset = (sector_id_from_start % fs.sectors_per_cluster as u32) as usize;
@@ -427,6 +426,7 @@ impl DirectoryEntryChain {
             fetch_required: true,
         }
     }
+
     pub fn new(cluster_id: u32, fs: &FileSystemDetails) -> Self {
         Self {
             buf: [0; BLOCK_SIZE],
@@ -515,8 +515,7 @@ pub fn is_end_of_directory(directory_entry: &[u8; 32]) -> bool {
     directory_entry.iter().all(|&x| x == 0)
 }
 
-#[inline(always)]
-fn checksum_next_old(checksum: u16, value: u8) -> u16 {
+const fn checksum_next(checksum: u16, value: u8) -> u16 {
     if checksum & 1 > 0 { 0x8000u16 } else { 0u16 }
         .wrapping_add(checksum >> 1)
         .wrapping_add(value as u16)
@@ -524,21 +523,27 @@ fn checksum_next_old(checksum: u16, value: u8) -> u16 {
 
 /// calculates the checksum for a file directory set
 /// we assume that this directly set has at least 3 entries
-pub fn calc_checksum_old(dir_entry_set: &[RawDirEntry]) -> u16 {
+fn calc_checksum(dir_entry_set: &[RawDirEntry]) -> u16 {
     let file_dir = &dir_entry_set[0];
     let mut checksum = 0u16;
     for value in &file_dir[..2] {
-        checksum = checksum_next_old(checksum, *value)
+        checksum = checksum_next(checksum, *value)
     }
     // skip indexes 2 and 3 as that is the checksum itself
     for value in &file_dir[4..] {
-        checksum = checksum_next_old(checksum, *value)
+        checksum = checksum_next(checksum, *value)
     }
     for dir_entry in &dir_entry_set[1..] {
         for value in dir_entry {
-            checksum = checksum_next_old(checksum, *value)
+            checksum = checksum_next(checksum, *value)
         }
     }
 
     checksum
+}
+
+/// calculate and update the set_checksum field
+pub fn update_checksum(dir_entries: &mut [RawDirEntry]) {
+    let set_checksum = calc_checksum(&dir_entries);
+    dir_entries[0][2..4].copy_from_slice(&set_checksum.to_le_bytes());
 }

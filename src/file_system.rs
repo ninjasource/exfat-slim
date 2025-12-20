@@ -1,3 +1,5 @@
+use core::error::Error;
+
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 use super::file::OpenOptions;
@@ -8,8 +10,8 @@ use super::{
     directory_entry::{
         AllocationBitmapDirEntry, DirectoryEntryChain, EntryType, FileAttributes, FileDirEntry,
         FileNameDirEntry, GeneralSecondaryFlags, Location, RAW_ENTRY_LEN, RawDirEntry,
-        StreamExtensionDirEntry, UpcaseTableDirEntry, VolumeLabelDirEntry, calc_checksum_old,
-        is_end_of_directory,
+        StreamExtensionDirEntry, UpcaseTableDirEntry, VolumeLabelDirEntry, is_end_of_directory,
+        update_checksum,
     },
     error::ExFatError,
     fat::next_cluster_in_fat_chain,
@@ -116,6 +118,7 @@ impl FileSystem {
         // write => set cursor to start of file and enable writes
         // read => set cursor to start of file and enable reads
 
+        // attempt to get the file details
         let file_details = find_file_or_directory(
             io,
             &self.fs,
@@ -123,9 +126,151 @@ impl FileSystem {
             full_path,
             Some(FileAttributes::Archive),
         )
-        .await?;
-        let file = File::new(&self, &file_details, options);
-        Ok(file)
+        .await;
+
+        // get file details or create if required
+        let file_details = match file_details {
+            Ok(file_details) => {
+                if options.create_new {
+                    return Err(ExFatError::AlreadyExists);
+                }
+
+                if options.truncate {
+                    self.truncate_file(io, &file_details).await?;
+                }
+
+                file_details
+            }
+            Err(ExFatError::FileNotFound) => {
+                if options.create || options.create_new {
+                    self.create_file(io, full_path).await?
+                } else {
+                    return Err(ExFatError::FileNotFound);
+                }
+            }
+            Err(e) => return Err(e),
+        };
+
+        Ok(File::new(&self, &file_details, options))
+    }
+
+    /// Sets a file to zero length and frees up all the clusters the file used to point to (except for the first one)
+    #[bisync]
+    async fn truncate_file(
+        &self,
+        io: &mut impl BlockDevice,
+        file_details: &FileDetails,
+    ) -> Result<(), ExFatError> {
+        let mut chain = DirectoryEntryChain::new_from_location(&file_details.location, &self.fs);
+
+        let mut counter = 0;
+        let mut dir_entries = Vec::with_capacity(file_details.secondary_count as usize + 1);
+
+        // copy all directory entries for the file into a Vec
+        while let Some((dir_entry, _location)) = chain.next(io).await? {
+            let mut entry = [0u8; RAW_ENTRY_LEN];
+            entry.copy_from_slice(dir_entry);
+            dir_entries.push(entry);
+            counter += 1;
+            if counter == file_details.secondary_count + 1 {
+                break;
+            }
+        }
+
+        // set file length to 0
+        let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
+        stream_ext.data_length = 0;
+        stream_ext.valid_data_length = 0;
+        dir_entries[1].copy_from_slice(&stream_ext.serialize());
+
+        // mark all clusters after the first one as free
+        let cluster_ids = self.get_all_clusters_from(io, file_details).await?;
+        if cluster_ids.len() > 1 {
+            self.alloc_bitmap
+                .mark_allocated(io, &self.fs, &cluster_ids[1..], false)
+                .await?;
+        }
+
+        // calculate and update the set_checksum field
+        update_checksum(&mut dir_entries);
+
+        // write to disk - only the directory entries are written.
+        // the data the file points to is left as is (but is free to be overwritten)
+        write_dir_entries_to_disk(io, file_details.location, dir_entries).await?;
+
+        Ok(())
+    }
+
+    #[bisync]
+    async fn create_file(
+        &self,
+        io: &mut impl BlockDevice,
+        full_path: &str,
+    ) -> Result<FileDetails, ExFatError> {
+        if let Some((dir_path, file_or_dir_name)) = split_path(full_path) {
+            let num_clusters = 1;
+
+            // find free space on the drive, preferring contiguous clusters
+            let allocation = self
+                .alloc_bitmap
+                .find_free_clusters(io, &self.fs, num_clusters, false)
+                .await?;
+
+            self.set_volume_dirty(io, true).await?;
+
+            // find directory or recursively create it if it does not already exist
+            let directory_cluster_id = get_or_create_directory(
+                io,
+                &self.fs,
+                &self.upcase_table,
+                &self.alloc_bitmap,
+                dir_path,
+            )
+            .await?;
+
+            let file_details = match allocation {
+                Allocation::Contiguous {
+                    first_cluster,
+                    num_clusters,
+                } => {
+                    let flags = GeneralSecondaryFlags::AllocationPossible
+                        | GeneralSecondaryFlags::NoFatChain;
+
+                    let attributes = FileAttributes::Archive;
+
+                    // create a zero length file
+                    let file_details = create_file_dir_entry_at(
+                        io,
+                        &self.upcase_table,
+                        file_or_dir_name,
+                        directory_cluster_id,
+                        first_cluster,
+                        attributes,
+                        flags,
+                        0,
+                        0,
+                        &self.fs,
+                    )
+                    .await?;
+
+                    self.alloc_bitmap
+                        .mark_allocated_contiguous(io, &self.fs, first_cluster, num_clusters, true)
+                        .await?;
+
+                    file_details
+                }
+                Allocation::FatChain { clusters } => {
+                    unimplemented!()
+                }
+            };
+
+            self.set_volume_dirty(io, false).await?;
+            return Ok(file_details);
+        }
+
+        Err(ExFatError::InvalidFileName {
+            reason: "invalid filename encountered when creating file",
+        })
     }
 
     #[bisync]
@@ -710,16 +855,18 @@ async fn create_file_dir_entry_at(
     valid_data_length: u64,
     data_length: u64,
     fs: &FileSystemDetails,
-) -> Result<(), ExFatError> {
+) -> Result<FileDetails, ExFatError> {
     let (utf16_name, name_hash) = encode_utf16_and_hash(name, upcase_table);
     let dir_entry_set_len = calc_dir_entry_set_len(&utf16_name);
     let location =
         find_empty_dir_entry_set(io, directory_cluster_id, dir_entry_set_len, fs).await?;
     let mut dir_entries: Vec<RawDirEntry> = Vec::with_capacity(dir_entry_set_len);
 
+    let secondary_count = dir_entry_set_len as u8 - 1;
+
     // write file directory entry set
     let file = FileDirEntry {
-        secondary_count: dir_entry_set_len as u8 - 1,
+        secondary_count,
         set_checksum: 0,
         file_attributes,
         create_timestamp: 0,
@@ -764,12 +911,22 @@ async fn create_file_dir_entry_at(
     }
 
     // calculate and update the set_checksum field
-    let set_checksum = calc_checksum_old(&dir_entries);
-    dir_entries[0][2..4].copy_from_slice(&set_checksum.to_le_bytes());
+    update_checksum(&mut dir_entries);
 
     // write to disk
     write_dir_entries_to_disk(io, location, dir_entries).await?;
-    Ok(())
+
+    let file_details = FileDetails {
+        attributes: file_attributes,
+        data_length,
+        valid_data_length,
+        first_cluster,
+        flags: stream_ext_flags,
+        location,
+        name: name.into(),
+        secondary_count,
+    };
+    Ok(file_details)
 }
 
 #[bisync]

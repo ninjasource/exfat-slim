@@ -135,11 +135,16 @@ impl File {
         file_details: &FileDetails,
         open_options: &OpenOptions,
     ) -> Self {
+        let cursor = if open_options.append {
+            file_details.valid_data_length
+        } else {
+            0
+        };
         Self {
             fs: file_system.fs.clone(),
             current_cluster: file_details.first_cluster,
             cluster_offset: 0,
-            cursor: 0,
+            cursor,
             alloc_bitmap: file_system.alloc_bitmap.clone(),
             data_length: file_details.data_length,
             flags: file_details.flags,
