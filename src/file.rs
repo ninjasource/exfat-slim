@@ -129,7 +129,50 @@ pub struct File {
     open_options: OpenOptions,
 }
 
+struct Allocation {
+    start_cluster_index: u32,
+    fs: FileSystemDetails,
+    sector_index: usize,
+    cluster_ids: Vec<u32>,
+}
+
+impl Allocation {
+    #[bisync]
+    async fn new(
+        io: &mut impl BlockDevice,
+        file: &File,
+        buf_len: usize,
+    ) -> Result<Self, ExFatError> {
+        unimplemented!()
+    }
+
+    fn next_sector_id(&mut self) -> Result<u32, ExFatError> {
+        let cluster_index = self.sector_index / self.fs.sectors_per_cluster as usize;
+        if cluster_index >= self.cluster_ids.len() {
+            return Err(ExFatError::DiskFull);
+        }
+
+        let cluster_id = self.cluster_ids[cluster_index];
+        let start_sector_id = self.fs.get_heap_sector_id(cluster_id)?;
+        let sector_id = start_sector_id + self.sector_index as u32;
+        self.sector_index += 1;
+        Ok(sector_id)
+    }
+}
+
 impl File {
+    fn next_sector_id(&mut self, current_cluster_index: &mut usize, cluster_ids: &[u32]) -> u32 {
+        0
+    }
+    fn get_current_sector_id(&self) -> Result<(u32, usize), ExFatError> {
+        let cluster_offset_bytes = self.cursor % self.fs.cluster_length as u64;
+        let start_sector_id = self.fs.get_heap_sector_id(self.current_cluster)?;
+        let sector_id =
+            start_sector_id + cluster_offset_bytes as u32 / self.fs.sectors_per_cluster as u32;
+        let offset = cluster_offset_bytes as usize % self.fs.sectors_per_cluster as usize;
+        Ok((sector_id, offset))
+    }
+
     pub fn new(
         file_system: &FileSystem,
         file_details: &FileDetails,
@@ -155,44 +198,98 @@ impl File {
     }
 
     #[bisync]
-    pub async fn write(
-        &mut self,
-        io: &mut impl BlockDevice,
-        bytes: &[u8],
-    ) -> Result<(), ExFatError> {
+    pub async fn write(&mut self, io: &mut impl BlockDevice, buf: &[u8]) -> Result<(), ExFatError> {
         if !self.open_options.write {
             return Err(ExFatError::WriteNotEnabled);
         }
 
-        if self.cluster_offset as usize % BLOCK_SIZE == 0 {
-            // no need to buffer writes here because they can be flushed immediately
-            let sector_id = self.fs.get_heap_sector_id(self.current_cluster)?
-                + self.cluster_offset / BLOCK_SIZE as u32;
+        let mut allocation = Allocation::new(io, self, buf.len()).await?;
 
-            let (blocks, remainder) = bytes.as_chunks::<BLOCK_SIZE>();
-            for block in blocks {
-                if self.cluster_offset == 0 {
-                    self.alloc_bitmap
-                        .mark_allocated(io, &self.fs, &[self.current_cluster], true)
-                        .await?;
-                }
+        let first_sector_id_in_cluster = self.fs.get_heap_sector_id(self.current_cluster)?;
+        let mut sector_id = first_sector_id_in_cluster + self.cluster_offset;
 
-                io.write_sector(sector_id, block).await?;
-                self.cluster_offset += BLOCK_SIZE as u32;
+        //let cluster_ids = self.get_or_allocate_clusters(io, buf.len()).await?;
+        let cluster_ids = vec![];
+        let mut start_index = (self.cursor % BLOCK_SIZE as u64) as usize;
 
-                if self.cluster_offset >= self.fs.cluster_length {
-                    // TODO: fix this clearly incorrect assumption that a growing file is no-fat-chain
-                    self.current_cluster += 1;
-                    self.cluster_offset = 0;
-                }
+        let (sector_id, offset) = self.get_current_sector_id()?;
+
+        // if the write does not start on a block boundary
+        // we need to read the existing sector and add in the bit we want to write
+        // for max efficiency the user should always write in block size chunks
+        if offset > 0 {
+            let end_index = BLOCK_SIZE.min(buf.len());
+            let block = io.read_sector(sector_id).await?;
+            let mut temp = [0u8; BLOCK_SIZE];
+            temp[..start_index].copy_from_slice(&block[..start_index]);
+            temp[start_index..].copy_from_slice(&buf[start_index..end_index]);
+            io.write_sector(sector_id, &temp).await?;
+            start_index = end_index;
+
+            if sector_id % self.fs.sectors_per_cluster as u32 == 0 {
+                self.current_cluster = cluster_ids[1];
+                self.cluster_offset = 0;
             }
-
-            if remainder.len() > 0 {
-                unimplemented!("length must be multiple of BLOCK_SIZE")
-            }
-        } else {
-            unimplemented!("unalligned writes not supported")
         }
+
+        /*
+        if start_index > 0 {
+            let end_index = BLOCK_SIZE.min(buf.len());
+            let block = io.read_sector(sector_id).await?;
+            let mut temp = [0u8; BLOCK_SIZE];
+            temp[..start_index].copy_from_slice(&block[..start_index]);
+            temp[start_index..].copy_from_slice(&buf[start_index..end_index]);
+            io.write_sector(sector_id, &temp).await?;
+            start_index = end_index;
+            sector_id += 1;
+            if sector_id % self.fs.sectors_per_cluster as u32 == 0 {
+                self.current_cluster = cluster_ids[1];
+                self.cluster_offset = 0;
+            }
+        }*/
+
+        let (blocks, remainder) = buf[start_index..].as_chunks::<BLOCK_SIZE>();
+        for block in blocks {
+            let first_sector_id_in_cluster = self.fs.get_heap_sector_id(self.current_cluster)?;
+            //  let sector_id = first_sector_id_in_cluster +
+        }
+
+        for cluster_id in cluster_ids {
+            let first_sector_id_in_cluster = self.fs.get_heap_sector_id(self.current_cluster)?;
+
+            for cluster_offset in self.cluster_offset..self.fs.sectors_per_cluster as u32 {
+                let sector_id = first_sector_id_in_cluster + cluster_offset;
+
+                // if file cursor is a multiple of block size we dont need to worry about partial writes to a block
+                // if self.cursor % BLOCK_SIZE == 0 {}
+            }
+
+            if self.cluster_offset as usize % BLOCK_SIZE == 0 {
+                // no need to buffer writes here because they can be flushed immediately
+                let sector_id = self.fs.get_heap_sector_id(self.current_cluster)?
+                    + self.cluster_offset / BLOCK_SIZE as u32;
+
+                let (blocks, remainder) = buf.as_chunks::<BLOCK_SIZE>();
+                for block in blocks {
+                    io.write_sector(sector_id, block).await?;
+                    self.cluster_offset += BLOCK_SIZE as u32;
+
+                    if self.cluster_offset >= self.fs.cluster_length {
+                        // TODO: fix this clearly incorrect assumption that a growing file is no-fat-chain
+                        self.current_cluster += 1;
+                        self.cluster_offset = 0;
+                    }
+                }
+
+                if remainder.len() > 0 {
+                    unimplemented!("length must be multiple of BLOCK_SIZE")
+                }
+            } else {
+                // in order to support this we need to read the sector and copy in the buf bytes
+                unimplemented!("unalligned writes not supported")
+            }
+        }
+
         Ok(())
     }
 
@@ -267,6 +364,12 @@ impl File {
         Ok(Some(num_bytes))
     }
 
+    /// Read all bytes from file into the buffer
+    /// This behaves the same way the Rust std library equivalent function works
+    /// If you only want the buf to contain file bytes then pass in an empty buf (length zero)
+    /// If you pass in a non zero length buf the file bytes will be appended onto the end of the buf
+    /// If you want to pass in preallocated memory then you are free to set the capacity of the buf passed in
+    /// and the file will be copied from position 0 in the buf (if it is length 0)
     #[bisync]
     pub async fn read_to_end(
         &mut self,
@@ -274,8 +377,12 @@ impl File {
         buf: &mut Vec<u8>,
     ) -> Result<usize, ExFatError> {
         let len = self.valid_data_length as usize;
-        buf.resize(len, 0);
 
+        // fill empty space with zeros
+        buf.resize(buf.len() + len, 0);
+
+        // reading in block size chunks from position 0 is the most efficient way to get data off the disk in one go
+        // we can ignore the len returned from the read operation as a result
         let (blocks, remainder) = buf.as_chunks_mut::<BLOCK_SIZE>();
         for block in blocks {
             self.read(io, block.as_mut_slice()).await?;
