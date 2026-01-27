@@ -24,6 +24,7 @@ use super::{
     upcase_table::UpcaseTable,
     utils::{
         calc_dir_entry_set_len, encode_utf16_and_hash, encode_utf16_upcase_and_hash, read_u16_le,
+        set_volume_dirty,
     },
 };
 
@@ -136,7 +137,7 @@ impl FileSystem {
                 }
 
                 if options.truncate {
-                    self.truncate_file(io, &file_details).await?;
+                    self.truncate_file(io, &file_details, 0).await?;
                 }
 
                 file_details
@@ -154,15 +155,21 @@ impl FileSystem {
         Ok(File::new(&self, &file_details, options))
     }
 
-    /// Sets a file to zero length and frees up all the clusters the file used to point to (except for the first one)
+    /// Sets a file to length specified and allocates or frees up all the clusters linked to the file
+    /// If length is set to zero then only the first cluster in the file will be allocated.
     #[bisync]
     async fn truncate_file(
         &self,
         io: &mut impl BlockDevice,
         file_details: &FileDetails,
+        length: u64,
     ) -> Result<(), ExFatError> {
-        let mut chain = DirectoryEntryChain::new_from_location(&file_details.location, &self.fs);
+        // TODO: support length greater than 0 for preallocated files
+        if length > 0 {
+            unimplemented!("length greater than 0 not yet supported")
+        }
 
+        let mut chain = DirectoryEntryChain::new_from_location(&file_details.location, &self.fs);
         let mut counter = 0;
         let mut dir_entries = Vec::with_capacity(file_details.secondary_count as usize + 1);
 
@@ -179,8 +186,8 @@ impl FileSystem {
 
         // set file length to 0
         let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
-        stream_ext.data_length = 0;
-        stream_ext.valid_data_length = 0;
+        stream_ext.data_length = length;
+        stream_ext.valid_data_length = stream_ext.valid_data_length.min(length);
         dir_entries[1].copy_from_slice(&stream_ext.serialize());
 
         // mark all clusters after the first one as free
@@ -213,10 +220,10 @@ impl FileSystem {
             // find free space on the drive, preferring contiguous clusters
             let allocation = self
                 .alloc_bitmap
-                .find_free_clusters(io, &self.fs, num_clusters, false)
+                .find_free_clusters(io, &self.fs, num_clusters, false, None)
                 .await?;
 
-            self.set_volume_dirty(io, true).await?;
+            set_volume_dirty(io, true).await?;
 
             // find directory or recursively create it if it does not already exist
             let directory_cluster_id = get_or_create_directory(
@@ -264,7 +271,7 @@ impl FileSystem {
                 }
             };
 
-            self.set_volume_dirty(io, false).await?;
+            set_volume_dirty(io, false).await?;
             return Ok(file_details);
         }
 
@@ -382,16 +389,17 @@ impl FileSystem {
 
         if let Some((dir_path, file_or_dir_name)) = split_path(to_path) {
             let num_clusters = file
+                .details
                 .valid_data_length
                 .div_ceil(self.fs.cluster_length as u64) as u32;
 
             // find free space on the drive, preferring contiguous clusters
             let allocation = self
                 .alloc_bitmap
-                .find_free_clusters(io, &self.fs, num_clusters, false)
+                .find_free_clusters(io, &self.fs, num_clusters, false, None)
                 .await?;
 
-            self.set_volume_dirty(io, true).await?;
+            set_volume_dirty(io, true).await?;
 
             // find directory or recursively create it if it does not already exist
             let directory_cluster_id = get_or_create_directory(
@@ -417,10 +425,10 @@ impl FileSystem {
                         file_or_dir_name,
                         directory_cluster_id,
                         first_cluster,
-                        file.attributes,
+                        file.details.attributes,
                         flags,
-                        file.valid_data_length,
-                        file.data_length,
+                        file.details.valid_data_length,
+                        file.details.data_length,
                         &self.fs,
                     )
                     .await?;
@@ -442,7 +450,7 @@ impl FileSystem {
                 }
             }
 
-            self.set_volume_dirty(io, false).await?;
+            set_volume_dirty(io, false).await?;
         }
 
         Ok(())
@@ -472,7 +480,7 @@ impl FileSystem {
         }
 
         if let Some((dir_path, file_or_dir_name)) = split_path(to_path) {
-            self.set_volume_dirty(io, true).await?;
+            set_volume_dirty(io, true).await?;
 
             write_dir_entries_to_disk(io, file_details.location, freed_dir_entries).await?;
 
@@ -500,7 +508,7 @@ impl FileSystem {
             )
             .await?;
 
-            self.set_volume_dirty(io, false).await?;
+            set_volume_dirty(io, false).await?;
         }
 
         Ok(())
@@ -589,7 +597,7 @@ impl FileSystem {
             // find free space on the drive, preferring contiguous clusters
             let allocation = self
                 .alloc_bitmap
-                .find_free_clusters(io, &self.fs, num_clusters, false)
+                .find_free_clusters(io, &self.fs, num_clusters, false, None)
                 .await?;
 
             match allocation {
@@ -597,7 +605,7 @@ impl FileSystem {
                     first_cluster,
                     num_clusters,
                 } => {
-                    self.set_volume_dirty(io, true).await?;
+                    set_volume_dirty(io, true).await?;
 
                     self.alloc_bitmap
                         .mark_allocated_contiguous(io, &self.fs, first_cluster, num_clusters, true)
@@ -636,7 +644,7 @@ impl FileSystem {
                     }
 
                     // TODO: figure out what to do if we fail half way through
-                    self.set_volume_dirty(io, false).await?;
+                    set_volume_dirty(io, false).await?;
                 }
                 Allocation::FatChain { clusters } => {
                     unimplemented!("writing to a file using the fat chain is not yet supported")
@@ -644,22 +652,6 @@ impl FileSystem {
             }
         }
 
-        Ok(())
-    }
-
-    #[bisync]
-    async fn set_volume_dirty(
-        &self,
-        io: &mut impl BlockDevice,
-        is_dirty: bool,
-    ) -> Result<(), ExFatError> {
-        let sector_id = 0; // boot sector
-        let mut sector = [0u8; BLOCK_SIZE];
-        sector.copy_from_slice(io.read_sector(sector_id).await?);
-        let mut volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(&sector));
-        volume_flags.set(VolumeFlags::VolumeDirty, is_dirty);
-        sector[106..108].copy_from_slice(&volume_flags.bits().to_le_bytes());
-        io.write_sector(sector_id, &sector).await?;
         Ok(())
     }
 
@@ -673,11 +665,25 @@ impl FileSystem {
         let num_clusters = file_details.get_num_clusters(self.fs.cluster_length);
 
         let mut clusters = Vec::with_capacity(num_clusters);
-        clusters.push(cluster_id);
 
-        while let Some(x) = next_cluster_in_fat_chain(io, self.fs.fat_offset, cluster_id).await? {
-            cluster_id = x;
+        if file_details
+            .flags
+            .contains(GeneralSecondaryFlags::NoFatChain)
+        {
+            // no fat chain - clusters are contiguous
+            for _ in 0..num_clusters {
+                clusters.push(cluster_id);
+                cluster_id += 1;
+            }
+        } else {
+            // navigate fat chain
             clusters.push(cluster_id);
+            while let Some(x) =
+                next_cluster_in_fat_chain(io, self.fs.fat_offset, cluster_id).await?
+            {
+                cluster_id = x;
+                clusters.push(cluster_id);
+            }
         }
 
         Ok(clusters)
@@ -719,8 +725,7 @@ impl FileSystem {
         file_details: &FileDetails,
     ) -> Result<(), ExFatError> {
         self.confirm_has_no_children(io, file_details).await?;
-
-        self.set_volume_dirty(io, true).await?;
+        set_volume_dirty(io, true).await?;
 
         // TODO: if this is no-fat-chain then dont use the FAT
         let cluster_ids = self.get_all_clusters_from(io, file_details).await?;
@@ -764,7 +769,7 @@ impl FileSystem {
             }
         }
 
-        self.set_volume_dirty(io, false).await?;
+        set_volume_dirty(io, false).await?;
         Ok(())
     }
 }
@@ -801,7 +806,9 @@ async fn get_or_create_directory(
             }
             None => {
                 // directory does not exist, create it
-                let allocation = alloc_bitmap.find_free_clusters(io, fs, 1, true).await?;
+                let allocation = alloc_bitmap
+                    .find_free_clusters(io, fs, 1, true, None)
+                    .await?;
                 let first_cluster = match allocation {
                     Allocation::FatChain { clusters } => clusters[0],
                     Allocation::Contiguous {
@@ -932,7 +939,7 @@ async fn create_file_dir_entry_at(
 }
 
 #[bisync]
-async fn write_dir_entries_to_disk(
+pub(crate) async fn write_dir_entries_to_disk(
     io: &mut impl BlockDevice,
     location: Location,
     dir_entries: Vec<RawDirEntry>,

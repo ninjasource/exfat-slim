@@ -19,23 +19,26 @@ I am not knocking the amazing coding agents out there right now, its just that i
 
 ## Usage
 
-You will need to implement your own block device which is the piece of code that sends and receives blocks of data (usually 512 bytes) to and from your SD card, flash memory or hard drive. In the examples below I have created a simple in-memory block device for demonstration purposes. Since this block device may require a shared bus (like SPI) I have chosen to make all `FileSystem` calls immutable so that it can be passed around easily and make the user pass in mutable block device for every call. Therefore it is up to the user to synchronise access to the block device. 
+You will need to implement your own block device which is the piece of code that sends and receives blocks of data (usually 512 bytes) to and from your SD card, flash memory or hard drive. 
+In the examples below I have created a simple in-memory block device for demonstration purposes. 
+Since this block device may require a shared bus (like SPI) I have chosen to make all `FileSystem` calls immutable so that it can be passed around easily and make the user pass in mutable block device for every call. 
+Therefore it is up to the user to synchronise access to the block device. 
 
 Reading a file into a string:
 ```rust
-let mut io = InMemoryBlockDevice::new();
+let mut io = InMemoryBlockDevice::new(); // your SD card driver
 let fs = FileSystem::new(&mut io).await?;
 let contents: String = fs
     .read_to_string(&mut io, "/temp2/hello2/shoe/test.txt")
     .await?;
 ```
 
-Listing all files and folders in the root directory (or folder "/temp2/hello2")
+Listing all files and folders in the folder "/temp2/hello2"
 ```rust
-let mut io = InMemoryBlockDevice::new();
+let mut io = InMemoryBlockDevice::new(); // your SD card driver
 let fs = FileSystem::new(&mut io).await?;
 
-let path = ""; // or "/temp2/hello2"
+let path = "/temp2/hello2";
 let mut list: DirectoryIterator = fs.read_dir(&mut io, path).await?;
 while let Some(item) = list.next(&mut io).await? {
     println!("{:?}", item);
@@ -44,7 +47,13 @@ while let Some(item) = list.next(&mut io).await? {
 
 ## Usage guidelines
 
-As per the license, this codebase comes with no guarantees and I don't accept any responsibility for data corruption or loss regardless of the guidelines that follow. Read functions do not mutate the file system so are considered safer than write functions if you are concerned about data corruption or loss. The library should not panic and if it does as a result of a badly formed file system then this is a bug, please report it. The only exception to this is `unimplemented!` or `todo!` code sections that are temporary. I have attempted to replicate how the Rust standard library exposes a file system so that the API feels familiar. As a result I have chosen to require an allocator. If you create a file in a nested directory the library will attempt to create all the required directories if they do not exist.
+As per the license, this codebase comes with no guarantees and I don't accept any responsibility for data corruption or loss regardless of the guidelines that follow. 
+Read functions do not mutate the file system so are considered safer than write functions if you are concerned about data corruption or loss. 
+The library should not panic and if it does as a result of a badly formed file system then this is a bug, please report it. 
+The only exception to this is `unimplemented!` or `todo!` code sections that are temporary. 
+I have attempted to replicate how the Rust standard library exposes a file system so that the API feels familiar. 
+As a result I have chosen to require an allocator. 
+If you create a file in a nested directory the library will attempt to create all the required directories if they do not exist.
 
 ## Work in progress
 
@@ -71,9 +80,12 @@ Implemented so far:
     - Create New
     - Append
     - Truncate
+    - Seek
 
-Not Implemented
-- File seek
+Work in progress:
+- Truncate to specified length to preallocate a file
+- Better test coverage
+- Timestamps
 
 ## Contribution
 

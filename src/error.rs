@@ -54,4 +54,10 @@ pub enum ExFatError {
 
     #[error("file already exists")]
     AlreadyExists,
+
+    #[error("cannot seek past the end of the valid data in the file")]
+    SeekOutOfRange,
+
+    #[error("attempt to change the allocation bitmap to a value with no effect")]
+    InvalidAllocation,
 }

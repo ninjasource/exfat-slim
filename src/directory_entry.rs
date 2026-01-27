@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use bitflags::bitflags;
 use thiserror::Error;
 
@@ -63,7 +64,7 @@ pub struct FileDirEntry {
     /// the number of entries following this one
     pub secondary_count: u8,
 
-    /// the checksum of all the directory entries in this set (expluding this field)
+    /// the checksum of all the directory entries in this set (excluding this field)
     pub set_checksum: u16,
 
     /// file or directory flags like Directory or Archive for example

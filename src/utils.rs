@@ -1,6 +1,18 @@
 use alloc::{collections::btree_map::Range, string::String, vec, vec::Vec};
 
-use super::{error::ExFatError, upcase_table::UpcaseTable};
+use super::{
+    bisync,
+    boot_sector::VolumeFlags,
+    error::ExFatError,
+    io::{BLOCK_SIZE, BlockDevice},
+    upcase_table::UpcaseTable,
+};
+
+pub fn chunk_at<const N: usize, T>(slice: &[T], index: usize) -> Option<&[T; N]> {
+    let start = index.checked_mul(N)?;
+    let end = start.checked_add(N)?;
+    slice.get(start..end)?.try_into().ok()
+}
 
 pub fn read_u16_le<const INDEX: usize, const N: usize>(value: &[u8; N]) -> u16 {
     let mut tmp = [0u8; size_of::<u16>()];
@@ -72,4 +84,16 @@ pub fn decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
         })
         .collect::<Result<String, ExFatError>>()?;
     Ok(decoded)
+}
+
+#[bisync]
+pub async fn set_volume_dirty(io: &mut impl BlockDevice, is_dirty: bool) -> Result<(), ExFatError> {
+    let sector_id = 0; // boot sector
+    let mut sector = [0u8; BLOCK_SIZE];
+    sector.copy_from_slice(io.read_sector(sector_id).await?);
+    let mut volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(&sector));
+    volume_flags.set(VolumeFlags::VolumeDirty, is_dirty);
+    sector[106..108].copy_from_slice(&volume_flags.bits().to_le_bytes());
+    io.write_sector(sector_id, &sector).await?;
+    Ok(())
 }

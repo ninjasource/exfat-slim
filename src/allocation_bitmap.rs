@@ -136,6 +136,13 @@ impl AllocationBitmap {
             for index in indices {
                 let byte = &mut block[index / 8];
                 let bit = index % 8;
+                let is_set = (*byte & (1 << bit)) != 0;
+
+                // an attempt to change the allocation that will have no effect
+                if allocated && is_set || !allocated && !is_set {
+                    return Err(ExFatError::InvalidAllocation);
+                }
+
                 if allocated {
                     // set the bit
                     *byte |= 1 << bit;
@@ -152,6 +159,7 @@ impl AllocationBitmap {
     }
 
     /// locates the next free set of contiguous clusters
+    /// is from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
     #[bisync]
     pub async fn find_free_clusters(
         &self,
@@ -159,8 +167,10 @@ impl AllocationBitmap {
         fs: &FileSystemDetails,
         num_clusters: u32,
         only_fat_chain: bool,
+        from_cluster: Option<u32>,
     ) -> Result<Allocation, ExFatError> {
-        let sector_id = fs.get_heap_sector_id(self.first_cluster)?;
+        let from_cluster = from_cluster.unwrap_or(self.first_cluster);
+        let sector_id = fs.get_heap_sector_id(from_cluster)?;
 
         let mut counter = 0;
         let mut cluster_id: Option<u32> = None;
@@ -243,7 +253,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn find_free_clusteres_test() {
+    async fn find_free_clusters() {
         let mut sectors = [[0; BLOCK_SIZE], [0; BLOCK_SIZE]];
         let mut io = InMemoryBlockDevice {
             sectors: &mut sectors,
@@ -262,7 +272,7 @@ mod tests {
             first_cluster_of_root_dir: 0,
         };
         allocation_bitmap
-            .find_free_clusters(&mut io, &fs, 1, false)
+            .find_free_clusters(&mut io, &fs, 1, false, None)
             .await
             .unwrap();
     }
