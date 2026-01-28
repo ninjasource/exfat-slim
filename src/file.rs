@@ -20,6 +20,17 @@ use super::{
 };
 
 #[derive(Clone, Debug)]
+pub struct OpenBuilder<'a> {
+    file_system: &'a FileSystem,
+    read: bool,
+    write: bool,
+    append: bool,
+    truncate: bool,
+    create: bool,
+    create_new: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct OpenOptions {
     pub read: bool,
     pub write: bool,
@@ -29,9 +40,10 @@ pub struct OpenOptions {
     pub create_new: bool,
 }
 
-impl OpenOptions {
-    pub fn new() -> Self {
-        OpenOptions {
+impl<'a> OpenBuilder<'a> {
+    pub fn new(file_system: &'a FileSystem) -> Self {
+        Self {
+            file_system,
             read: false,
             write: false,
             append: false,
@@ -94,8 +106,61 @@ impl OpenOptions {
         self
     }
 
-    pub fn build(&self) -> Self {
-        self.clone()
+    #[bisync]
+    pub async fn open(
+        &self,
+        io: &mut impl BlockDevice,
+        full_path: &str,
+    ) -> Result<File, ExFatError> {
+        let options = self.build();
+
+        // TODO: remove duplication of the code below in FileSystem::open
+
+        // attempt to get the file details
+        let file_details = find_file_or_directory(
+            io,
+            &self.file_system.fs,
+            &self.file_system.upcase_table,
+            full_path,
+            Some(FileAttributes::Archive),
+        )
+        .await;
+
+        // get file details or create if required
+        let file_details = match file_details {
+            Ok(file_details) => {
+                if options.create_new {
+                    return Err(ExFatError::AlreadyExists);
+                }
+
+                if options.truncate {
+                    self.file_system.truncate_file(io, &file_details, 0).await?;
+                }
+
+                file_details
+            }
+            Err(ExFatError::FileNotFound) => {
+                if options.create || options.create_new {
+                    self.file_system.create_file(io, full_path).await?
+                } else {
+                    return Err(ExFatError::FileNotFound);
+                }
+            }
+            Err(e) => return Err(e),
+        };
+
+        Ok(File::new(&self.file_system, &file_details, &options))
+    }
+
+    fn build(&self) -> OpenOptions {
+        OpenOptions {
+            read: self.read,
+            append: self.append,
+            create: self.create,
+            create_new: self.create_new,
+            truncate: self.truncate,
+            write: self.write,
+        }
     }
 }
 
@@ -332,7 +397,7 @@ impl File {
         let mut cluster_ids = cluster_ids.into_iter();
 
         let mut start_index = (self.cursor % BLOCK_SIZE as u64) as usize;
-        let end_index = BLOCK_SIZE.min(buf.len());
+        let end_index = BLOCK_SIZE.min(start_index + buf.len());
         let sector_id = self.get_current_sector_id()?;
 
         // for the first block, if the write does not start on a block boundary

@@ -16,8 +16,8 @@ use super::{
     error::ExFatError,
     fat::next_cluster_in_fat_chain,
     file::{
-        DirectoryIterator, ExactNameFilter, File, FileDetails, directory_list, find_file_inner,
-        find_file_or_directory, next_file_entry,
+        DirectoryIterator, ExactNameFilter, File, FileDetails, OpenBuilder, directory_list,
+        find_file_inner, find_file_or_directory, next_file_entry,
     },
     io::{BLOCK_SIZE, Block, BlockDevice},
     only_async,
@@ -75,7 +75,7 @@ impl FileSystemDetails {
 #[derive(Debug)]
 pub struct FileSystem {
     pub fs: FileSystemDetails,
-    upcase_table: UpcaseTable,
+    pub upcase_table: UpcaseTable,
     pub alloc_bitmap: AllocationBitmap,
 }
 
@@ -102,63 +102,14 @@ impl FileSystem {
         Ok(fs)
     }
 
-    /// Opens a file given some options
-    /// Currently under construction
-    #[bisync]
-    pub async fn open(
-        &self,
-        io: &mut impl BlockDevice,
-        options: &OpenOptions,
-        full_path: &str,
-    ) -> Result<File, ExFatError> {
-        // The various options do the following:
-        // create => check if file exists and use that if it does otherwise open file
-        // create_new => check if file exists and return error if it does otherwise create file
-        // append => set cursor to end of file
-        // truncate => set cursor to start of file and data_length and valid_data_length to 0
-        // write => set cursor to start of file and enable writes
-        // read => set cursor to start of file and enable reads
-
-        // attempt to get the file details
-        let file_details = find_file_or_directory(
-            io,
-            &self.fs,
-            &self.upcase_table,
-            full_path,
-            Some(FileAttributes::Archive),
-        )
-        .await;
-
-        // get file details or create if required
-        let file_details = match file_details {
-            Ok(file_details) => {
-                if options.create_new {
-                    return Err(ExFatError::AlreadyExists);
-                }
-
-                if options.truncate {
-                    self.truncate_file(io, &file_details, 0).await?;
-                }
-
-                file_details
-            }
-            Err(ExFatError::FileNotFound) => {
-                if options.create || options.create_new {
-                    self.create_file(io, full_path).await?
-                } else {
-                    return Err(ExFatError::FileNotFound);
-                }
-            }
-            Err(e) => return Err(e),
-        };
-
-        Ok(File::new(&self, &file_details, options))
+    pub fn with_options<'a>(&'a self) -> OpenBuilder<'a> {
+        OpenBuilder::new(self)
     }
 
     /// Sets a file to length specified and allocates or frees up all the clusters linked to the file
     /// If length is set to zero then only the first cluster in the file will be allocated.
     #[bisync]
-    async fn truncate_file(
+    pub(crate) async fn truncate_file(
         &self,
         io: &mut impl BlockDevice,
         file_details: &FileDetails,
@@ -209,7 +160,7 @@ impl FileSystem {
     }
 
     #[bisync]
-    async fn create_file(
+    pub(crate) async fn create_file(
         &self,
         io: &mut impl BlockDevice,
         full_path: &str,
@@ -267,6 +218,7 @@ impl FileSystem {
                     file_details
                 }
                 Allocation::FatChain { clusters } => {
+                    // TODO: fix this
                     unimplemented!()
                 }
             };
@@ -300,8 +252,7 @@ impl FileSystem {
         io: &mut impl BlockDevice,
         full_path: &str,
     ) -> Result<Vec<u8>, ExFatError> {
-        let options = OpenOptions::new().read(true).build();
-        let mut file = self.open(io, &options, full_path).await?;
+        let mut file = self.with_options().read(true).open(io, full_path).await?;
         let mut buf = Vec::new();
         file.read_to_end(io, &mut buf).await?;
         Ok(buf)
@@ -313,8 +264,7 @@ impl FileSystem {
         io: &mut impl BlockDevice,
         full_path: &str,
     ) -> Result<String, ExFatError> {
-        let options = OpenOptions::new().read(true).build();
-        let mut file = self.open(io, &options, full_path).await?;
+        let mut file = self.with_options().read(true).open(io, full_path).await?;
         file.read_to_string(io).await
     }
 
@@ -383,9 +333,7 @@ impl FileSystem {
                 reason: "cannot copy file to the same exact location",
             });
         }
-        let mut file = self
-            .open(io, OpenOptions::new().read(true), from_path)
-            .await?;
+        let mut file = self.with_options().read(true).open(io, from_path).await?;
 
         if let Some((dir_path, file_or_dir_name)) = split_path(to_path) {
             let num_clusters = file
