@@ -910,7 +910,7 @@ pub(crate) async fn write_dir_entries_to_disk(
                 break;
             }
 
-            // we dont need to check if sector_id has overflowed the cluster
+            // we don't need to check if sector_id has overflowed the cluster
             // because we asked for a valid dir entry set
             offset = 0;
             sector_id += 1;

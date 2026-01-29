@@ -25,7 +25,7 @@ async fn main() -> Result<(), ExFatError> {
     file.write(&mut io, b"W").await?;
 
     let contents = fs.read_to_string(&mut io, full_path).await?;
-    println!("{contents}");
+    println!("Contents: `{contents}`");
 
     Ok(())
 }

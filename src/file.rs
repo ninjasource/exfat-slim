@@ -114,8 +114,6 @@ impl<'a> OpenBuilder<'a> {
     ) -> Result<File, ExFatError> {
         let options = self.build();
 
-        // TODO: remove duplication of the code below in FileSystem::open
-
         // attempt to get the file details
         let file_details = find_file_or_directory(
             io,
@@ -382,6 +380,38 @@ impl File {
     }
 
     #[bisync]
+    async fn write_partial_sector(
+        &mut self,
+        io: &mut impl BlockDevice,
+        buf: &[u8],
+        cluster_ids: &mut impl Iterator<Item = u32>,
+    ) -> Result<usize, ExFatError> {
+        if buf.len() == 0 {
+            return Ok(0);
+        }
+
+        let start_index = (self.cursor % BLOCK_SIZE as u64) as usize;
+        let end_index = BLOCK_SIZE.min(start_index + buf.len());
+        let sector_id = self.get_current_sector_id()?;
+
+        // for the first block, if the write does not start on a block boundary
+        // we need to read the existing sector and add in the bit we want to write
+        // for max efficiency the user should write in block size chunks
+        if start_index > 0 || end_index < BLOCK_SIZE {
+            let block = io.read_sector(sector_id).await?;
+            let mut temp = [0u8; BLOCK_SIZE];
+            let len = end_index - start_index;
+            temp.copy_from_slice(block);
+            temp[start_index..end_index].copy_from_slice(&buf[..len]);
+            io.write_sector(sector_id, &temp).await?;
+            self.move_file_cursor_for_writes(len, cluster_ids)?;
+            return Ok(len);
+        }
+
+        Ok(0)
+    }
+
+    #[bisync]
     pub async fn write(&mut self, io: &mut impl BlockDevice, buf: &[u8]) -> Result<(), ExFatError> {
         if !self.open_options.write {
             return Err(ExFatError::WriteNotEnabled);
@@ -396,54 +426,25 @@ impl File {
         let cluster_ids = self.get_or_allocate_clusters(io, buf.len()).await?;
         let mut cluster_ids = cluster_ids.into_iter();
 
-        let mut start_index = (self.cursor % BLOCK_SIZE as u64) as usize;
-        let end_index = BLOCK_SIZE.min(start_index + buf.len());
-        let sector_id = self.get_current_sector_id()?;
+        // write the first sector (could be partially full)
+        let len = self.write_partial_sector(io, buf, &mut cluster_ids).await?;
 
-        // for the first block, if the write does not start on a block boundary
-        // we need to read the existing sector and add in the bit we want to write
-        // for max efficiency the user should write in block size chunks
-        if start_index > 0 || end_index < BLOCK_SIZE {
-            let block = io.read_sector(sector_id).await?;
-            let mut temp = [0u8; BLOCK_SIZE];
-            temp.copy_from_slice(block);
-            temp[start_index..end_index].copy_from_slice(&buf[start_index..end_index]);
-            io.write_sector(sector_id, &temp).await?;
-            let len = end_index - start_index;
-            self.move_file_cursor_for_writes(len, &mut cluster_ids)?;
-            start_index = end_index;
+        // if there are still more bytes to write
+        if len < buf.len() {
+            let start_index = len;
+            let (blocks, remainder) = buf[start_index..].as_chunks::<BLOCK_SIZE>();
 
-            // we have written the entire buf to disk, exit early
-            if buf.len() == len {
-                set_volume_dirty(io, false).await?;
-                return Ok(());
+            // write full sectors
+            for block in blocks {
+                let sector_id = self.get_current_sector_id()?;
+                io.write_sector(sector_id, block).await?;
+                self.move_file_cursor_for_writes(block.len(), &mut cluster_ids)?;
             }
-        }
 
-        // this is guaranteed to be a multiple of BLOCK_SIZE due to the partial block boundary check above
-        let remaining_bytes_in_cluster =
-            self.fs.cluster_length - (self.cursor % self.fs.cluster_length as u64) as u32;
-        let len = buf[start_index..]
-            .len()
-            .min(remaining_bytes_in_cluster as usize);
-
-        let (blocks, remainder) = buf[start_index..start_index + len].as_chunks::<BLOCK_SIZE>();
-        for block in blocks {
-            let sector_id = self.get_current_sector_id()?;
-            io.write_sector(sector_id, block).await?;
-            self.move_file_cursor_for_writes(block.len(), &mut cluster_ids)?;
-        }
-
-        // if there are bytes at the end that are not a multiple of BLOCK_SIZE
-        // we need to read the block first so that we don't overwrite what is in the rest of the block
-        if remainder.len() > 0 {
-            let sector_id = self.get_current_sector_id()?;
-            let block = io.read_sector(sector_id).await?;
-            let mut temp = [0u8; BLOCK_SIZE];
-            temp[remainder.len()..].copy_from_slice(&block[remainder.len()..]);
-            temp[..remainder.len()].copy_from_slice(remainder);
-            io.write_sector(sector_id, &temp).await?;
-            self.move_file_cursor_for_writes(remainder.len(), &mut cluster_ids)?;
+            // write the last sector (could be partially full)
+            let _len = self
+                .write_partial_sector(io, remainder, &mut cluster_ids)
+                .await?;
         }
 
         // check if we need to update the file directory entry
@@ -456,9 +457,9 @@ impl File {
 
             // the stream ext is always the second entry
             let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
-            stream_ext.data_length = data_length;
-            stream_ext.valid_data_length = valid_data_length;
-            stream_ext.general_secondary_flags = flags;
+            stream_ext.data_length = self.details.data_length;
+            stream_ext.valid_data_length = self.details.valid_data_length;
+            stream_ext.general_secondary_flags = self.details.flags;
 
             // serialize the mutated stream ext back to the dir entry
             dir_entries[1].copy_from_slice(&stream_ext.serialize());

@@ -413,8 +413,9 @@ pub struct DirectoryEntryChain {
 
 impl DirectoryEntryChain {
     pub fn new_from_location(location: &Location, fs: &FileSystemDetails) -> Self {
+        // This is so gross, make it better
         let sector_id_from_start = location.sector_id - fs.cluster_heap_offset;
-        let cluster_id = sector_id_from_start / fs.sectors_per_cluster as u32;
+        let cluster_id = 2 + sector_id_from_start / fs.sectors_per_cluster as u32;
         let cluster_offset = (sector_id_from_start % fs.sectors_per_cluster as u32) as usize;
         let dir_entry_offset = location.dir_entry_offset;
 
