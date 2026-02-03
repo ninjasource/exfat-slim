@@ -109,6 +109,12 @@ Work in progress:
 - Truncate to specified length to preallocate a file
 - Better test coverage
 - Timestamps
+- Use Actor pattern so that BlockDevice trait can take a shared reference to self
+- Support `close()` and `flush()` instead of immediate mode. Enable `close()` on Drop (should be possible with Actor pattern)
+- Maintain list of locked open files
+- Experiment with buffer pools to limit memory allocation 
+- Add support for different block sizes
+- Add Embassy example
 
 ## Contribution
 

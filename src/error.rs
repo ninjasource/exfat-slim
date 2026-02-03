@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use super::{boot_sector, directory_entry, file_system, io};
 
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum ExFatError {
     #[error("io")]
