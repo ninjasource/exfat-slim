@@ -253,7 +253,8 @@ impl FileSystem {
         full_path: &str,
     ) -> Result<Vec<u8>, ExFatError> {
         let mut file = self.with_options().read(true).open(io, full_path).await?;
-        let mut buf = Vec::new();
+        let len = file.details.valid_data_length.min(usize::MAX as u64) as usize;
+        let mut buf = Vec::with_capacity(len);
         file.read_to_end(io, &mut buf).await?;
         Ok(buf)
     }

@@ -259,6 +259,10 @@ impl File {
 
         // fast path, exit early
         if num_bytes <= remaining_bytes_in_cluster as usize {
+            log::info!(
+                "fast path, exit early: num_bytes {num_bytes} remaining_bytes_in_cluster {remaining_bytes_in_cluster}"
+            );
+
             // this cluster has already been allocated
             return Ok(vec![self.current_cluster]);
         }
@@ -300,12 +304,14 @@ impl File {
                     cluster_id = next_id;
                     allocated_cluster_ids.push(cluster_id);
                 } else {
+                    // TODO: fix this. obviously we are at the end of the fat chain here
                     return Err(ExFatError::EndOfFatChain);
                 }
             }
         }
 
         if unallocated_bytes == 0 {
+            log::info!("unallocated_bytes == 0 ");
             return Ok(allocated_cluster_ids);
         }
 
@@ -329,10 +335,13 @@ impl File {
                 first_cluster,
                 num_clusters,
             } => {
+                log::info!("continuous");
                 let cluster_ids: Vec<u32> = (first_cluster..first_cluster + num_clusters).collect();
                 cluster_ids
             }
             Allocation::FatChain { clusters } => {
+                log::info!("switch to fat chain");
+
                 // if file had no fat chain before we set one up for existing data
                 self.convert_file_to_fat_chain_if_required(io).await?;
 
