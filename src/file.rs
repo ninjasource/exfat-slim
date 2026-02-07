@@ -1,5 +1,6 @@
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::String, vec, vec::Vec};
 use core::{iter::chain, num, slice, str::from_utf8};
+use log::info;
 
 use super::{
     allocation_bitmap::{Allocation, AllocationBitmap},
@@ -218,14 +219,9 @@ impl File {
         Self {
             fs: file_system.fs.clone(),
             details: file_details.clone(),
-            //  first_cluster: file_details.first_cluster,
             current_cluster: file_details.first_cluster,
             cursor,
             alloc_bitmap: file_system.alloc_bitmap.clone(),
-            //   data_length: file_details.data_length,
-            //   flags: file_details.flags,
-            //  valid_data_length: file_details.valid_data_length,
-            //  attributes: file_details.attributes,
             open_options: open_options.clone(),
         }
     }
@@ -248,10 +244,8 @@ impl File {
         }
 
         let old_data_length = self.details.data_length;
-        let valid_data_length =
-            (self.cursor + num_bytes as u64).max(self.details.valid_data_length);
-        self.details.data_length = valid_data_length.max(self.details.data_length);
-        self.details.valid_data_length = valid_data_length;
+
+        self.update_data_length(num_bytes);
 
         // we can fit num_bytes into the current cluster then return that cluster, no need to allocate more clusters
         let remaining_bytes_in_cluster =
@@ -276,37 +270,37 @@ impl File {
         let (allocated_bytes, unallocated_bytes) = {
             let remaining =
                 self.details.data_length - self.cursor - remaining_bytes_in_cluster as u64;
-            let allocated_bytes = remaining.min(num_bytes as u64) as usize;
-            let unallocated_bytes = num_bytes - allocated_bytes;
+            let unallocated_bytes = remaining.min(num_bytes as u64) as usize;
+            let allocated_bytes = num_bytes - unallocated_bytes;
             (allocated_bytes, unallocated_bytes)
         };
 
-        let no_fat_chain = !self
+        let has_fat_chain = !self
             .details
             .flags
             .contains(GeneralSecondaryFlags::NoFatChain);
 
-        // add already allocated clusters
-        let num_clusters = allocated_bytes.div_ceil(self.fs.cluster_length as usize);
+        // add already allocated clusters (don't include the current cluster hence not using div_ceil)
+        let num_allocated_clusters = allocated_bytes / (self.fs.cluster_length as usize);
+
         let mut cluster_id = self.current_cluster;
-        if no_fat_chain {
-            // clusters are contiguous
-            for _ in 0..num_clusters {
-                cluster_id += 1;
-                allocated_cluster_ids.push(cluster_id);
-            }
-        } else {
+        if has_fat_chain {
             // follow the fat chain and build up
-            for _ in 0..num_clusters {
+            for _ in 0..num_allocated_clusters {
                 if let Some(next_id) =
                     next_cluster_in_fat_chain(io, self.fs.fat_offset, cluster_id).await?
                 {
                     cluster_id = next_id;
                     allocated_cluster_ids.push(cluster_id);
                 } else {
-                    // TODO: fix this. obviously we are at the end of the fat chain here
                     return Err(ExFatError::EndOfFatChain);
                 }
+            }
+        } else {
+            // clusters are contiguous
+            for _ in 0..num_allocated_clusters {
+                cluster_id += 1;
+                allocated_cluster_ids.push(cluster_id);
             }
         }
 
@@ -315,7 +309,22 @@ impl File {
             return Ok(allocated_cluster_ids);
         }
 
-        let num_clusters = unallocated_bytes.div_ceil(self.fs.cluster_length as usize) as u32;
+        let num_unallocated_clusters =
+            unallocated_bytes.div_ceil(self.fs.cluster_length as usize) as u32;
+
+        info!(
+            "allocated_bytes: {} unallocated_bytes: {} data_length: {} old_data_length: {}, num_bytes: {}, cursor: {}, num_allocated_clusters: {}, current_cluster: {}, num_unallocated_clusters: {}, no_fat_chain: {}",
+            allocated_bytes,
+            unallocated_bytes,
+            self.details.data_length,
+            old_data_length,
+            num_bytes,
+            self.cursor,
+            num_allocated_clusters,
+            self.current_cluster,
+            num_unallocated_clusters,
+            has_fat_chain
+        );
 
         // returns all newly allocated clusters
         // in this case this would EXCLUDE current_cluster because it would already be allocated
@@ -324,8 +333,8 @@ impl File {
             .find_free_clusters(
                 io,
                 &self.fs,
-                num_clusters,
-                !no_fat_chain,
+                num_unallocated_clusters,
+                has_fat_chain,
                 Some(self.current_cluster),
             )
             .await?;
@@ -340,7 +349,7 @@ impl File {
                 cluster_ids
             }
             Allocation::FatChain { clusters } => {
-                log::info!("switch to fat chain");
+                log::info!("fat chain: {:?}", clusters);
 
                 // if file had no fat chain before we set one up for existing data
                 self.convert_file_to_fat_chain_if_required(io).await?;
@@ -361,13 +370,20 @@ impl File {
         Ok(allocated_cluster_ids)
     }
 
+    fn update_data_length(&mut self, num_bytes: usize) {
+        let valid_data_length =
+            (self.cursor + num_bytes as u64).max(self.details.valid_data_length);
+        self.details.data_length = valid_data_length.max(self.details.data_length);
+        self.details.valid_data_length = valid_data_length;
+    }
+
     /// helps to convert a file that had no_fat_chain to one with a fat chain
     #[bisync]
     async fn convert_file_to_fat_chain_if_required(
         &mut self,
         io: &mut impl BlockDevice,
     ) -> Result<(), ExFatError> {
-        if self
+        if !self
             .details
             .flags
             .contains(GeneralSecondaryFlags::NoFatChain)

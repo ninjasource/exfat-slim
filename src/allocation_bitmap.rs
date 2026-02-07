@@ -158,8 +158,108 @@ impl AllocationBitmap {
         Ok(())
     }
 
-    /// locates the next free set of contiguous clusters
-    /// is from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
+    /// locates the next free set of contiguous clusters.
+    /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
+    #[bisync]
+    pub async fn find_free_clusters_non_contiguous(
+        &self,
+        io: &mut impl BlockDevice,
+        fs: &FileSystemDetails,
+        num_clusters: usize,
+        from_cluster: Option<u32>,
+    ) -> Result<Allocation, ExFatError> {
+        let from_cluster = from_cluster.unwrap_or(self.first_cluster);
+        let sector_id = fs.get_heap_sector_id(from_cluster)?;
+        let sector_index = (from_cluster - 2) / BLOCK_SIZE as u32;
+        let mut cluster_id = sector_index * BLOCK_SIZE as u32 + 2;
+        let mut clusters = Vec::with_capacity(num_clusters);
+
+        for sector_offset in sector_index..self.num_sectors {
+            let buf = io.read_sector(sector_id + sector_offset).await?;
+            let (bytes, _remainder) = buf.as_chunks::<4>();
+            for (chunk_index, chunk) in bytes.iter().enumerate() {
+                if u32::from_le_bytes(*chunk) != u32::MAX {
+                    for (byte_index, byte) in chunk.iter().enumerate() {
+                        for bit in 0..u8::BITS {
+                            if *byte & 1 << bit == 0 {
+                                if from_cluster <= cluster_id {
+                                    clusters.push(cluster_id);
+                                    if clusters.len() == num_clusters {
+                                        return Ok(Allocation::FatChain { clusters });
+                                    }
+                                }
+                            }
+
+                            cluster_id += 1;
+                        }
+                    }
+                } else {
+                    cluster_id += u32::BITS;
+                }
+            }
+        }
+
+        Err(ExFatError::DiskFull)
+    }
+
+    /// locates the next free set of contiguous clusters.
+    /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
+    #[bisync]
+    pub async fn find_free_clusters_contiguous(
+        &self,
+        io: &mut impl BlockDevice,
+        fs: &FileSystemDetails,
+        num_clusters: usize,
+        from_cluster: Option<u32>,
+    ) -> Result<Allocation, ExFatError> {
+        let from_cluster = from_cluster.unwrap_or(self.first_cluster);
+        let sector_id = fs.get_heap_sector_id(from_cluster)?;
+        let sector_index = (from_cluster - 2) / BLOCK_SIZE as u32;
+        let mut cluster_id = sector_index * BLOCK_SIZE as u32 + 2;
+        let mut first_cluster = None;
+        let mut count = 0;
+
+        for sector_offset in sector_index..self.num_sectors {
+            let buf = io.read_sector(sector_id + sector_offset).await?;
+            let (bytes, _remainder) = buf.as_chunks::<4>();
+            for (chunk_index, chunk) in bytes.iter().enumerate() {
+                if u32::from_le_bytes(*chunk) != u32::MAX {
+                    for (byte_index, byte) in chunk.iter().enumerate() {
+                        for bit in 0..u8::BITS {
+                            if *byte & 1 << bit == 0 {
+                                if from_cluster <= cluster_id {
+                                    if first_cluster.is_none() {
+                                        first_cluster = Some(cluster_id);
+                                        count = 1
+                                    } else {
+                                        count += 1;
+                                    }
+
+                                    if count == num_clusters {
+                                        return Ok(Allocation::Contiguous {
+                                            first_cluster: first_cluster.unwrap(),
+                                            num_clusters: num_clusters as u32,
+                                        });
+                                    }
+                                }
+                            } else {
+                                first_cluster = None;
+                            }
+
+                            cluster_id += 1;
+                        }
+                    }
+                } else {
+                    cluster_id += u32::BITS;
+                    first_cluster = None;
+                }
+            }
+        }
+
+        Err(ExFatError::DiskFull)
+    }
+
+    // TODO: combine calls to continuous and non_continuous in this function (replace its contents)
     #[bisync]
     pub async fn find_free_clusters(
         &self,
