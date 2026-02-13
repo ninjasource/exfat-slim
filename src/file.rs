@@ -327,7 +327,6 @@ impl File {
         );
 
         // returns all newly allocated clusters
-        // in this case this would EXCLUDE current_cluster because it would already be allocated
         let allocation = self
             .alloc_bitmap
             .find_free_clusters(
@@ -449,6 +448,7 @@ impl File {
         let data_length = self.details.data_length;
 
         let cluster_ids = self.get_or_allocate_clusters(io, buf.len()).await?;
+        log::info!("get_or_allocate_clusters: {:?}", cluster_ids);
         let mut cluster_ids = cluster_ids.into_iter();
 
         // write the first sector (could be partially full)
@@ -607,6 +607,7 @@ impl File {
         // here we detect if we got to the end of the cluster and hence if we need to jump to the next cluster or not
         if num_bytes > 0 && self.cursor % self.fs.cluster_length as u64 == 0 && !self.eof() {
             if let Some(cluster_id) = cluster_ids.next() {
+                log::info!("cluster_cursor: {}", cluster_id);
                 self.current_cluster = cluster_id;
             } else {
                 return Err(ExFatError::EndOfFatChain);

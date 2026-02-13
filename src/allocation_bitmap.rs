@@ -165,13 +165,14 @@ impl AllocationBitmap {
         &self,
         io: &mut impl BlockDevice,
         fs: &FileSystemDetails,
-        num_clusters: usize,
+        num_clusters: u32,
         from_cluster: Option<u32>,
     ) -> Result<Allocation, ExFatError> {
         let from_cluster = from_cluster.unwrap_or(self.first_cluster);
         let sector_id = fs.get_heap_sector_id(from_cluster)?;
         let sector_index = (from_cluster - 2) / BLOCK_SIZE as u32;
         let mut cluster_id = sector_index * BLOCK_SIZE as u32 + 2;
+        let num_clusters = num_clusters as usize;
         let mut clusters = Vec::with_capacity(num_clusters);
 
         for sector_offset in sector_index..self.num_sectors {
@@ -182,7 +183,7 @@ impl AllocationBitmap {
                     for (byte_index, byte) in chunk.iter().enumerate() {
                         for bit in 0..u8::BITS {
                             if *byte & 1 << bit == 0 {
-                                if from_cluster <= cluster_id {
+                                if cluster_id >= from_cluster {
                                     clusters.push(cluster_id);
                                     if clusters.len() == num_clusters {
                                         return Ok(Allocation::FatChain { clusters });
@@ -205,14 +206,13 @@ impl AllocationBitmap {
     /// locates the next free set of contiguous clusters.
     /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
     #[bisync]
-    pub async fn find_free_clusters_contiguous(
+    pub async fn find_free_clusters_contiguous_from(
         &self,
         io: &mut impl BlockDevice,
         fs: &FileSystemDetails,
-        num_clusters: usize,
-        from_cluster: Option<u32>,
+        num_clusters: u32,
+        from_cluster: u32,
     ) -> Result<Allocation, ExFatError> {
-        let from_cluster = from_cluster.unwrap_or(self.first_cluster);
         let sector_id = fs.get_heap_sector_id(from_cluster)?;
         let sector_index = (from_cluster - 2) / BLOCK_SIZE as u32;
         let mut cluster_id = sector_index * BLOCK_SIZE as u32 + 2;
@@ -227,20 +227,26 @@ impl AllocationBitmap {
                     for (byte_index, byte) in chunk.iter().enumerate() {
                         for bit in 0..u8::BITS {
                             if *byte & 1 << bit == 0 {
-                                if from_cluster <= cluster_id {
+                                if cluster_id < from_cluster {
+                                    continue;
+                                }
+
+                                if from_cluster == cluster_id {
+                                    first_cluster = Some(cluster_id);
+                                    count = 1;
+                                } else {
                                     if first_cluster.is_none() {
-                                        first_cluster = Some(cluster_id);
-                                        count = 1
+                                        return Err(ExFatError::DiskFull);
                                     } else {
                                         count += 1;
                                     }
+                                }
 
-                                    if count == num_clusters {
-                                        return Ok(Allocation::Contiguous {
-                                            first_cluster: first_cluster.unwrap(),
-                                            num_clusters: num_clusters as u32,
-                                        });
-                                    }
+                                if count == num_clusters {
+                                    return Ok(Allocation::Contiguous {
+                                        first_cluster: first_cluster.unwrap(),
+                                        num_clusters: num_clusters as u32,
+                                    });
                                 }
                             } else {
                                 first_cluster = None;
@@ -259,7 +265,65 @@ impl AllocationBitmap {
         Err(ExFatError::DiskFull)
     }
 
-    // TODO: combine calls to continuous and non_continuous in this function (replace its contents)
+    /// locates the next free set of contiguous clusters.
+    /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
+    #[bisync]
+    pub async fn find_free_clusters_contiguous(
+        &self,
+        io: &mut impl BlockDevice,
+        fs: &FileSystemDetails,
+        num_clusters: u32,
+    ) -> Result<Allocation, ExFatError> {
+        let first_cluster = self.first_cluster;
+        let sector_id = fs.get_heap_sector_id(first_cluster)?;
+        let sector_index = (first_cluster - 2) / BLOCK_SIZE as u32;
+        let mut cluster_id = sector_index * BLOCK_SIZE as u32 + 2;
+        let mut first_cluster = None;
+        let mut count = 0;
+
+        for sector_offset in sector_index..self.num_sectors {
+            let buf = io.read_sector(sector_id + sector_offset).await?;
+            let (bytes, _remainder) = buf.as_chunks::<4>();
+            for (chunk_index, chunk) in bytes.iter().enumerate() {
+                if u32::from_le_bytes(*chunk) != u32::MAX {
+                    for (byte_index, byte) in chunk.iter().enumerate() {
+                        for bit in 0..u8::BITS {
+                            if *byte & 1 << bit == 0 {
+                                if first_cluster.is_none() {
+                                    first_cluster = Some(cluster_id);
+                                    count = 1
+                                } else {
+                                    count += 1;
+                                }
+
+                                if count == num_clusters {
+                                    return Ok(Allocation::Contiguous {
+                                        first_cluster: first_cluster.unwrap(),
+                                        num_clusters: num_clusters as u32,
+                                    });
+                                }
+                            } else {
+                                first_cluster = None;
+                            }
+
+                            cluster_id += 1;
+                        }
+                    }
+                } else {
+                    cluster_id += u32::BITS;
+                    first_cluster = None;
+                }
+            }
+        }
+
+        Err(ExFatError::DiskFull)
+    }
+
+    /// finds free clusters in the allocation bitmap
+    /// NOTE: this will NOT mark those clusters as allocated, you still need to do this
+    /// only_fat_chain is typically true when we are extending a file that already uses the fat chain
+    /// if successful, this function will always return num_clusters number of free clusters
+    /// if num_clusters free clusters not be found the function will return DiskFull
     #[bisync]
     pub async fn find_free_clusters(
         &self,
@@ -267,81 +331,38 @@ impl AllocationBitmap {
         fs: &FileSystemDetails,
         num_clusters: u32,
         only_fat_chain: bool,
-        from_cluster: Option<u32>,
+        current_cluster: Option<u32>,
     ) -> Result<Allocation, ExFatError> {
-        let from_cluster = from_cluster.unwrap_or(self.first_cluster);
-        let sector_id = fs.get_heap_sector_id(from_cluster)?;
-
-        let mut counter = 0;
-        let mut cluster_id: Option<u32> = None;
-        let mut first_free: Option<u32> = None;
-
-        // let num_sectors
-        'outer: for sector_offset in 0..self.num_sectors {
-            let buf = io.read_sector(sector_id + sector_offset).await?;
-            let (bytes, _remainder) = buf.as_chunks::<4>();
-            for (chunk_index, chunk) in bytes.iter().enumerate() {
-                // fast batch check for a free cluster
-                if u32::from_le_bytes(*chunk) != u32::MAX {
-                    for (byte_index, byte) in chunk.iter().enumerate() {
-                        for bit in 0..u8::BITS {
-                            if *byte & 1 << bit == 0 {
-                                // happy path
-                                let cluster_id = match cluster_id {
-                                    Some(cluster_id) => {
-                                        counter += 1;
-                                        cluster_id
-                                    }
-                                    None => {
-                                        // position 0 cluster_id starts at 2 (for historical reasons they say)
-                                        let cluster_id = sector_offset as u32 * BLOCK_SIZE as u32
-                                            + chunk_index as u32 * u32::BITS
-                                            + byte_index as u32 * u8::BITS
-                                            + bit as u32
-                                            + 2;
-
-                                        if first_free.is_none() {
-                                            // keep track of the first free cluster we ever found
-                                            first_free = Some(cluster_id);
-                                            if only_fat_chain {
-                                                break 'outer;
-                                            }
-                                        }
-                                        counter = 1;
-                                        cluster_id
-                                    }
-                                };
-
-                                // abandon attepting to find an allocation
-                                if cluster_id > self.max_cluster_id {
-                                    break;
-                                }
-
-                                if counter == num_clusters {
-                                    return Ok(Allocation::Contiguous {
-                                        first_cluster: cluster_id,
-                                        num_clusters,
-                                    });
-                                }
-                            } else {
-                                if cluster_id.is_some() {
-                                    cluster_id = None;
-                                    counter = 0;
-                                }
-                            }
-                        }
-                    }
+        if only_fat_chain {
+            self.find_free_clusters_non_contiguous(io, fs, num_clusters, current_cluster)
+                .await
+        } else {
+            let allocation = match current_cluster {
+                Some(current_cluster) => {
+                    self.find_free_clusters_contiguous_from(
+                        io,
+                        fs,
+                        num_clusters,
+                        current_cluster + 1,
+                    )
+                    .await
                 }
+                None => {
+                    self.find_free_clusters_contiguous(io, fs, num_clusters)
+                        .await
+                }
+            };
+
+            match allocation {
+                Ok(alocation) => Ok(alocation),
+                Err(ExFatError::DiskFull) => {
+                    // we were unable to find a coniguous allocation
+                    self.find_free_clusters_non_contiguous(io, fs, num_clusters, current_cluster)
+                        .await
+                }
+                Err(e) => Err(e),
             }
         }
-
-        // we could not find a contiguous block of clusters
-        return match first_free {
-            Some(first_free) if first_free <= self.max_cluster_id => Ok(Allocation::FatChain {
-                clusters: vec![first_free],
-            }),
-            _ => Err(ExFatError::DiskFull),
-        };
     }
 }
 

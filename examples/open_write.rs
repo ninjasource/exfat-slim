@@ -1,4 +1,6 @@
 mod common;
+use std::str::from_utf8;
+
 use crate::common::asynchronous::InMemoryBlockDevice;
 use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
 use rand::rngs::StdRng;
@@ -45,9 +47,9 @@ async fn main() -> Result<(), ExFatError> {
 
     let mut expected = fs.read(&mut io, full_path).await?;
     let mut dest = vec![0u8; 100000];
-    let mut rng = StdRng::seed_from_u64(42);
-    rng.fill(dest.as_mut_slice());
+    fill_random_ascii(&mut dest);
 
+    //file.write(&mut io, &dest[..100]).await?;
     file.write(&mut io, &dest).await?;
 
     expected.append(&mut dest);
@@ -55,6 +57,9 @@ async fn main() -> Result<(), ExFatError> {
     drop(file);
 
     let actual = fs.read(&mut io, full_path).await?;
+
+    println!("expected: {:?}", from_utf8(&expected[..100]));
+    println!("actual  : {:?}", from_utf8(&actual[..100]));
 
     for (index, (left, right)) in expected.iter().zip(&actual).enumerate() {
         if left != right {
@@ -64,4 +69,11 @@ async fn main() -> Result<(), ExFatError> {
     }
 
     Ok(())
+}
+
+fn fill_random_ascii(buf: &mut [u8]) {
+    let mut rng = StdRng::seed_from_u64(42);
+    for b in buf {
+        *b = rng.random_range(0x20u8..=0x7Eu8);
+    }
 }
