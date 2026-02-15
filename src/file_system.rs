@@ -18,7 +18,7 @@ use super::{
     },
     io::{BLOCK_SIZE, BlockDevice},
     upcase_table::UpcaseTable,
-    utils::{calc_dir_entry_set_len, encode_utf16_and_hash, set_volume_dirty},
+    utils::{calc_dir_entry_set_len, encode_utf16_and_hash},
 };
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -169,8 +169,6 @@ impl FileSystem {
             .find_free_clusters(io, &self.fs, num_clusters, false, None)
             .await?;
 
-        set_volume_dirty(io, true).await?;
-
         // find directory or recursively create it if it does not already exist
         let directory_cluster_id = get_or_create_directory(
             io,
@@ -220,7 +218,6 @@ impl FileSystem {
             }
         };
 
-        set_volume_dirty(io, false).await?;
         return Ok(file_details);
     }
 
@@ -327,8 +324,6 @@ impl FileSystem {
             .find_free_clusters(io, &self.fs, num_clusters, false, None)
             .await?;
 
-        set_volume_dirty(io, true).await?;
-
         // find directory or recursively create it if it does not already exist
         let directory_cluster_id = get_or_create_directory(
             io,
@@ -380,8 +375,6 @@ impl FileSystem {
             }
         }
 
-        set_volume_dirty(io, false).await?;
-
         Ok(())
     }
 
@@ -409,7 +402,6 @@ impl FileSystem {
         }
 
         let (dir_path, file_or_dir_name) = split_path(to_path);
-        set_volume_dirty(io, true).await?;
 
         write_dir_entries_to_disk(io, file_details.location, freed_dir_entries).await?;
 
@@ -436,8 +428,6 @@ impl FileSystem {
             &self.fs,
         )
         .await?;
-
-        set_volume_dirty(io, false).await?;
 
         Ok(())
     }
@@ -532,8 +522,6 @@ impl FileSystem {
                 first_cluster,
                 num_clusters,
             } => {
-                set_volume_dirty(io, true).await?;
-
                 self.alloc_bitmap
                     .mark_allocated_contiguous(io, &self.fs, first_cluster, num_clusters, true)
                     .await?;
@@ -568,9 +556,6 @@ impl FileSystem {
                     block[..remainder.len()].copy_from_slice(remainder);
                     io.write_sector(sector_id, &block).await?;
                 }
-
-                // TODO: figure out what to do if we fail half way through
-                set_volume_dirty(io, false).await?;
             }
             Allocation::FatChain {
                 clusters: _clusters,
@@ -652,7 +637,6 @@ impl FileSystem {
         file_details: &FileDetails,
     ) -> Result<(), ExFatError> {
         self.confirm_has_no_children(io, file_details).await?;
-        set_volume_dirty(io, true).await?;
 
         // TODO: if this is no-fat-chain then dont use the FAT
         let cluster_ids = self.get_all_clusters_from(io, file_details).await?;
@@ -694,7 +678,6 @@ impl FileSystem {
             }
         }
 
-        set_volume_dirty(io, false).await?;
         Ok(())
     }
 }

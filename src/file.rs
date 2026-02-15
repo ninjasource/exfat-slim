@@ -16,7 +16,7 @@ use super::{
     file_system::write_dir_entries_to_disk,
     io::{BLOCK_SIZE, BlockDevice},
     upcase_table::UpcaseTable,
-    utils::{encode_utf16_upcase_and_hash, set_volume_dirty},
+    utils::encode_utf16_upcase_and_hash,
 };
 
 #[derive(Clone, Debug)]
@@ -405,7 +405,6 @@ impl File {
         if !self.open_options.write {
             return Err(ExFatError::WriteNotEnabled);
         }
-        set_volume_dirty(io, true).await?;
 
         // keep track these file details to check if they have changed later
         let flags = self.details.flags;
@@ -469,7 +468,6 @@ impl File {
             write_dir_entries_to_disk(io, self.details.location, dir_entries).await?;
         }
 
-        set_volume_dirty(io, false).await?;
         Ok(())
     }
 
