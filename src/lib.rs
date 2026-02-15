@@ -1,4 +1,4 @@
-#![allow(unused_variables, unused_imports)]
+#![allow(clippy::duplicate_mod)]
 #![deny(unsafe_code)]
 #![no_std]
 extern crate alloc;
@@ -18,8 +18,6 @@ pub mod blocking {
     pub mod mocks;
     pub mod upcase_table;
     pub mod utils;
-
-    //pub use file_system::*;
 }
 
 #[path = "."]

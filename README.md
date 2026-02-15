@@ -49,14 +49,14 @@ Open a file for writing, make some writes, change the file cursor, overwrite som
 ```rust
     let mut io = InMemoryBlockDevice::new();
     let fs = FileSystem::new(&mut io).await?;
-    let full_path = "/temp2/test7.txt";
+    let path = "/temp2/test7.txt";
 
     let mut file = fs
         .with_options()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&mut io, full_path)
+        .open(&mut io, path)
         .await?;
 
     file.write(&mut io, b"hello").await?;
@@ -64,7 +64,7 @@ Open a file for writing, make some writes, change the file cursor, overwrite som
     file.seek(&mut io, 6).await?;
     file.write(&mut io, b"W").await?;
 
-    let contents = fs.read_to_string(&mut io, full_path).await?;
+    let contents = fs.read_to_string(&mut io, path).await?;
     println!("{contents}"); // hello World
 ```
 
@@ -96,12 +96,12 @@ Implemented so far:
 - Rename a file or directory (equivalent to move if parent directories change)
 - Delete an empty directory
 - Copy a file
-- Open File (WIP)
+- Open File
     - Read
     - Write
     - Create
     - Create New
-    - Append
+    - Appends
     - Truncate
     - Seek
 
@@ -113,7 +113,7 @@ Work in progress:
 - Support `close()` and `flush()` instead of immediate mode. Enable `close()` on Drop (should be possible with Actor pattern)
 - Maintain list of locked open files
 - Experiment with buffer pools to limit memory allocation 
-- Add support for different block sizes
+- Add support for different block sizes (currently only 512 byte blocks supported)
 - Add Embassy example
 
 ## Contribution

@@ -1,13 +1,12 @@
-use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::String, vec, vec::Vec};
-use core::{iter::chain, num, slice, str::from_utf8};
-use log::info;
+use alloc::{string::String, vec, vec::Vec};
+use core::str::from_utf8;
 
 use super::{
     allocation_bitmap::{Allocation, AllocationBitmap},
     bisync,
     directory_entry::{
-        DirectoryEntryChain, FileAttributes, FileDirEntry, FileNameDirEntry, GeneralSecondaryFlags,
-        Location, RAW_ENTRY_LEN, StreamExtensionDirEntry, next_file_dir_entry, update_checksum,
+        DirectoryEntryChain, FileAttributes, FileNameDirEntry, GeneralSecondaryFlags, Location,
+        RAW_ENTRY_LEN, StreamExtensionDirEntry, next_file_dir_entry, update_checksum,
     },
     error::ExFatError,
     fat,
@@ -17,7 +16,7 @@ use super::{
     file_system::write_dir_entries_to_disk,
     io::{BLOCK_SIZE, BlockDevice},
     upcase_table::UpcaseTable,
-    utils::{calc_dir_entry_set_len, chunk_at, encode_utf16_upcase_and_hash, set_volume_dirty},
+    utils::{encode_utf16_upcase_and_hash, set_volume_dirty},
 };
 
 #[derive(Clone, Debug)]
@@ -108,11 +107,7 @@ impl<'a> OpenBuilder<'a> {
     }
 
     #[bisync]
-    pub async fn open(
-        &self,
-        io: &mut impl BlockDevice,
-        full_path: &str,
-    ) -> Result<File, ExFatError> {
+    pub async fn open(&self, io: &mut impl BlockDevice, path: &str) -> Result<File, ExFatError> {
         let options = self.build();
 
         // attempt to get the file details
@@ -120,27 +115,29 @@ impl<'a> OpenBuilder<'a> {
             io,
             &self.file_system.fs,
             &self.file_system.upcase_table,
-            full_path,
+            path,
             Some(FileAttributes::Archive),
         )
         .await;
 
         // get file details or create if required
         let file_details = match file_details {
-            Ok(file_details) => {
+            Ok(mut file_details) => {
                 if options.create_new {
                     return Err(ExFatError::AlreadyExists);
                 }
 
                 if options.truncate {
-                    self.file_system.truncate_file(io, &file_details, 0).await?;
+                    self.file_system
+                        .truncate_file(io, &mut file_details, 0)
+                        .await?;
                 }
 
                 file_details
             }
             Err(ExFatError::FileNotFound) => {
                 if options.create || options.create_new {
-                    self.file_system.create_file(io, full_path).await?
+                    self.file_system.create_file(io, path).await?
                 } else {
                     return Err(ExFatError::FileNotFound);
                 }
@@ -148,7 +145,7 @@ impl<'a> OpenBuilder<'a> {
             Err(e) => return Err(e),
         };
 
-        Ok(File::new(&self.file_system, &file_details, &options))
+        Ok(File::new(self.file_system, &file_details, &options))
     }
 
     fn build(&self) -> OpenOptions {
@@ -201,8 +198,7 @@ impl File {
     fn get_current_sector_id(&self) -> Result<u32, ExFatError> {
         let cluster_offset_bytes = self.cursor % self.fs.cluster_length as u64;
         let start_sector_id = self.fs.get_heap_sector_id(self.current_cluster)?;
-        let sector_id =
-            start_sector_id + cluster_offset_bytes as u32 / self.fs.sectors_per_cluster as u32;
+        let sector_id = start_sector_id + cluster_offset_bytes as u32 / BLOCK_SIZE as u32;
         Ok(sector_id)
     }
 
@@ -226,7 +222,7 @@ impl File {
         }
     }
 
-    /// This function gets clusters that can be used to write data to and ensures that clusters are all allocated
+    /// This function gets clusters (after the current_cluster) that can be used to write data to and ensures that clusters are all allocated
     /// If the cursor is at the end of the file (data_length) the function will allocate new clusters as required
     /// If the cursor is somewhere in the middle of the file it will return already allocated clusters
     /// If the custor is near the end of the file this function can return a combination of already
@@ -235,17 +231,13 @@ impl File {
     ///   it will switch to using a fat chain and update the fat acordingly
     #[bisync]
     pub async fn get_or_allocate_clusters(
-        &mut self,
+        &self,
         io: &mut impl BlockDevice,
         num_bytes: usize,
-    ) -> Result<Vec<u32>, ExFatError> {
+    ) -> Result<(Vec<u32>, bool), ExFatError> {
         if self.cursor > self.details.data_length {
             return Err(ExFatError::SeekOutOfRange);
         }
-
-        let old_data_length = self.details.data_length;
-
-        self.update_data_length(num_bytes);
 
         // we can fit num_bytes into the current cluster then return that cluster, no need to allocate more clusters
         let remaining_bytes_in_cluster =
@@ -253,19 +245,11 @@ impl File {
 
         // fast path, exit early
         if num_bytes <= remaining_bytes_in_cluster as usize {
-            log::info!(
-                "fast path, exit early: num_bytes {num_bytes} remaining_bytes_in_cluster {remaining_bytes_in_cluster}"
-            );
-
             // this cluster has already been allocated
-            return Ok(vec![self.current_cluster]);
+            return Ok((Vec::new(), false));
         }
 
-        let mut allocated_cluster_ids = if remaining_bytes_in_cluster > 0 {
-            vec![self.current_cluster]
-        } else {
-            Vec::new()
-        };
+        let mut allocated_cluster_ids = Vec::new();
 
         let (allocated_bytes, unallocated_bytes) = {
             let remaining =
@@ -275,7 +259,7 @@ impl File {
             (allocated_bytes, unallocated_bytes)
         };
 
-        let has_fat_chain = !self
+        let mut has_fat_chain = !self
             .details
             .flags
             .contains(GeneralSecondaryFlags::NoFatChain);
@@ -305,26 +289,11 @@ impl File {
         }
 
         if unallocated_bytes == 0 {
-            log::info!("unallocated_bytes == 0 ");
-            return Ok(allocated_cluster_ids);
+            return Ok((allocated_cluster_ids, has_fat_chain));
         }
 
         let num_unallocated_clusters =
             unallocated_bytes.div_ceil(self.fs.cluster_length as usize) as u32;
-
-        info!(
-            "allocated_bytes: {} unallocated_bytes: {} data_length: {} old_data_length: {}, num_bytes: {}, cursor: {}, num_allocated_clusters: {}, current_cluster: {}, num_unallocated_clusters: {}, no_fat_chain: {}",
-            allocated_bytes,
-            unallocated_bytes,
-            self.details.data_length,
-            old_data_length,
-            num_bytes,
-            self.cursor,
-            num_allocated_clusters,
-            self.current_cluster,
-            num_unallocated_clusters,
-            has_fat_chain
-        );
 
         // returns all newly allocated clusters
         let allocation = self
@@ -343,15 +312,11 @@ impl File {
                 first_cluster,
                 num_clusters,
             } => {
-                log::info!("continuous");
                 let cluster_ids: Vec<u32> = (first_cluster..first_cluster + num_clusters).collect();
                 cluster_ids
             }
             Allocation::FatChain { clusters } => {
-                log::info!("fat chain: {:?}", clusters);
-
-                // if file had no fat chain before we set one up for existing data
-                self.convert_file_to_fat_chain_if_required(io).await?;
+                has_fat_chain = true;
 
                 // set fat chain for newly allocated clusters
                 let mut combined = vec![self.current_cluster];
@@ -366,7 +331,7 @@ impl File {
             .await?;
 
         allocated_cluster_ids.extend_from_slice(&cluster_ids);
-        Ok(allocated_cluster_ids)
+        Ok((allocated_cluster_ids, has_fat_chain))
     }
 
     fn update_data_length(&mut self, num_bytes: usize) {
@@ -382,7 +347,7 @@ impl File {
         &mut self,
         io: &mut impl BlockDevice,
     ) -> Result<(), ExFatError> {
-        if !self
+        if self
             .details
             .flags
             .contains(GeneralSecondaryFlags::NoFatChain)
@@ -410,7 +375,7 @@ impl File {
         buf: &[u8],
         cluster_ids: &mut impl Iterator<Item = u32>,
     ) -> Result<usize, ExFatError> {
-        if buf.len() == 0 {
+        if buf.is_empty() {
             return Ok(0);
         }
 
@@ -447,8 +412,16 @@ impl File {
         let valid_data_length = self.details.valid_data_length;
         let data_length = self.details.data_length;
 
-        let cluster_ids = self.get_or_allocate_clusters(io, buf.len()).await?;
-        log::info!("get_or_allocate_clusters: {:?}", cluster_ids);
+        self.update_data_length(buf.len());
+        let has_fat_chain_original = !flags.contains(GeneralSecondaryFlags::NoFatChain);
+
+        let (cluster_ids, has_fat_chain) = self.get_or_allocate_clusters(io, buf.len()).await?;
+
+        if !has_fat_chain_original && has_fat_chain {
+            // if file had no fat chain before we set one up for existing data
+            self.convert_file_to_fat_chain_if_required(io).await?;
+        }
+
         let mut cluster_ids = cluster_ids.into_iter();
 
         // write the first sector (could be partially full)
@@ -576,7 +549,8 @@ impl File {
 
         // assume that num_bytes is only ever up to the end of the current cluster
         // here we detect if we got to the end of the cluster and hence if we need to jump to the next cluster or not
-        if num_bytes > 0 && self.cursor % self.fs.cluster_length as u64 == 0 && !self.eof() {
+        if num_bytes > 0 && self.cursor.is_multiple_of(self.fs.cluster_length as u64) && !self.eof()
+        {
             if self
                 .details
                 .flags
@@ -605,9 +579,9 @@ impl File {
 
         // assume that num_bytes is only ever up to the end of the current cluster
         // here we detect if we got to the end of the cluster and hence if we need to jump to the next cluster or not
-        if num_bytes > 0 && self.cursor % self.fs.cluster_length as u64 == 0 && !self.eof() {
+        if num_bytes > 0 && self.cursor.is_multiple_of(self.fs.cluster_length as u64) && !self.eof()
+        {
             if let Some(cluster_id) = cluster_ids.next() {
-                log::info!("cluster_cursor: {}", cluster_id);
                 self.current_cluster = cluster_id;
             } else {
                 return Err(ExFatError::EndOfFatChain);
@@ -837,10 +811,10 @@ async fn get_leaf_file_entry(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
-    full_path: &str,
+    path: &str,
     file_attributes: Option<FileAttributes>,
 ) -> Result<Option<FileDetails>, ExFatError> {
-    let mut splits = full_path
+    let mut splits = path
         .split(['/', '\\'])
         .filter(|part| !part.is_empty())
         .map(|c| c.trim())
@@ -896,19 +870,13 @@ pub async fn directory_list(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
-    full_path: &str,
+    path: &str,
 ) -> Result<DirectoryIterator, ExFatError> {
-    let cluster_id = if is_root_directory(full_path) {
+    let cluster_id = if is_root_directory(path) {
         fs.first_cluster_of_root_dir
     } else {
-        match get_leaf_file_entry(
-            io,
-            fs,
-            upcase_table,
-            full_path,
-            Some(FileAttributes::Directory),
-        )
-        .await?
+        match get_leaf_file_entry(io, fs, upcase_table, path, Some(FileAttributes::Directory))
+            .await?
         {
             Some(file_details) => {
                 if file_details.attributes.contains(FileAttributes::Directory) {
@@ -945,10 +913,10 @@ pub async fn find_file_or_directory(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
-    full_path: &str,
+    path: &str,
     file_attributes: Option<FileAttributes>,
 ) -> Result<FileDetails, ExFatError> {
-    let file_details = find_file_inner(io, fs, upcase_table, full_path, file_attributes).await?;
+    let file_details = find_file_inner(io, fs, upcase_table, path, file_attributes).await?;
     Ok(file_details)
 }
 
@@ -958,10 +926,10 @@ pub async fn find_file_inner(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
-    full_path: &str,
+    path: &str,
     file_attributes: Option<FileAttributes>,
 ) -> Result<FileDetails, ExFatError> {
-    match get_leaf_file_entry(io, fs, upcase_table, full_path, file_attributes).await? {
+    match get_leaf_file_entry(io, fs, upcase_table, path, file_attributes).await? {
         Some(file_details) => Ok(file_details),
         None => Err(ExFatError::FileNotFound),
     }

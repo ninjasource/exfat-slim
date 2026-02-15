@@ -12,17 +12,14 @@
 /// NOTE: I encountered what appears to be a logic error in the linux kernel exfat implementation where bits are incorrectly counted from MSB to LSB and not the other way around when locating free allocations.
 /// this does not affect the allocation bitmap write consistency but could possibly lead to unnecessary fragmentation
 ///
-use core::num;
-
-use alloc::{collections::btree_map::BTreeMap, vec, vec::Vec};
+use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 
 use super::{
     bisync,
     directory_entry::AllocationBitmapDirEntry,
     error::ExFatError,
     file_system::FileSystemDetails,
-    io::{BLOCK_SIZE, Block, BlockDevice},
-    only_async,
+    io::{BLOCK_SIZE, BlockDevice},
 };
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -86,13 +83,10 @@ impl AllocationBitmap {
 
         for cluster_id in cluster_ids {
             let (sector_id, index) = Self::calc_allocation_position(first_sector_id, *cluster_id)?;
-            by_sector_id
-                .entry(sector_id)
-                .or_insert(Vec::new())
-                .push(index);
+            by_sector_id.entry(sector_id).or_default().push(index);
         }
 
-        self.mark_allocated_by_sector(io, fs, &by_sector_id, allocated)
+        self.mark_allocated_by_sector(io, &by_sector_id, allocated)
             .await?;
         Ok(())
     }
@@ -111,13 +105,10 @@ impl AllocationBitmap {
 
         for cluster_id in first_cluster..first_cluster + num_clusters {
             let (sector_id, index) = Self::calc_allocation_position(first_sector_id, cluster_id)?;
-            by_sector_id
-                .entry(sector_id)
-                .or_insert(Vec::new())
-                .push(index);
+            by_sector_id.entry(sector_id).or_default().push(index);
         }
 
-        self.mark_allocated_by_sector(io, fs, &by_sector_id, allocated)
+        self.mark_allocated_by_sector(io, &by_sector_id, allocated)
             .await?;
         Ok(())
     }
@@ -126,7 +117,6 @@ impl AllocationBitmap {
     pub async fn mark_allocated_by_sector(
         &self,
         io: &mut impl BlockDevice,
-        fs: &FileSystemDetails,
         by_sector_id: &BTreeMap<u32, Vec<usize>>,
         allocated: bool,
     ) -> Result<(), ExFatError> {
@@ -178,16 +168,14 @@ impl AllocationBitmap {
         for sector_offset in sector_index..self.num_sectors {
             let buf = io.read_sector(sector_id + sector_offset).await?;
             let (bytes, _remainder) = buf.as_chunks::<4>();
-            for (chunk_index, chunk) in bytes.iter().enumerate() {
+            for chunk in bytes.iter() {
                 if u32::from_le_bytes(*chunk) != u32::MAX {
-                    for (byte_index, byte) in chunk.iter().enumerate() {
+                    for byte in chunk.iter() {
                         for bit in 0..u8::BITS {
-                            if *byte & 1 << bit == 0 {
-                                if cluster_id >= from_cluster {
-                                    clusters.push(cluster_id);
-                                    if clusters.len() == num_clusters {
-                                        return Ok(Allocation::FatChain { clusters });
-                                    }
+                            if *byte & 1 << bit == 0 && cluster_id >= from_cluster {
+                                clusters.push(cluster_id);
+                                if clusters.len() == num_clusters {
+                                    return Ok(Allocation::FatChain { clusters });
                                 }
                             }
 
@@ -222,9 +210,9 @@ impl AllocationBitmap {
         for sector_offset in sector_index..self.num_sectors {
             let buf = io.read_sector(sector_id + sector_offset).await?;
             let (bytes, _remainder) = buf.as_chunks::<4>();
-            for (chunk_index, chunk) in bytes.iter().enumerate() {
+            for chunk in bytes {
                 if u32::from_le_bytes(*chunk) != u32::MAX {
-                    for (byte_index, byte) in chunk.iter().enumerate() {
+                    for byte in chunk {
                         for bit in 0..u8::BITS {
                             if *byte & 1 << bit == 0 {
                                 if cluster_id < from_cluster {
@@ -234,18 +222,16 @@ impl AllocationBitmap {
                                 if from_cluster == cluster_id {
                                     first_cluster = Some(cluster_id);
                                     count = 1;
+                                } else if first_cluster.is_none() {
+                                    return Err(ExFatError::DiskFull);
                                 } else {
-                                    if first_cluster.is_none() {
-                                        return Err(ExFatError::DiskFull);
-                                    } else {
-                                        count += 1;
-                                    }
+                                    count += 1;
                                 }
 
                                 if count == num_clusters {
                                     return Ok(Allocation::Contiguous {
                                         first_cluster: first_cluster.unwrap(),
-                                        num_clusters: num_clusters as u32,
+                                        num_clusters,
                                     });
                                 }
                             } else {
@@ -284,9 +270,9 @@ impl AllocationBitmap {
         for sector_offset in sector_index..self.num_sectors {
             let buf = io.read_sector(sector_id + sector_offset).await?;
             let (bytes, _remainder) = buf.as_chunks::<4>();
-            for (chunk_index, chunk) in bytes.iter().enumerate() {
+            for chunk in bytes {
                 if u32::from_le_bytes(*chunk) != u32::MAX {
-                    for (byte_index, byte) in chunk.iter().enumerate() {
+                    for byte in chunk {
                         for bit in 0..u8::BITS {
                             if *byte & 1 << bit == 0 {
                                 if first_cluster.is_none() {
@@ -299,7 +285,7 @@ impl AllocationBitmap {
                                 if count == num_clusters {
                                     return Ok(Allocation::Contiguous {
                                         first_cluster: first_cluster.unwrap(),
-                                        num_clusters: num_clusters as u32,
+                                        num_clusters,
                                     });
                                 }
                             } else {
@@ -366,7 +352,7 @@ impl AllocationBitmap {
     }
 }
 
-#[only_async]
+#[super::only_async]
 #[cfg(test)]
 mod tests {
 

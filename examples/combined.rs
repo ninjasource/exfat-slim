@@ -16,7 +16,7 @@ async fn main() -> Result<(), ExFatError> {
     info!("fs {:?}", fs);
 
     let directory = "/bubble/gum";
-    let full_path = format!("{directory}/blue.txt");
+    let path = format!("{directory}/blue.txt");
 
     // confirm that the directory does not yet exist
     info!("checking if directory exists");
@@ -25,12 +25,12 @@ async fn main() -> Result<(), ExFatError> {
 
     // confirm that the file does not yet exist
     info!("checking if file exists");
-    let exists = fs.exists(&mut io, &full_path).await?;
-    info!("{full_path} exists: {exists}");
+    let exists = fs.exists(&mut io, &path).await?;
+    info!("{path} exists: {exists}");
 
     // write bytes to a file
     info!("writing bytes to file");
-    fs.write(&mut io, &full_path, b"hello").await?;
+    fs.write(&mut io, &path, b"hello").await?;
     info!("wrote file to disk");
 
     // confirm that the directory exists
@@ -40,8 +40,8 @@ async fn main() -> Result<(), ExFatError> {
 
     // confirm that the file exists
     info!("checking if file exists");
-    let exists = fs.exists(&mut io, &full_path).await?;
-    info!("{full_path} file exists: {exists}");
+    let exists = fs.exists(&mut io, &path).await?;
+    info!("{path} file exists: {exists}");
 
     // create an empty directory
     info!("creating empty directory: my_dir");
@@ -56,11 +56,11 @@ async fn main() -> Result<(), ExFatError> {
     }
 
     // confirm that the file exists
-    let exists = fs.exists(&mut io, &full_path).await?;
-    info!("{full_path} file exists: {exists}");
+    let exists = fs.exists(&mut io, &path).await?;
+    info!("{path} file exists: {exists}");
 
     // confirm that the bytes were written to the file
-    let contents = fs.read_to_string(&mut io, &full_path).await?;
+    let contents = fs.read_to_string(&mut io, &path).await?;
     info!("contents: {contents}");
 
     Ok(())

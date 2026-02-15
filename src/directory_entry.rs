@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use bitflags::bitflags;
 use thiserror::Error;
 
@@ -546,6 +545,6 @@ fn calc_checksum(dir_entry_set: &[RawDirEntry]) -> u16 {
 
 /// calculate and update the set_checksum field
 pub fn update_checksum(dir_entries: &mut [RawDirEntry]) {
-    let set_checksum = calc_checksum(&dir_entries);
+    let set_checksum = calc_checksum(dir_entries);
     dir_entries[0][2..4].copy_from_slice(&set_checksum.to_le_bytes());
 }

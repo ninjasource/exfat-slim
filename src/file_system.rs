@@ -1,12 +1,9 @@
-use core::error::Error;
+use alloc::{boxed::Box, string::String, vec::Vec};
 
-use alloc::{boxed::Box, string::String, vec, vec::Vec};
-
-use super::file::OpenOptions;
 use super::{
     allocation_bitmap::{Allocation, AllocationBitmap},
     bisync,
-    boot_sector::{BootSector, VolumeFlags},
+    boot_sector::BootSector,
     directory_entry::{
         AllocationBitmapDirEntry, DirectoryEntryChain, EntryType, FileAttributes, FileDirEntry,
         FileNameDirEntry, GeneralSecondaryFlags, Location, RAW_ENTRY_LEN, RawDirEntry,
@@ -16,16 +13,12 @@ use super::{
     error::ExFatError,
     fat::next_cluster_in_fat_chain,
     file::{
-        DirectoryIterator, ExactNameFilter, File, FileDetails, OpenBuilder, directory_list,
+        DirectoryIterator, ExactNameFilter, FileDetails, OpenBuilder, directory_list,
         find_file_inner, find_file_or_directory, next_file_entry,
     },
-    io::{BLOCK_SIZE, Block, BlockDevice},
-    only_async,
+    io::{BLOCK_SIZE, BlockDevice},
     upcase_table::UpcaseTable,
-    utils::{
-        calc_dir_entry_set_len, encode_utf16_and_hash, encode_utf16_upcase_and_hash, read_u16_le,
-        set_volume_dirty,
-    },
+    utils::{calc_dir_entry_set_len, encode_utf16_and_hash, set_volume_dirty},
 };
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -112,7 +105,7 @@ impl FileSystem {
     pub(crate) async fn truncate_file(
         &self,
         io: &mut impl BlockDevice,
-        file_details: &FileDetails,
+        file_details: &mut FileDetails,
         length: u64,
     ) -> Result<(), ExFatError> {
         // TODO: support length greater than 0 for preallocated files
@@ -136,9 +129,11 @@ impl FileSystem {
         }
 
         // set file length to 0
+        file_details.data_length = length;
+        file_details.valid_data_length = file_details.valid_data_length.min(length);
         let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
-        stream_ext.data_length = length;
-        stream_ext.valid_data_length = stream_ext.valid_data_length.min(length);
+        stream_ext.data_length = file_details.data_length;
+        stream_ext.valid_data_length = file_details.valid_data_length;
         dir_entries[1].copy_from_slice(&stream_ext.serialize());
 
         // mark all clusters after the first one as free
@@ -163,9 +158,9 @@ impl FileSystem {
     pub(crate) async fn create_file(
         &self,
         io: &mut impl BlockDevice,
-        full_path: &str,
+        path: &str,
     ) -> Result<FileDetails, ExFatError> {
-        if let Some((dir_path, file_or_dir_name)) = split_path(full_path) {
+        if let Some((dir_path, file_or_dir_name)) = split_path(path) {
             let num_clusters = 1;
 
             // find free space on the drive, preferring contiguous clusters
@@ -217,7 +212,9 @@ impl FileSystem {
 
                     file_details
                 }
-                Allocation::FatChain { clusters } => {
+                Allocation::FatChain {
+                    clusters: _clusters,
+                } => {
                     // TODO: fix this
                     unimplemented!()
                 }
@@ -233,12 +230,8 @@ impl FileSystem {
     }
 
     #[bisync]
-    pub async fn exists(
-        &self,
-        io: &mut impl BlockDevice,
-        full_path: &str,
-    ) -> Result<bool, ExFatError> {
-        match find_file_or_directory(io, &self.fs, &self.upcase_table, full_path, None).await {
+    pub async fn exists(&self, io: &mut impl BlockDevice, path: &str) -> Result<bool, ExFatError> {
+        match find_file_or_directory(io, &self.fs, &self.upcase_table, path, None).await {
             Ok(_file) => Ok(true),
             Err(ExFatError::FileNotFound) => Ok(false),
             Err(ExFatError::DirectoryNotFound) => Ok(false),
@@ -247,12 +240,8 @@ impl FileSystem {
     }
 
     #[bisync]
-    pub async fn read(
-        &self,
-        io: &mut impl BlockDevice,
-        full_path: &str,
-    ) -> Result<Vec<u8>, ExFatError> {
-        let mut file = self.with_options().read(true).open(io, full_path).await?;
+    pub async fn read(&self, io: &mut impl BlockDevice, path: &str) -> Result<Vec<u8>, ExFatError> {
+        let mut file = self.with_options().read(true).open(io, path).await?;
         let len = file.details.valid_data_length.min(usize::MAX as u64) as usize;
         let mut buf = Vec::with_capacity(len);
         file.read_to_end(io, &mut buf).await?;
@@ -263,9 +252,9 @@ impl FileSystem {
     pub async fn read_to_string(
         &self,
         io: &mut impl BlockDevice,
-        full_path: &str,
+        path: &str,
     ) -> Result<String, ExFatError> {
-        let mut file = self.with_options().read(true).open(io, full_path).await?;
+        let mut file = self.with_options().read(true).open(io, path).await?;
         file.read_to_string(io).await
     }
 
@@ -273,9 +262,9 @@ impl FileSystem {
     pub async fn read_dir(
         &self,
         io: &mut impl BlockDevice,
-        full_path: &str,
+        path: &str,
     ) -> Result<DirectoryIterator, ExFatError> {
-        directory_list(io, &self.fs, &self.upcase_table, full_path).await
+        directory_list(io, &self.fs, &self.upcase_table, path).await
     }
 
     /// deletes a file
@@ -284,13 +273,13 @@ impl FileSystem {
     pub async fn remove_file(
         &self,
         io: &mut impl BlockDevice,
-        full_path: &str,
+        path: &str,
     ) -> Result<(), ExFatError> {
         let file_details = find_file_inner(
             io,
             &self.fs,
             &self.upcase_table,
-            full_path,
+            path,
             Some(FileAttributes::Archive),
         )
         .await?;
@@ -303,17 +292,12 @@ impl FileSystem {
     pub async fn create_directory(
         &self,
         io: &mut impl BlockDevice,
-        dir_path: &str,
+        path: &str,
     ) -> Result<(), ExFatError> {
         // find directory or recursively create it if it does not already exist
-        let _cluster_id = get_or_create_directory(
-            io,
-            &self.fs,
-            &self.upcase_table,
-            &self.alloc_bitmap,
-            dir_path,
-        )
-        .await?;
+        let _cluster_id =
+            get_or_create_directory(io, &self.fs, &self.upcase_table, &self.alloc_bitmap, path)
+                .await?;
 
         Ok(())
     }
@@ -389,12 +373,14 @@ impl FileSystem {
                     let mut sector_id = self.fs.get_heap_sector_id(first_cluster)?;
                     let mut buf = [0u8; BLOCK_SIZE];
 
-                    while let Some(len) = file.read(io, &mut buf).await? {
+                    while let Some(_len) = file.read(io, &mut buf).await? {
                         io.write_sector(sector_id, &buf).await?;
                         sector_id += 1;
                     }
                 }
-                Allocation::FatChain { clusters } => {
+                Allocation::FatChain {
+                    clusters: _clusters,
+                } => {
                     unimplemented!()
                 }
             }
@@ -474,13 +460,13 @@ impl FileSystem {
     pub async fn remove_dir(
         &self,
         io: &mut impl BlockDevice,
-        full_path: &str,
+        path: &str,
     ) -> Result<(), ExFatError> {
         let file_details = find_file_inner(
             io,
             &self.fs,
             &self.upcase_table,
-            full_path,
+            path,
             Some(FileAttributes::Directory),
         )
         .await?;
@@ -496,7 +482,7 @@ impl FileSystem {
     pub async fn write(
         &self,
         io: &mut impl BlockDevice,
-        full_path: &str,
+        path: &str,
         contents: impl AsRef<[u8]>,
     ) -> Result<(), ExFatError> {
         // delete the file if it already exists
@@ -504,7 +490,7 @@ impl FileSystem {
             io,
             &self.fs,
             &self.upcase_table,
-            full_path,
+            path,
             Some(FileAttributes::Archive),
         )
         .await
@@ -516,7 +502,7 @@ impl FileSystem {
             Err(e) => return Err(e),
         }
 
-        self.write_inner(io, full_path, contents).await?;
+        self.write_inner(io, path, contents).await?;
         Ok(())
     }
 
@@ -525,10 +511,10 @@ impl FileSystem {
     async fn write_inner(
         &self,
         io: &mut impl BlockDevice,
-        full_path: &str,
+        path: &str,
         contents: impl AsRef<[u8]>,
     ) -> Result<(), ExFatError> {
-        if let Some((dir_path, file_name)) = split_path(full_path) {
+        if let Some((dir_path, file_name)) = split_path(path) {
             // find directory or recursively create it if it does not already exist
             let directory_cluster_id = get_or_create_directory(
                 io,
@@ -586,7 +572,7 @@ impl FileSystem {
                     }
 
                     // fill the last block the remainder data followed by zeros
-                    if remainder.len() > 0 {
+                    if !remainder.is_empty() {
                         let mut block = [0u8; BLOCK_SIZE];
                         block[..remainder.len()].copy_from_slice(remainder);
                         io.write_sector(sector_id, &block).await?;
@@ -595,7 +581,9 @@ impl FileSystem {
                     // TODO: figure out what to do if we fail half way through
                     set_volume_dirty(io, false).await?;
                 }
-                Allocation::FatChain { clusters } => {
+                Allocation::FatChain {
+                    clusters: _clusters,
+                } => {
                     unimplemented!("writing to a file using the fat chain is not yet supported")
                 }
             }
@@ -704,8 +692,6 @@ impl FileSystem {
                 count -= 1;
             }
 
-            // we need to do this to acount multiple mutable borrows due to the loop
-            //  tmp.copy_from_slice(sector.as_slice());
             io.write_sector(sector_id, &sector).await?;
 
             if count == 0 {
@@ -723,9 +709,8 @@ impl FileSystem {
     }
 }
 
-fn path_to_iter(full_path: &str) -> impl Iterator<Item = &str> {
-    full_path
-        .split(['/', '\\'])
+fn path_to_iter(path: &str) -> impl Iterator<Item = &str> {
+    path.split(['/', '\\'])
         .filter(|part| !part.is_empty())
         .map(|c| c.trim())
 }
@@ -736,9 +721,9 @@ async fn get_or_create_directory(
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     alloc_bitmap: &AllocationBitmap,
-    dir_path: &str,
+    path: &str,
 ) -> Result<u32, ExFatError> {
-    let mut names = path_to_iter(dir_path).peekable();
+    let mut names = path_to_iter(path).peekable();
     let mut cluster_id = fs.first_cluster_of_root_dir;
 
     while let Some(dir_name) = names.next() {
@@ -761,8 +746,8 @@ async fn get_or_create_directory(
                 let first_cluster = match allocation {
                     Allocation::FatChain { clusters } => clusters[0],
                     Allocation::Contiguous {
-                        first_cluster,
-                        num_clusters,
+                        first_cluster: _first_cluster,
+                        num_clusters: _num_clustewrs,
                     } => unreachable!(), // because we passed only_fat_chain = true
                 };
 
@@ -802,6 +787,7 @@ async fn get_or_create_directory(
 /// TODO: this is a fairly dangerous assumption, try to enforse it without redundant checks
 /// assume that name is valid
 #[bisync]
+#[allow(clippy::too_many_arguments)]
 async fn create_file_dir_entry_at(
     io: &mut impl BlockDevice,
     upcase_table: &UpcaseTable,
@@ -858,7 +844,7 @@ async fn create_file_dir_entry_at(
         };
         dir_entries.push(file_name.serialize());
     }
-    if remainder.len() > 0 {
+    if !remainder.is_empty() {
         // any file name ness than 15 characters gets zeros after the name
         let mut file_name = FileNameDirEntry {
             general_secondary_flags: GeneralSecondaryFlags::empty(),
@@ -964,10 +950,9 @@ async fn find_empty_dir_entry_set(
     }
 }
 
-fn split_path(full_path: &str) -> Option<(&str, &str)> {
-    full_path
-        .rfind(['/', '\\'])
-        .map(|index| (full_path[..index].trim(), full_path[index + 1..].trim()))
+fn split_path(path: &str) -> Option<(&str, &str)> {
+    path.rfind(['/', '\\'])
+        .map(|index| (path[..index].trim(), path[index + 1..].trim()))
 }
 
 #[bisync]
@@ -1063,7 +1048,7 @@ async fn read_root_dir(
     Ok(file_system)
 }
 
-#[only_async]
+#[super::only_async]
 #[cfg(test)]
 mod tests {
 

@@ -11,7 +11,7 @@ pub struct InMemoryBlockDevice<'a> {
 impl<'a> BlockDevice for InMemoryBlockDevice<'a> {
     #[bisync]
     async fn read_sector(&mut self, sector_id: u32) -> Result<&Block, IoError> {
-        Ok(&mut self.sectors[sector_id as usize])
+        Ok(&self.sectors[sector_id as usize])
     }
 
     #[bisync]

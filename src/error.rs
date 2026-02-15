@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use super::{boot_sector, directory_entry, file_system, io};
+use super::{boot_sector, directory_entry, io};
 
 #[non_exhaustive]
 #[derive(Error, Debug)]

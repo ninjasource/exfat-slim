@@ -3,10 +3,7 @@ use super::{
     error::ExFatError,
     io::{BLOCK_SIZE, BlockDevice},
 };
-use alloc::{
-    collections::{BTreeMap, btree_map::Entry},
-    vec::{self, Vec},
-};
+use alloc::{collections::BTreeMap, vec::Vec};
 
 const MIN_CLUSER_ID: u32 = 2;
 const CLUSTER_LEN: u32 = 0xFFFFFFF6;
