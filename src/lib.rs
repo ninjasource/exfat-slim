@@ -7,16 +7,16 @@ extern crate alloc;
 pub mod blocking {
     pub use bisync::synchronous::*;
 
-    pub mod allocation_bitmap;
+    mod allocation_bitmap;
     pub mod boot_sector;
     pub mod directory_entry;
     pub mod error;
-    pub mod fat;
+    mod fat;
     pub mod file;
     pub mod file_system;
     pub mod io;
-    pub mod mocks;
-    pub mod upcase_table;
+    mod mocks;
+    mod upcase_table;
     pub mod utils;
 }
 
@@ -24,15 +24,15 @@ pub mod blocking {
 pub mod asynchronous {
     pub use bisync::asynchronous::*;
 
-    pub mod allocation_bitmap;
+    mod allocation_bitmap;
     pub mod boot_sector;
     pub mod directory_entry;
     pub mod error;
-    pub mod fat;
+    mod fat;
     pub mod file;
     pub mod file_system;
     pub mod io;
-    pub mod mocks;
-    pub mod upcase_table;
+    mod mocks;
+    mod upcase_table;
     pub mod utils;
 }

@@ -13,7 +13,8 @@ pub enum Error {
 
 /// boot sector describes the exfat volume structure
 #[derive(Debug)]
-pub struct BootSector {
+#[allow(unused)]
+pub(crate) struct BootSector {
     /// must be [235, 118, 144]
     pub jump_boot: [u8; 3],
 

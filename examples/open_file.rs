@@ -1,7 +1,7 @@
 mod common;
 
 use crate::common::asynchronous::InMemoryBlockDevice;
-use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
+use exfat_slim::asynchronous::{error::ExFatError, file::File, file_system::FileSystem};
 use log::info;
 
 #[tokio::main(flavor = "current_thread")]
@@ -14,7 +14,7 @@ async fn main() -> Result<(), ExFatError> {
     let path = "foo.txt";
 
     // create a new file and write "hello world" to it
-    let mut file = fs
+    let mut file: File = fs
         .with_options()
         .write(true)
         .create(true)
@@ -89,8 +89,8 @@ async fn main() -> Result<(), ExFatError> {
         .await?;
     let contents = file.read_to_string(&mut io).await?;
     info!("truncated: \"{contents}\"");
-    assert_eq!(0, file.details.data_length, "file data length");
-    assert_eq!(0, file.details.valid_data_length, "file valid data length");
+    let metadata = file.metadata();
+    assert_eq!(0, metadata.len(), "file data length");
 
     // create empty read write file
     let mut file = fs
@@ -104,6 +104,7 @@ async fn main() -> Result<(), ExFatError> {
     file.write(&mut io, b"hello").await?;
     file.seek(&mut io, 0).await?;
     let contents = file.read_to_string(&mut io).await?;
+
     info!("write then read: \"{contents}\"");
 
     Ok(())

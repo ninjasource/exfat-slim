@@ -3,6 +3,7 @@ use super::{
     io::{BLOCK_SIZE, Block, BlockDevice, IoError},
 };
 
+#[allow(unused)]
 #[derive(Debug)]
 pub struct InMemoryBlockDevice<'a> {
     pub sectors: &'a mut [[u8; BLOCK_SIZE]],

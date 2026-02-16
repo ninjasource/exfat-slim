@@ -106,6 +106,9 @@ impl<'a> OpenBuilder<'a> {
         self
     }
 
+    /// Opens a file with the options specified in the builder beforehand and the path to the file
+    ///
+    /// Path can contain a nested directory structure but relative paths are not supported
     #[bisync]
     pub async fn open(&self, io: &mut impl BlockDevice, path: &str) -> Result<File, ExFatError> {
         let options = self.build();
@@ -161,12 +164,12 @@ impl<'a> OpenBuilder<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct FileDetails {
+pub(crate) struct FileDetails {
     pub first_cluster: u32,
     pub data_length: u64,
-    pub valid_data_length: u64,
+    pub valid_data_length: u64, // number of valid bytes in the file (reads past valid_data_length should return zeros)
     pub attributes: FileAttributes,
-    #[allow(dead_code)]
+    // #[allow(dead_code)]
     pub name: String, // TODO: look into removing this and only reading it if requested via an impl
     pub location: Location,
     pub flags: GeneralSecondaryFlags,
@@ -179,30 +182,45 @@ impl FileDetails {
     }
 }
 
+#[derive(Debug)]
+pub struct Metadata {
+    details: FileDetails,
+}
+
+// TODO: add created and modified timestamps here
+impl Metadata {
+    /// Size of the file in bytes
+    pub fn len(&self) -> u64 {
+        self.details.data_length
+    }
+
+    /// Returns true if the file contains zero bytes
+    pub fn is_empty(&self) -> bool {
+        self.details.data_length == 0
+    }
+
+    /// Returns true if the metadata is for a directory
+    pub fn is_dir(&self) -> bool {
+        self.details.attributes.contains(FileAttributes::Directory)
+    }
+
+    /// Returns true if the metadata is for a file (aka archive)
+    pub fn is_file(&self) -> bool {
+        self.details.attributes.contains(FileAttributes::Archive)
+    }
+}
+
 pub struct File {
     fs: FileSystemDetails,
-    pub details: FileDetails,
-    //   first_cluster: u32,
+    pub(crate) details: FileDetails,
     current_cluster: u32,
-    // cluster_offset: u32, // in bytes (NOTE: this is modelled badly because cursor and cluster_offset can disagree - cluset_offset should be calculated instead)
     cursor: u64,
-    //   pub data_length: u64,
-    //   pub valid_data_length: u64,
-    //   pub attributes: FileAttributes,
     alloc_bitmap: AllocationBitmap,
-    //   flags: GeneralSecondaryFlags,
     open_options: OpenOptions,
 }
 
 impl File {
-    fn get_current_sector_id(&self) -> Result<u32, ExFatError> {
-        let cluster_offset_bytes = self.cursor % self.fs.cluster_length as u64;
-        let start_sector_id = self.fs.get_heap_sector_id(self.current_cluster)?;
-        let sector_id = start_sector_id + cluster_offset_bytes as u32 / BLOCK_SIZE as u32;
-        Ok(sector_id)
-    }
-
-    pub fn new(
+    pub(crate) fn new(
         file_system: &FileSystem,
         file_details: &FileDetails,
         open_options: &OpenOptions,
@@ -222,6 +240,211 @@ impl File {
         }
     }
 
+    /// Gets the metadata about the file
+    pub fn metadata(&self) -> Metadata {
+        Metadata {
+            details: self.details.clone(),
+        }
+    }
+
+    /// Read bytes from file into buf and return the number of bytes read
+    ///
+    /// Read begins at the cursor position and ends at the lesser of the buf or file length
+    #[bisync]
+    pub async fn read(
+        &mut self,
+        io: &mut impl BlockDevice,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, ExFatError> {
+        if !self.open_options.read {
+            return Err(ExFatError::ReadNotEnabled);
+        }
+
+        let remainder_in_file = self.details.valid_data_length - self.cursor;
+
+        // check for end of file
+        if self.eof() {
+            return Ok(None);
+        }
+
+        let cluster_id = self.current_cluster;
+        let cluster_offset = self.get_cluster_offset();
+        let start_sector_id = self.fs.get_heap_sector_id(cluster_id)?;
+        let sector_id = start_sector_id + cluster_offset / BLOCK_SIZE as u32;
+        let sector_offset = cluster_offset as usize % BLOCK_SIZE;
+        let remainder_in_sector = BLOCK_SIZE - sector_offset;
+
+        // calculate max num bytes we can read
+        let num_bytes = (remainder_in_sector as u64)
+            .min(remainder_in_file)
+            .min(buf.len() as u64) as usize;
+
+        // read a single sector and copy the bytes into the user supplied buffer
+        let sector_buf = io.read_sector(sector_id).await?;
+        buf[..num_bytes].copy_from_slice(&sector_buf[sector_offset..sector_offset + num_bytes]);
+
+        // update file read cursor position
+        self.move_file_cursor_for_reads(io, num_bytes).await?;
+
+        Ok(Some(num_bytes))
+    }
+
+    /// Read all bytes from file into the buffer, extending the buffer by the length of the file
+    ///
+    /// This behaves the same way the Rust std library equivalent function works
+    /// If you only want the buf to contain file bytes then pass in an empty buf (length zero)
+    /// If you pass in a non zero length buf the file bytes will be appended onto the end of the buf
+    /// If you want to pass in preallocated memory then you are free to set the capacity of the buf passed in
+    /// and the file will be copied from position 0 in the buf (if it is length 0)
+    ///
+    /// Exfat has the concept of valid_data_length which is less than or equal to data_length.
+    /// If a zero length Vec is passed it will be extended to data_length size and the bytes between valid_data_length and data_length will contain zeros.
+    #[bisync]
+    pub async fn read_to_end(
+        &mut self,
+        io: &mut impl BlockDevice,
+        buf: &mut Vec<u8>,
+    ) -> Result<usize, ExFatError> {
+        let len = self.details.valid_data_length as usize;
+        let valid_len = self.details.valid_data_length as usize;
+
+        // fill empty space with zeros
+        let start = buf.len();
+        buf.resize(buf.len() + len, 0);
+
+        // reading in block size chunks from position 0 is the most efficient way to get data off the disk in one go
+        // we can ignore the len returned from the read operation as a result
+        // we are only interested in reading valid_data_length bytes as the rest are garbage and we return zeros instead (initialized above)
+        let (blocks, remainder) = buf[start..start + valid_len].as_chunks_mut::<BLOCK_SIZE>();
+        for block in blocks {
+            self.read(io, block.as_mut_slice()).await?;
+        }
+        self.read(io, remainder).await?;
+
+        Ok(len)
+    }
+
+    /// Read all bytes from file and interprets them as a utf8 encoded string
+    #[bisync]
+    pub async fn read_to_string(
+        &mut self,
+        io: &mut impl BlockDevice,
+    ) -> Result<String, ExFatError> {
+        // because multi byte characters may cross sector boundaries
+        // I recon its safer to read the entire file into a buffer before decoding it
+        let mut buf = Vec::new();
+        let len = self.read_to_end(io, &mut buf).await?;
+        let decoded = from_utf8(&buf[..len])?.into();
+        Ok(decoded)
+    }
+
+    /// Writes all bytes from buf into the file from the file cursor position
+    ///
+    /// This function will automatically increase the length of the file if necessary
+    #[bisync]
+    pub async fn write(&mut self, io: &mut impl BlockDevice, buf: &[u8]) -> Result<(), ExFatError> {
+        if !self.open_options.write {
+            return Err(ExFatError::WriteNotEnabled);
+        }
+
+        // keep track these file details to check if they have changed later
+        let flags = self.details.flags;
+        let valid_data_length = self.details.valid_data_length;
+        let data_length = self.details.data_length;
+
+        self.update_data_length(buf.len());
+        let has_fat_chain_original = !flags.contains(GeneralSecondaryFlags::NoFatChain);
+
+        let (cluster_ids, has_fat_chain) = self.get_or_allocate_clusters(io, buf.len()).await?;
+
+        if !has_fat_chain_original && has_fat_chain {
+            // if file had no fat chain before we set one up for existing data
+            self.convert_file_to_fat_chain_if_required(io).await?;
+        }
+
+        let mut cluster_ids = cluster_ids.into_iter();
+
+        // write the first sector (could be partially full)
+        let len = self.write_partial_sector(io, buf, &mut cluster_ids).await?;
+
+        // if there are still more bytes to write
+        if len < buf.len() {
+            let start_index = len;
+            let (blocks, remainder) = buf[start_index..].as_chunks::<BLOCK_SIZE>();
+
+            // write full sectors
+            for block in blocks {
+                let sector_id = self.get_current_sector_id()?;
+                io.write_sector(sector_id, block).await?;
+                self.move_file_cursor_for_writes(block.len(), &mut cluster_ids)?;
+            }
+
+            // write the last sector (could be partially full)
+            let _len = self
+                .write_partial_sector(io, remainder, &mut cluster_ids)
+                .await?;
+        }
+
+        // check if we need to update the file directory entry
+        if valid_data_length != self.details.valid_data_length
+            || data_length != self.details.data_length
+            || flags != self.details.flags
+        {
+            // read dir entries for this file from disk
+            let mut dir_entries = self.get_file_dir_entry_set(io).await?;
+
+            // the stream ext is always the second entry
+            let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
+            stream_ext.data_length = self.details.data_length;
+            stream_ext.valid_data_length = self.details.valid_data_length;
+            stream_ext.general_secondary_flags = self.details.flags;
+
+            // serialize the mutated stream ext back to the dir entry
+            dir_entries[1].copy_from_slice(&stream_ext.serialize());
+
+            // recalculate the file checksum and save back to appropriate dir entry
+            update_checksum(&mut dir_entries);
+
+            // write to disk - only the directory entries are written.
+            write_dir_entries_to_disk(io, self.details.location, dir_entries).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Seek to an offset, in bytes, in the file
+    #[bisync]
+    pub async fn seek(&mut self, io: &mut impl BlockDevice, cursor: u64) -> Result<(), ExFatError> {
+        if cursor > self.details.valid_data_length {
+            return Err(ExFatError::SeekOutOfRange);
+        }
+
+        self.cursor = cursor;
+        let num_clusters = (cursor / self.fs.cluster_length as u64) as u32;
+
+        if self
+            .details
+            .flags
+            .contains(GeneralSecondaryFlags::NoFatChain)
+        {
+            // no fat chain so all clusters are consecutive for this file
+            self.current_cluster = self.details.first_cluster + num_clusters
+        } else {
+            self.current_cluster = self.details.first_cluster;
+
+            for _ in 0..num_clusters {
+                match next_cluster_in_fat_chain(io, self.fs.fat_offset, self.current_cluster)
+                    .await?
+                {
+                    Some(cluster_id) => self.current_cluster = cluster_id,
+                    None => return Err(ExFatError::EndOfFatChain),
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// This function gets clusters (after the current_cluster) that can be used to write data to and ensures that clusters are all allocated
     /// If the cursor is at the end of the file (data_length) the function will allocate new clusters as required
     /// If the cursor is somewhere in the middle of the file it will return already allocated clusters
@@ -230,7 +453,7 @@ impl File {
     /// If the file flags are "no_fat_chain" and there are no more contiguous clusters
     ///   it will switch to using a fat chain and update the fat acordingly
     #[bisync]
-    pub async fn get_or_allocate_clusters(
+    async fn get_or_allocate_clusters(
         &self,
         io: &mut impl BlockDevice,
         num_bytes: usize,
@@ -341,6 +564,13 @@ impl File {
         self.details.valid_data_length = valid_data_length;
     }
 
+    fn get_current_sector_id(&self) -> Result<u32, ExFatError> {
+        let cluster_offset_bytes = self.cursor % self.fs.cluster_length as u64;
+        let start_sector_id = self.fs.get_heap_sector_id(self.current_cluster)?;
+        let sector_id = start_sector_id + cluster_offset_bytes as u32 / BLOCK_SIZE as u32;
+        Ok(sector_id)
+    }
+
     /// helps to convert a file that had no_fat_chain to one with a fat chain
     #[bisync]
     async fn convert_file_to_fat_chain_if_required(
@@ -401,78 +631,7 @@ impl File {
     }
 
     #[bisync]
-    pub async fn write(&mut self, io: &mut impl BlockDevice, buf: &[u8]) -> Result<(), ExFatError> {
-        if !self.open_options.write {
-            return Err(ExFatError::WriteNotEnabled);
-        }
-
-        // keep track these file details to check if they have changed later
-        let flags = self.details.flags;
-        let valid_data_length = self.details.valid_data_length;
-        let data_length = self.details.data_length;
-
-        self.update_data_length(buf.len());
-        let has_fat_chain_original = !flags.contains(GeneralSecondaryFlags::NoFatChain);
-
-        let (cluster_ids, has_fat_chain) = self.get_or_allocate_clusters(io, buf.len()).await?;
-
-        if !has_fat_chain_original && has_fat_chain {
-            // if file had no fat chain before we set one up for existing data
-            self.convert_file_to_fat_chain_if_required(io).await?;
-        }
-
-        let mut cluster_ids = cluster_ids.into_iter();
-
-        // write the first sector (could be partially full)
-        let len = self.write_partial_sector(io, buf, &mut cluster_ids).await?;
-
-        // if there are still more bytes to write
-        if len < buf.len() {
-            let start_index = len;
-            let (blocks, remainder) = buf[start_index..].as_chunks::<BLOCK_SIZE>();
-
-            // write full sectors
-            for block in blocks {
-                let sector_id = self.get_current_sector_id()?;
-                io.write_sector(sector_id, block).await?;
-                self.move_file_cursor_for_writes(block.len(), &mut cluster_ids)?;
-            }
-
-            // write the last sector (could be partially full)
-            let _len = self
-                .write_partial_sector(io, remainder, &mut cluster_ids)
-                .await?;
-        }
-
-        // check if we need to update the file directory entry
-        if valid_data_length != self.details.valid_data_length
-            || data_length != self.details.data_length
-            || flags != self.details.flags
-        {
-            // read dir entries for this file from disk
-            let mut dir_entries = self.get_file_dir_entry_set(io).await?;
-
-            // the stream ext is always the second entry
-            let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
-            stream_ext.data_length = self.details.data_length;
-            stream_ext.valid_data_length = self.details.valid_data_length;
-            stream_ext.general_secondary_flags = self.details.flags;
-
-            // serialize the mutated stream ext back to the dir entry
-            dir_entries[1].copy_from_slice(&stream_ext.serialize());
-
-            // recalculate the file checksum and save back to appropriate dir entry
-            update_checksum(&mut dir_entries);
-
-            // write to disk - only the directory entries are written.
-            write_dir_entries_to_disk(io, self.details.location, dir_entries).await?;
-        }
-
-        Ok(())
-    }
-
-    #[bisync]
-    pub async fn get_file_dir_entry_set(
+    async fn get_file_dir_entry_set(
         &self,
         io: &mut impl BlockDevice,
     ) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError> {
@@ -503,38 +662,6 @@ impl File {
     // end of file
     fn eof(&self) -> bool {
         self.cursor == self.details.valid_data_length
-    }
-
-    #[bisync]
-    pub async fn seek(&mut self, io: &mut impl BlockDevice, cursor: u64) -> Result<(), ExFatError> {
-        if cursor > self.details.valid_data_length {
-            return Err(ExFatError::SeekOutOfRange);
-        }
-
-        self.cursor = cursor;
-        let num_clusters = (cursor / self.fs.cluster_length as u64) as u32;
-
-        if self
-            .details
-            .flags
-            .contains(GeneralSecondaryFlags::NoFatChain)
-        {
-            // no fat chain so all clusters are consecutive for this file
-            self.current_cluster = self.details.first_cluster + num_clusters
-        } else {
-            self.current_cluster = self.details.first_cluster;
-
-            for _ in 0..num_clusters {
-                match next_cluster_in_fat_chain(io, self.fs.fat_offset, self.current_cluster)
-                    .await?
-                {
-                    Some(cluster_id) => self.current_cluster = cluster_id,
-                    None => return Err(ExFatError::EndOfFatChain),
-                }
-            }
-        }
-
-        Ok(())
     }
 
     #[bisync]
@@ -588,90 +715,10 @@ impl File {
 
         Ok(())
     }
-
-    #[bisync]
-    pub async fn read(
-        &mut self,
-        io: &mut impl BlockDevice,
-        buf: &mut [u8],
-    ) -> Result<Option<usize>, ExFatError> {
-        if !self.open_options.read {
-            return Err(ExFatError::ReadNotEnabled);
-        }
-
-        let remainder_in_file = self.details.valid_data_length - self.cursor;
-
-        // check for end of file
-        if self.eof() {
-            return Ok(None);
-        }
-
-        let cluster_id = self.current_cluster;
-        let cluster_offset = self.get_cluster_offset();
-        let start_sector_id = self.fs.get_heap_sector_id(cluster_id)?;
-        let sector_id = start_sector_id + cluster_offset / BLOCK_SIZE as u32;
-        let sector_offset = cluster_offset as usize % BLOCK_SIZE;
-        let remainder_in_sector = BLOCK_SIZE - sector_offset;
-
-        // calculate max num bytes we can read
-        let num_bytes = (remainder_in_sector as u64)
-            .min(remainder_in_file)
-            .min(buf.len() as u64) as usize;
-
-        // read a single sector and copy the bytes into the user supplied buffer
-        let sector_buf = io.read_sector(sector_id).await?;
-        buf[..num_bytes].copy_from_slice(&sector_buf[sector_offset..sector_offset + num_bytes]);
-
-        // update file read cursor position
-        self.move_file_cursor_for_reads(io, num_bytes).await?;
-
-        Ok(Some(num_bytes))
-    }
-
-    /// Read all bytes from file into the buffer
-    /// This behaves the same way the Rust std library equivalent function works
-    /// If you only want the buf to contain file bytes then pass in an empty buf (length zero)
-    /// If you pass in a non zero length buf the file bytes will be appended onto the end of the buf
-    /// If you want to pass in preallocated memory then you are free to set the capacity of the buf passed in
-    /// and the file will be copied from position 0 in the buf (if it is length 0)
-    #[bisync]
-    pub async fn read_to_end(
-        &mut self,
-        io: &mut impl BlockDevice,
-        buf: &mut Vec<u8>,
-    ) -> Result<usize, ExFatError> {
-        let len = self.details.valid_data_length as usize;
-
-        // fill empty space with zeros
-        buf.resize(buf.len() + len, 0);
-
-        // reading in block size chunks from position 0 is the most efficient way to get data off the disk in one go
-        // we can ignore the len returned from the read operation as a result
-        let (blocks, remainder) = buf.as_chunks_mut::<BLOCK_SIZE>();
-        for block in blocks {
-            self.read(io, block.as_mut_slice()).await?;
-        }
-        self.read(io, remainder).await?;
-
-        Ok(len)
-    }
-
-    #[bisync]
-    pub async fn read_to_string(
-        &mut self,
-        io: &mut impl BlockDevice,
-    ) -> Result<String, ExFatError> {
-        // because multi byte characters may cross sector boundaries
-        // I recon its safer to read the entire file into a buffer before decoding it
-        let mut buf = Vec::new();
-        let len = self.read_to_end(io, &mut buf).await?;
-        let decoded = from_utf8(&buf[..len])?.into();
-        Ok(decoded)
-    }
 }
 
 #[bisync]
-pub async fn next_file_entry(
+pub(crate) async fn next_file_entry(
     io: &mut impl BlockDevice,
     entries: &mut DirectoryEntryChain,
     filter: &impl DirectoryEntryFilter,
@@ -765,7 +812,7 @@ pub struct ExactNameFilter<'a> {
 }
 
 impl<'a> ExactNameFilter<'a> {
-    pub fn new(
+    pub(crate) fn new(
         file_name_str: &str,
         upcase_table: &'a UpcaseTable,
         file_attributes: Option<FileAttributes>,
@@ -864,7 +911,7 @@ fn is_root_directory(path: &str) -> bool {
 }
 
 #[bisync]
-pub async fn directory_list(
+pub(crate) async fn directory_list(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
@@ -895,19 +942,38 @@ pub struct DirectoryIterator {
     entries: DirectoryEntryChain,
 }
 
+#[derive(Debug)]
+pub struct DirectoryEntry {
+    details: FileDetails,
+}
+
+impl DirectoryEntry {
+    pub fn file_name(&self) -> String {
+        self.details.name.clone()
+    }
+
+    pub fn metadata(&self) -> Metadata {
+        Metadata {
+            details: self.details.clone(),
+        }
+    }
+}
+
 impl DirectoryIterator {
     #[bisync]
     pub async fn next(
         &mut self,
         io: &mut impl BlockDevice,
-    ) -> Result<Option<FileDetails>, ExFatError> {
+    ) -> Result<Option<DirectoryEntry>, ExFatError> {
         let filter = AllPassFilter {};
-        next_file_entry(io, &mut self.entries, &filter).await
+        Ok(next_file_entry(io, &mut self.entries, &filter)
+            .await?
+            .map(|x| DirectoryEntry { details: x.clone() }))
     }
 }
 
 #[bisync]
-pub async fn find_file_or_directory(
+pub(crate) async fn find_file_or_directory(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
@@ -920,7 +986,7 @@ pub async fn find_file_or_directory(
 
 // TODO: figure out visibility (pub or private)
 #[bisync]
-pub async fn find_file_inner(
+pub(crate) async fn find_file_inner(
     io: &mut impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,

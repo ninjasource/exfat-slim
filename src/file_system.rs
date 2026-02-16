@@ -13,7 +13,7 @@ use super::{
     error::ExFatError,
     fat::next_cluster_in_fat_chain,
     file::{
-        DirectoryIterator, ExactNameFilter, FileDetails, OpenBuilder, directory_list,
+        DirectoryIterator, ExactNameFilter, File, FileDetails, OpenBuilder, directory_list,
         find_file_inner, find_file_or_directory, next_file_entry,
     },
     io::{BLOCK_SIZE, BlockDevice},
@@ -23,7 +23,7 @@ use super::{
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone)]
-pub struct FileSystemDetails {
+pub(crate) struct FileSystemDetails {
     /// volume-relative sector offset of the cluster heap
     pub cluster_heap_offset: u32,
 
@@ -67,24 +67,13 @@ impl FileSystemDetails {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug)]
 pub struct FileSystem {
-    pub fs: FileSystemDetails,
-    pub upcase_table: UpcaseTable,
-    pub alloc_bitmap: AllocationBitmap,
+    pub(crate) fs: FileSystemDetails,
+    pub(crate) upcase_table: UpcaseTable,
+    pub(crate) alloc_bitmap: AllocationBitmap,
 }
 
 impl FileSystem {
-    pub fn new_inner(
-        details: FileSystemDetails,
-        upcase_table: UpcaseTable,
-        alloc_bitmap: AllocationBitmap,
-    ) -> Self {
-        Self {
-            fs: details,
-            upcase_table,
-            alloc_bitmap,
-        }
-    }
-
+    /// Reads the boot sector using the block device and initializes the file system returning an instance of it
     #[bisync]
     pub async fn new(io: &mut impl BlockDevice) -> Result<Self, ExFatError> {
         // the boot sector is always at sector_id 0 and everything is relative from there
@@ -95,8 +84,308 @@ impl FileSystem {
         Ok(fs)
     }
 
+    /// Used for building options to pass into file open
     pub fn with_options<'a>(&'a self) -> OpenBuilder<'a> {
         OpenBuilder::new(self)
+    }
+
+    /// Open a file in read-only mode
+    #[bisync]
+    pub async fn open(&self, io: &mut impl BlockDevice, path: &str) -> Result<File, ExFatError> {
+        self.with_options().read(true).open(io, path).await
+    }
+
+    /// Returns true if the file or directory exists
+    ///
+    /// Symbolic link following is not supported
+    #[bisync]
+    pub async fn exists(&self, io: &mut impl BlockDevice, path: &str) -> Result<bool, ExFatError> {
+        match find_file_or_directory(io, &self.fs, &self.upcase_table, path, None).await {
+            Ok(_file) => Ok(true),
+            Err(ExFatError::FileNotFound) => Ok(false),
+            Err(ExFatError::DirectoryNotFound) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Reads the entire contents of the file into a byte vector
+    ///
+    /// Supports nested paths
+    #[bisync]
+    pub async fn read(&self, io: &mut impl BlockDevice, path: &str) -> Result<Vec<u8>, ExFatError> {
+        let mut file = self.with_options().read(true).open(io, path).await?;
+        let mut buf = Vec::new();
+        file.read_to_end(io, &mut buf).await?;
+        Ok(buf)
+    }
+
+    /// Reads the entire contents of the file into a string
+    ///
+    /// Supports nested paths
+    #[bisync]
+    pub async fn read_to_string(
+        &self,
+        io: &mut impl BlockDevice,
+        path: &str,
+    ) -> Result<String, ExFatError> {
+        let mut file = self.with_options().read(true).open(io, path).await?;
+        file.read_to_string(io).await
+    }
+
+    /// Returns an iterator over the entries in a directory
+    ///
+    /// Supports nested paths
+    #[bisync]
+    pub async fn read_dir(
+        &self,
+        io: &mut impl BlockDevice,
+        path: &str,
+    ) -> Result<DirectoryIterator, ExFatError> {
+        directory_list(io, &self.fs, &self.upcase_table, path).await
+    }
+
+    /// Deletes a file
+    ///
+    /// Returns an error if the file does not exist or something else failed
+    #[bisync]
+    pub async fn remove_file(
+        &self,
+        io: &mut impl BlockDevice,
+        path: &str,
+    ) -> Result<(), ExFatError> {
+        let file_details = find_file_inner(
+            io,
+            &self.fs,
+            &self.upcase_table,
+            path,
+            Some(FileAttributes::Archive),
+        )
+        .await?;
+        self.delete_inner(io, &file_details).await?;
+        Ok(())
+    }
+
+    /// Creates a directory recursively
+    ///
+    /// The dir path can be nested
+    #[bisync]
+    pub async fn create_directory(
+        &self,
+        io: &mut impl BlockDevice,
+        path: &str,
+    ) -> Result<(), ExFatError> {
+        // find directory or recursively create it if it does not already exist
+        let _cluster_id =
+            get_or_create_directory(io, &self.fs, &self.upcase_table, &self.alloc_bitmap, path)
+                .await?;
+
+        Ok(())
+    }
+
+    /// Copies a file from one file to another
+    ///
+    /// If directories in the to_path do not exist they will be created
+    /// File attributes will also be copied but timestamps will be new
+    #[bisync]
+    pub async fn copy(
+        &self,
+        io: &mut impl BlockDevice,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<(), ExFatError> {
+        if from_path == to_path {
+            return Err(ExFatError::InvalidFileName {
+                reason: "cannot copy file to the same exact location",
+            });
+        }
+        let mut file = self.with_options().read(true).open(io, from_path).await?;
+
+        let (dir_path, file_or_dir_name) = split_path(to_path);
+        let num_clusters = file
+            .details
+            .data_length
+            .div_ceil(self.fs.cluster_length as u64) as u32;
+
+        // find free space on the drive, preferring contiguous clusters
+        let allocation = self
+            .alloc_bitmap
+            .find_free_clusters(io, &self.fs, num_clusters, false, None)
+            .await?;
+
+        // find directory or recursively create it if it does not already exist
+        let directory_cluster_id = get_or_create_directory(
+            io,
+            &self.fs,
+            &self.upcase_table,
+            &self.alloc_bitmap,
+            dir_path,
+        )
+        .await?;
+
+        match allocation {
+            Allocation::Contiguous {
+                first_cluster,
+                num_clusters,
+            } => {
+                let flags =
+                    GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain;
+
+                create_file_dir_entry_at(
+                    io,
+                    &self.upcase_table,
+                    file_or_dir_name,
+                    directory_cluster_id,
+                    first_cluster,
+                    file.details.attributes,
+                    flags,
+                    file.details.valid_data_length,
+                    file.details.data_length,
+                    &self.fs,
+                )
+                .await?;
+
+                self.alloc_bitmap
+                    .mark_allocated_contiguous(io, &self.fs, first_cluster, num_clusters, true)
+                    .await?;
+
+                let mut sector_id = self.fs.get_heap_sector_id(first_cluster)?;
+                let mut buf = [0u8; BLOCK_SIZE];
+
+                while let Some(_len) = file.read(io, &mut buf).await? {
+                    io.write_sector(sector_id, &buf).await?;
+                    sector_id += 1;
+                }
+            }
+            Allocation::FatChain {
+                clusters: _clusters,
+            } => {
+                unimplemented!()
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Rename a file or folder (also know as `move`)
+    ///
+    /// The from_path is the old file or directory path (including all sub directories)
+    /// The to_path is the new file or directory path (including all sub directories)
+    /// If the file or directory changes parent directories then this is considered to be a file move, otherwise a rename
+    /// If the to_path contains directories that don't yet exist they will be created.
+    #[bisync]
+    pub async fn rename(
+        &self,
+        io: &mut impl BlockDevice,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<(), ExFatError> {
+        // in exFAT a directory cannot have a directory and file with the same name in it so no need to filter here
+        let file_details =
+            find_file_inner(io, &self.fs, &self.upcase_table, from_path, None).await?;
+
+        // mark dir entries as free
+        let mut freed_dir_entries = Vec::with_capacity(1 + file_details.secondary_count as usize);
+        for _ in 0..freed_dir_entries.capacity() {
+            let mut dir_entry = [0u8; RAW_ENTRY_LEN];
+            Self::mark_dir_entry_free(&mut dir_entry);
+            freed_dir_entries.push(dir_entry);
+        }
+
+        let (dir_path, file_or_dir_name) = split_path(to_path);
+
+        write_dir_entries_to_disk(io, file_details.location, freed_dir_entries).await?;
+
+        // find directory or recursively create it if it does not already exist
+        let directory_cluster_id = get_or_create_directory(
+            io,
+            &self.fs,
+            &self.upcase_table,
+            &self.alloc_bitmap,
+            dir_path,
+        )
+        .await?;
+
+        create_file_dir_entry_at(
+            io,
+            &self.upcase_table,
+            file_or_dir_name,
+            directory_cluster_id,
+            file_details.first_cluster,
+            file_details.attributes,
+            file_details.flags,
+            file_details.valid_data_length,
+            file_details.data_length,
+            &self.fs,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Removes an empty directory
+    ///
+    /// Will return an error if the directory does not exist or is not empty
+    #[bisync]
+    pub async fn remove_dir(
+        &self,
+        io: &mut impl BlockDevice,
+        path: &str,
+    ) -> Result<(), ExFatError> {
+        let file_details = find_file_inner(
+            io,
+            &self.fs,
+            &self.upcase_table,
+            path,
+            Some(FileAttributes::Directory),
+        )
+        .await?;
+        self.delete_inner(io, &file_details).await?;
+        Ok(())
+    }
+
+    /// Writes the entire contents to a file.
+    ///
+    /// The file will be overwritten if it already exists.
+    /// This function will create any directories in the path that do not already exist.
+    /// Relative paths are not supported.
+    #[bisync]
+    pub async fn write(
+        &self,
+        io: &mut impl BlockDevice,
+        path: &str,
+        contents: impl AsRef<[u8]>,
+    ) -> Result<(), ExFatError> {
+        // delete the file if it already exists
+        match find_file_inner(
+            io,
+            &self.fs,
+            &self.upcase_table,
+            path,
+            Some(FileAttributes::Archive),
+        )
+        .await
+        {
+            Ok(file_details) => self.delete_inner(io, &file_details).await?,
+            Err(ExFatError::FileNotFound) => {
+                // ignore
+            }
+            Err(e) => return Err(e),
+        }
+
+        self.write_inner(io, path, contents).await?;
+        Ok(())
+    }
+
+    fn new_inner(
+        details: FileSystemDetails,
+        upcase_table: UpcaseTable,
+        alloc_bitmap: AllocationBitmap,
+    ) -> Self {
+        Self {
+            fs: details,
+            upcase_table,
+            alloc_bitmap,
+        }
     }
 
     /// Sets a file to length specified and allocates or frees up all the clusters linked to the file
@@ -218,218 +507,7 @@ impl FileSystem {
             }
         };
 
-        return Ok(file_details);
-    }
-
-    #[bisync]
-    pub async fn exists(&self, io: &mut impl BlockDevice, path: &str) -> Result<bool, ExFatError> {
-        match find_file_or_directory(io, &self.fs, &self.upcase_table, path, None).await {
-            Ok(_file) => Ok(true),
-            Err(ExFatError::FileNotFound) => Ok(false),
-            Err(ExFatError::DirectoryNotFound) => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-
-    #[bisync]
-    pub async fn read(&self, io: &mut impl BlockDevice, path: &str) -> Result<Vec<u8>, ExFatError> {
-        let mut file = self.with_options().read(true).open(io, path).await?;
-        let len = file.details.valid_data_length.min(usize::MAX as u64) as usize;
-        let mut buf = Vec::with_capacity(len);
-        file.read_to_end(io, &mut buf).await?;
-        Ok(buf)
-    }
-
-    #[bisync]
-    pub async fn read_to_string(
-        &self,
-        io: &mut impl BlockDevice,
-        path: &str,
-    ) -> Result<String, ExFatError> {
-        let mut file = self.with_options().read(true).open(io, path).await?;
-        file.read_to_string(io).await
-    }
-
-    #[bisync]
-    pub async fn read_dir(
-        &self,
-        io: &mut impl BlockDevice,
-        path: &str,
-    ) -> Result<DirectoryIterator, ExFatError> {
-        directory_list(io, &self.fs, &self.upcase_table, path).await
-    }
-
-    /// deletes a file
-    /// returns an error if the file does not exist or something else failed
-    #[bisync]
-    pub async fn remove_file(
-        &self,
-        io: &mut impl BlockDevice,
-        path: &str,
-    ) -> Result<(), ExFatError> {
-        let file_details = find_file_inner(
-            io,
-            &self.fs,
-            &self.upcase_table,
-            path,
-            Some(FileAttributes::Archive),
-        )
-        .await?;
-        self.delete_inner(io, &file_details).await?;
-        Ok(())
-    }
-
-    /// creates a directory recursively (the dir path can be nested)
-    #[bisync]
-    pub async fn create_directory(
-        &self,
-        io: &mut impl BlockDevice,
-        path: &str,
-    ) -> Result<(), ExFatError> {
-        // find directory or recursively create it if it does not already exist
-        let _cluster_id =
-            get_or_create_directory(io, &self.fs, &self.upcase_table, &self.alloc_bitmap, path)
-                .await?;
-
-        Ok(())
-    }
-
-    /// rename a file or folder
-    /// the from_path is the old file or directory path (including all sub directories)
-    /// the to_path is the new file or directory path (including all sub directories)
-    /// if the file or directory changes parent directories then this is conidered to be a file move, otherwide a rename
-    #[bisync]
-    pub async fn copy(
-        &self,
-        io: &mut impl BlockDevice,
-        from_path: &str,
-        to_path: &str,
-    ) -> Result<(), ExFatError> {
-        if from_path == to_path {
-            return Err(ExFatError::InvalidFileName {
-                reason: "cannot copy file to the same exact location",
-            });
-        }
-        let mut file = self.with_options().read(true).open(io, from_path).await?;
-
-        let (dir_path, file_or_dir_name) = split_path(to_path);
-        let num_clusters = file
-            .details
-            .valid_data_length
-            .div_ceil(self.fs.cluster_length as u64) as u32;
-
-        // find free space on the drive, preferring contiguous clusters
-        let allocation = self
-            .alloc_bitmap
-            .find_free_clusters(io, &self.fs, num_clusters, false, None)
-            .await?;
-
-        // find directory or recursively create it if it does not already exist
-        let directory_cluster_id = get_or_create_directory(
-            io,
-            &self.fs,
-            &self.upcase_table,
-            &self.alloc_bitmap,
-            dir_path,
-        )
-        .await?;
-
-        match allocation {
-            Allocation::Contiguous {
-                first_cluster,
-                num_clusters,
-            } => {
-                let flags =
-                    GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain;
-
-                create_file_dir_entry_at(
-                    io,
-                    &self.upcase_table,
-                    file_or_dir_name,
-                    directory_cluster_id,
-                    first_cluster,
-                    file.details.attributes,
-                    flags,
-                    file.details.valid_data_length,
-                    file.details.data_length,
-                    &self.fs,
-                )
-                .await?;
-
-                self.alloc_bitmap
-                    .mark_allocated_contiguous(io, &self.fs, first_cluster, num_clusters, true)
-                    .await?;
-
-                let mut sector_id = self.fs.get_heap_sector_id(first_cluster)?;
-                let mut buf = [0u8; BLOCK_SIZE];
-
-                while let Some(_len) = file.read(io, &mut buf).await? {
-                    io.write_sector(sector_id, &buf).await?;
-                    sector_id += 1;
-                }
-            }
-            Allocation::FatChain {
-                clusters: _clusters,
-            } => {
-                unimplemented!()
-            }
-        }
-
-        Ok(())
-    }
-
-    /// rename a file or folder
-    /// the from_path is the old file or directory path (including all sub directories)
-    /// the to_path is the new file or directory path (including all sub directories)
-    /// if the file or directory changes parent directories then this is conidered to be a file move, otherwide a rename
-    #[bisync]
-    pub async fn rename(
-        &self,
-        io: &mut impl BlockDevice,
-        from_path: &str,
-        to_path: &str,
-    ) -> Result<(), ExFatError> {
-        // in exFAT a directory cannot have a directory and file with the same name in it so no need to filter here
-        let file_details =
-            find_file_inner(io, &self.fs, &self.upcase_table, from_path, None).await?;
-
-        // mark dir entries as free
-        let mut freed_dir_entries = Vec::with_capacity(1 + file_details.secondary_count as usize);
-        for _ in 0..freed_dir_entries.capacity() {
-            let mut dir_entry = [0u8; RAW_ENTRY_LEN];
-            Self::mark_dir_entry_free(&mut dir_entry);
-            freed_dir_entries.push(dir_entry);
-        }
-
-        let (dir_path, file_or_dir_name) = split_path(to_path);
-
-        write_dir_entries_to_disk(io, file_details.location, freed_dir_entries).await?;
-
-        // find directory or recursively create it if it does not already exist
-        let directory_cluster_id = get_or_create_directory(
-            io,
-            &self.fs,
-            &self.upcase_table,
-            &self.alloc_bitmap,
-            dir_path,
-        )
-        .await?;
-
-        create_file_dir_entry_at(
-            io,
-            &self.upcase_table,
-            file_or_dir_name,
-            directory_cluster_id,
-            file_details.first_cluster,
-            file_details.attributes,
-            file_details.flags,
-            file_details.valid_data_length,
-            file_details.data_length,
-            &self.fs,
-        )
-        .await?;
-
-        Ok(())
+        Ok(file_details)
     }
 
     #[inline(always)]
@@ -437,59 +515,7 @@ impl FileSystem {
         dir_entry[0] = 0x01;
     }
 
-    /// removes an empty directory
-    /// will return an error if the directory does not exist or is not empty
-    #[bisync]
-    pub async fn remove_dir(
-        &self,
-        io: &mut impl BlockDevice,
-        path: &str,
-    ) -> Result<(), ExFatError> {
-        let file_details = find_file_inner(
-            io,
-            &self.fs,
-            &self.upcase_table,
-            path,
-            Some(FileAttributes::Directory),
-        )
-        .await?;
-        self.delete_inner(io, &file_details).await?;
-        Ok(())
-    }
-
-    /// writes the entire contents to a file.
-    /// the file will be overwritten if it already exists.
-    /// this function will create any directories in the path that do not already exist.
-    /// relative paths are not supported.
-    #[bisync]
-    pub async fn write(
-        &self,
-        io: &mut impl BlockDevice,
-        path: &str,
-        contents: impl AsRef<[u8]>,
-    ) -> Result<(), ExFatError> {
-        // delete the file if it already exists
-        match find_file_inner(
-            io,
-            &self.fs,
-            &self.upcase_table,
-            path,
-            Some(FileAttributes::Archive),
-        )
-        .await
-        {
-            Ok(file_details) => self.delete_inner(io, &file_details).await?,
-            Err(ExFatError::FileNotFound) => {
-                // ignore
-            }
-            Err(e) => return Err(e),
-        }
-
-        self.write_inner(io, path, contents).await?;
-        Ok(())
-    }
-
-    /// assume that the file does not already exist
+    // assume that the file does not already exist
     #[bisync]
     async fn write_inner(
         &self,
@@ -601,8 +627,6 @@ impl FileSystem {
         Ok(clusters)
     }
 
-    /// the only difference between deleting a file and a directory is that we must
-    /// first check tha the directory is empty.
     #[bisync]
     async fn confirm_has_no_children(
         &self,
@@ -628,8 +652,8 @@ impl FileSystem {
         Ok(())
     }
 
-    /// the only difference between deleting a file and a directory is that we must
-    /// first check tha the directory is empty.
+    // the only difference between deleting a file and a directory is that we must
+    // first check tha the directory is empty.
     #[bisync]
     async fn delete_inner(
         &self,
@@ -638,7 +662,7 @@ impl FileSystem {
     ) -> Result<(), ExFatError> {
         self.confirm_has_no_children(io, file_details).await?;
 
-        // TODO: if this is no-fat-chain then dont use the FAT
+        // TODO: if this is no-fat-chain then don't use the FAT
         let cluster_ids = self.get_all_clusters_from(io, file_details).await?;
         self.alloc_bitmap
             .mark_allocated(io, &self.fs, &cluster_ids, false)
@@ -720,7 +744,7 @@ async fn get_or_create_directory(
                     Allocation::FatChain { clusters } => clusters[0],
                     Allocation::Contiguous {
                         first_cluster: _first_cluster,
-                        num_clusters: _num_clustewrs,
+                        num_clusters: _num_clusters,
                     } => unreachable!(), // because we passed only_fat_chain = true
                 };
 
@@ -756,9 +780,9 @@ async fn get_or_create_directory(
     Ok(cluster_id)
 }
 
-/// assume that the file dir entry does NOT already exist
-/// TODO: this is a fairly dangerous assumption, try to enforse it without redundant checks
-/// assume that name is valid
+// assume that the file dir entry does NOT already exist
+// TODO: this is a fairly dangerous assumption, try to enforce it without redundant checks
+// assume that name is valid
 #[bisync]
 #[allow(clippy::too_many_arguments)]
 async fn create_file_dir_entry_at(
@@ -1040,7 +1064,7 @@ mod tests {
     fn dummy_fs() -> FileSystem {
         let details = FileSystemDetails {
             cluster_heap_offset: 2,
-            fat_offset: 1,          // fat table will consime 2 sectors
+            fat_offset: 1,          // fat table will consume 2 sectors
             sectors_per_cluster: 1, // very small cluster size
             cluster_length: 15,
             first_cluster_of_root_dir: 3,
@@ -1051,7 +1075,7 @@ mod tests {
         let alloc_bitmap = AllocationBitmap {
             first_cluster: 2,
             num_sectors: details.cluster_length.div_ceil(BLOCK_SIZE as u32),
-            max_cluster_id: details.cluster_length,
+            _max_cluster_id: details.cluster_length,
         };
 
         FileSystem::new_inner(details, upcase_table, alloc_bitmap)

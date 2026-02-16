@@ -5,7 +5,7 @@ use super::{
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug)]
-pub struct UpcaseTable {
+pub(crate) struct UpcaseTable {
     pub mapping: [u16; 128],
 }
 
@@ -27,7 +27,7 @@ impl Default for UpcaseTable {
 
 impl UpcaseTable {
     #[bisync]
-    pub async fn load(
+    pub(crate) async fn load(
         &mut self,
         dir_entry: &UpcaseTableDirEntry,
         fs: &FileSystemDetails,

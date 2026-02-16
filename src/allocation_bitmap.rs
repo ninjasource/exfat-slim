@@ -24,16 +24,16 @@ use super::{
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone)]
-pub struct AllocationBitmap {
+pub(crate) struct AllocationBitmap {
     /// start of the allocation bitmap table
     pub first_cluster: u32,
     /// size, in sectors, of the allocation bitmap
     pub num_sectors: u32,
     /// max cluster_id in the bitmap table
-    pub max_cluster_id: u32,
+    pub _max_cluster_id: u32,
 }
 
-pub enum Allocation {
+pub(crate) enum Allocation {
     Contiguous {
         first_cluster: u32,
         num_clusters: u32,
@@ -48,12 +48,12 @@ impl AllocationBitmap {
         let num_sectors = alloc_bitmap.data_length.div_ceil(BLOCK_SIZE as u64) as u32;
 
         // the allocation bitmap starts at cluster id 2
-        let max_cluster_id = alloc_bitmap.data_length as u32 * size_of::<u8>() as u32 + 2;
+        let _max_cluster_id = alloc_bitmap.data_length as u32 * size_of::<u8>() as u32 + 2;
 
         Self {
             first_cluster: alloc_bitmap.first_cluster,
             num_sectors,
-            max_cluster_id,
+            _max_cluster_id,
         }
     }
 
@@ -71,7 +71,7 @@ impl AllocationBitmap {
     }
 
     #[bisync]
-    pub async fn mark_allocated(
+    pub(crate) async fn mark_allocated(
         &self,
         io: &mut impl BlockDevice,
         fs: &FileSystemDetails,
@@ -92,7 +92,7 @@ impl AllocationBitmap {
     }
 
     #[bisync]
-    pub async fn mark_allocated_contiguous(
+    pub(crate) async fn mark_allocated_contiguous(
         &self,
         io: &mut impl BlockDevice,
         fs: &FileSystemDetails,
@@ -114,7 +114,7 @@ impl AllocationBitmap {
     }
 
     #[bisync]
-    pub async fn mark_allocated_by_sector(
+    pub(crate) async fn mark_allocated_by_sector(
         &self,
         io: &mut impl BlockDevice,
         by_sector_id: &BTreeMap<u32, Vec<usize>>,
@@ -151,7 +151,7 @@ impl AllocationBitmap {
     /// locates the next free set of contiguous clusters.
     /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
     #[bisync]
-    pub async fn find_free_clusters_non_contiguous(
+    pub(crate) async fn find_free_clusters_non_contiguous(
         &self,
         io: &mut impl BlockDevice,
         fs: &FileSystemDetails,
@@ -194,7 +194,7 @@ impl AllocationBitmap {
     /// locates the next free set of contiguous clusters.
     /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
     #[bisync]
-    pub async fn find_free_clusters_contiguous_from(
+    pub(crate) async fn find_free_clusters_contiguous_from(
         &self,
         io: &mut impl BlockDevice,
         fs: &FileSystemDetails,
@@ -254,7 +254,7 @@ impl AllocationBitmap {
     /// locates the next free set of contiguous clusters.
     /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
     #[bisync]
-    pub async fn find_free_clusters_contiguous(
+    pub(crate) async fn find_free_clusters_contiguous(
         &self,
         io: &mut impl BlockDevice,
         fs: &FileSystemDetails,
@@ -311,7 +311,7 @@ impl AllocationBitmap {
     /// if successful, this function will always return num_clusters number of free clusters
     /// if num_clusters free clusters not be found the function will return DiskFull
     #[bisync]
-    pub async fn find_free_clusters(
+    pub(crate) async fn find_free_clusters(
         &self,
         io: &mut impl BlockDevice,
         fs: &FileSystemDetails,
@@ -366,7 +366,7 @@ mod tests {
             sectors: &mut sectors,
         };
         let dir_entry = AllocationBitmapDirEntry {
-            bitmap_flags: BitmapFlags::FirstOrSecondBitmap,
+            _bitmap_flags: BitmapFlags::FirstOrSecondBitmap,
             first_cluster: 2,
             data_length: BLOCK_SIZE as u64,
         };

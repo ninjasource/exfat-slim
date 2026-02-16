@@ -23,7 +23,7 @@ pub enum Error {
 
 /// Entry Type (identifies what kind of 32 byte entry this is)
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum EntryType {
+pub(crate) enum EntryType {
     UnusedOrEndOfDirectory,
     AllocationBitmap,
     UpcaseTable,
@@ -38,8 +38,8 @@ pub enum EntryType {
 
 /// Allocation bitmap
 #[derive(Debug)]
-pub struct AllocationBitmapDirEntry {
-    pub bitmap_flags: BitmapFlags,
+pub(crate) struct AllocationBitmapDirEntry {
+    pub _bitmap_flags: BitmapFlags,
     pub first_cluster: u32,
     /// size, in bytes, of the allocation bitmap
     pub data_length: u64,
@@ -47,19 +47,20 @@ pub struct AllocationBitmapDirEntry {
 
 /// Up-case table
 #[derive(Debug)]
-pub struct UpcaseTableDirEntry {
-    pub table_checksum: u32,
+pub(crate) struct UpcaseTableDirEntry {
+    pub _table_checksum: u32,
     pub first_cluster: u32,
-    pub data_length: u64,
+    pub _data_length: u64,
 }
 
 /// Volume label
 #[derive(Debug)]
-pub struct VolumeLabelDirEntry(pub heapless::String<22>); // 11 characters
+#[allow(unused)]
+pub(crate) struct VolumeLabelDirEntry(pub heapless::String<22>); // 11 characters
 
 /// File and directory (file attribute and timestamp) also known as DirectoryEntry
 #[derive(Debug)]
-pub struct FileDirEntry {
+pub(crate) struct FileDirEntry {
     /// the number of entries following this one
     pub secondary_count: u8,
 
@@ -115,7 +116,7 @@ impl FileDirEntry {
 
 /// Stream extension (file allocation information)
 #[derive(Debug)]
-pub struct StreamExtensionDirEntry {
+pub(crate) struct StreamExtensionDirEntry {
     pub general_secondary_flags: GeneralSecondaryFlags,
 
     // length, in number of characters, of the unicode string (range 1-255 is valid)
@@ -151,7 +152,7 @@ impl StreamExtensionDirEntry {
 
 /// File name (name of the file - part)
 #[derive(Debug)]
-pub struct FileNameDirEntry {
+pub(crate) struct FileNameDirEntry {
     pub general_secondary_flags: GeneralSecondaryFlags,
     pub file_name: [u16; 15], // utf16 formatted
 }
@@ -206,11 +207,11 @@ impl EntryType {
 
 impl From<&[u8; RAW_ENTRY_LEN]> for AllocationBitmapDirEntry {
     fn from(value: &[u8; RAW_ENTRY_LEN]) -> Self {
-        let bitmap_flags = BitmapFlags::from_bits_truncate(value[1]);
+        let _bitmap_flags = BitmapFlags::from_bits_truncate(value[1]);
         let first_cluster = read_u32_le::<20, _>(value);
         let data_length = read_u64_le::<24, _>(value);
         Self {
-            bitmap_flags,
+            _bitmap_flags,
             first_cluster,
             data_length,
         }
@@ -219,14 +220,14 @@ impl From<&[u8; RAW_ENTRY_LEN]> for AllocationBitmapDirEntry {
 
 impl From<&[u8; RAW_ENTRY_LEN]> for UpcaseTableDirEntry {
     fn from(value: &[u8; RAW_ENTRY_LEN]) -> Self {
-        let table_checksum = read_u32_le::<4, _>(value);
+        let _table_checksum = read_u32_le::<4, _>(value);
         let first_cluster = read_u32_le::<20, _>(value);
-        let data_length = read_u64_le::<24, _>(value);
+        let _data_length = read_u64_le::<24, _>(value);
 
         Self {
-            table_checksum,
+            _table_checksum,
             first_cluster,
-            data_length,
+            _data_length,
         }
     }
 }
@@ -315,12 +316,6 @@ impl From<&[u8; RAW_ENTRY_LEN]> for FileNameDirEntry {
     }
 }
 
-#[derive(Debug)]
-pub enum BitmapIdentifier {
-    FirstAllocation,
-    SecondAllocation,
-}
-
 bitflags! {
     /// Represents a set of bitmap flags.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -399,7 +394,7 @@ fn decode_utf16_le<const N: usize>(bytes: &[u8]) -> Result<heapless::String<N>, 
     Ok(decoded)
 }
 
-pub struct DirectoryEntryChain {
+pub(crate) struct DirectoryEntryChain {
     cluster_id: u32,
     fs: FileSystemDetails,
     // offset, in number of sectors, from start of cluster
@@ -488,7 +483,7 @@ impl DirectoryEntryChain {
 }
 
 #[bisync]
-pub async fn next_file_dir_entry(
+pub(crate) async fn next_file_dir_entry(
     io: &mut impl BlockDevice,
     entries: &mut DirectoryEntryChain,
 ) -> Result<Option<(FileDirEntry, Location)>, ExFatError> {
@@ -511,7 +506,7 @@ pub async fn next_file_dir_entry(
     Ok(None)
 }
 
-pub fn is_end_of_directory(directory_entry: &[u8; 32]) -> bool {
+pub(crate) fn is_end_of_directory(directory_entry: &[u8; 32]) -> bool {
     // all bytes in the entry must be zero for this to be an end of directory marker
     directory_entry.iter().all(|&x| x == 0)
 }
@@ -544,7 +539,7 @@ fn calc_checksum(dir_entry_set: &[RawDirEntry]) -> u16 {
 }
 
 /// calculate and update the set_checksum field
-pub fn update_checksum(dir_entries: &mut [RawDirEntry]) {
+pub(crate) fn update_checksum(dir_entries: &mut [RawDirEntry]) {
     let set_checksum = calc_checksum(dir_entries);
     dir_entries[0][2..4].copy_from_slice(&set_checksum.to_le_bytes());
 }

@@ -8,37 +8,37 @@ use super::{
     upcase_table::UpcaseTable,
 };
 
-pub fn chunk_at<const N: usize, T>(slice: &[T], index: usize) -> Option<&[T; N]> {
+pub(crate) fn _chunk_at<const N: usize, T>(slice: &[T], index: usize) -> Option<&[T; N]> {
     let start = index.checked_mul(N)?;
     let end = start.checked_add(N)?;
     slice.get(start..end)?.try_into().ok()
 }
 
-pub fn read_u16_le<const INDEX: usize, const N: usize>(value: &[u8; N]) -> u16 {
+pub(crate) fn read_u16_le<const INDEX: usize, const N: usize>(value: &[u8; N]) -> u16 {
     let mut tmp = [0u8; size_of::<u16>()];
     tmp.copy_from_slice(&value[INDEX..INDEX + size_of::<u16>()]);
     u16::from_le_bytes(tmp)
 }
 
-pub fn read_u32_le<const INDEX: usize, const N: usize>(value: &[u8; N]) -> u32 {
+pub(crate) fn read_u32_le<const INDEX: usize, const N: usize>(value: &[u8; N]) -> u32 {
     let mut tmp = [0u8; size_of::<u32>()];
     tmp.copy_from_slice(&value[INDEX..INDEX + size_of::<u32>()]);
     u32::from_le_bytes(tmp)
 }
 
-pub fn read_u64_le<const INDEX: usize, const N: usize>(value: &[u8; N]) -> u64 {
+pub(crate) fn read_u64_le<const INDEX: usize, const N: usize>(value: &[u8; N]) -> u64 {
     let mut tmp = [0u8; size_of::<u64>()];
     tmp.copy_from_slice(&value[INDEX..INDEX + size_of::<u64>()]);
     u64::from_le_bytes(tmp)
 }
 
 /// calculate the number of 32 byte chunks required for the directory entry set
-pub fn calc_dir_entry_set_len(name: &[u16]) -> usize {
+pub(crate) fn calc_dir_entry_set_len(name: &[u16]) -> usize {
     // file_dir + stream_extension + file_name entries in blocks of 15 characters
     2 + (name.len() as u32).div_ceil(15) as usize
 }
 
-pub fn encode_utf16_and_hash(s: &str, upcase_table: &UpcaseTable) -> (Vec<u16>, u16) {
+pub(crate) fn encode_utf16_and_hash(s: &str, upcase_table: &UpcaseTable) -> (Vec<u16>, u16) {
     let mut file_name: Vec<u16> = s.encode_utf16().collect();
     for c in file_name.iter_mut() {
         *c = upcase_table.upcase(*c)
@@ -51,7 +51,7 @@ pub fn encode_utf16_and_hash(s: &str, upcase_table: &UpcaseTable) -> (Vec<u16>, 
     (file_name, file_name_hash)
 }
 
-pub fn encode_utf16_upcase_and_hash(s: &str, upcase_table: &UpcaseTable) -> (Vec<u16>, u16) {
+pub(crate) fn encode_utf16_upcase_and_hash(s: &str, upcase_table: &UpcaseTable) -> (Vec<u16>, u16) {
     let mut file_name: Vec<u16> = s.encode_utf16().collect();
     for c in file_name.iter_mut() {
         *c = upcase_table.upcase(*c)
@@ -61,7 +61,7 @@ pub fn encode_utf16_upcase_and_hash(s: &str, upcase_table: &UpcaseTable) -> (Vec
     (file_name, file_name_hash)
 }
 
-pub fn calc_hash_u16(utf16_file_name: &[u16]) -> u16 {
+pub(crate) fn calc_hash_u16(utf16_file_name: &[u16]) -> u16 {
     let mut hash = 0u16;
 
     for byte in utf16_file_name
@@ -74,7 +74,7 @@ pub fn calc_hash_u16(utf16_file_name: &[u16]) -> u16 {
     hash
 }
 
-pub fn decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
+pub(crate) fn _decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
     let decoded = core::char::decode_utf16(buf)
         .map(|r| {
             // TODO reject illegal character like quotes (see spec)

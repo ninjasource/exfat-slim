@@ -1,5 +1,5 @@
 # exfat-slim
-An exFAT file system library written in safe Rust for embedded environments
+An exFAT file system library written in safe Rust for embedded environments. 
 
 ## Introduction
 
@@ -7,6 +7,7 @@ The exfat file system is an upgrade to the FAT32 file system (which limits to 4G
 In exFAT, the max volume size is 128 petabytes with max files sizes up to that.
 The file system is optimized for flash storage and is particularly good for SD cards when it comes to wear levelling.
 This is a `[no_std]` implementation requiring the `alloc` crate.
+There is no unsafe Rust in the codebase (excl. dependencies)
 
 ## Why build this
 
@@ -68,6 +69,20 @@ Open a file for writing, make some writes, change the file cursor, overwrite som
     println!("{contents}"); // hello World
 ```
 
+## Immediate mode
+
+For the sake of simplicity I chose to write all file metadata on every write operation. 
+Therefore there is no need to call flush or close on the file. 
+As a result of this it is advisable to write data in multiples of `BLOCK_SIZE` (512 bytes) and buffer data yourself to reduce SD card wear. 
+The file system therefore has a very small memory footprint.
+A plus side to this is that there should be enough time to put the file system in a consistent state if the user physically removes the SD card and there is an SD Detect pin available.
+There is a 10-20ms window of opportunity to write the last remaining blocks in the write queue. 
+The downside to this is that we increase wear on the SD card by writing directory entry metadata (like timestamps and data length) on every write operation.
+However, this can be mitigated by writing large buffers to disk in one go instead of chunking it up yourself and calling many write operations.
+Another point to make is that the volume dirty bit is never touched for write operations as it is not mandatory to do so in the spec.
+It is, however, exposed in the `utils` module if you chose to use it manually.
+Note that power loss during a large write operation could result in pre-allocated clusters being permanently lost (at least until a reformat of the disk) as well as data loss from data not written to disk.
+
 ## Usage guidelines
 
 As per the license, this codebase comes with no guarantees and I don't accept any responsibility for data corruption or loss regardless of the guidelines that follow. 
@@ -82,7 +97,7 @@ If you create a file in a nested directory the library will attempt to create al
 
 My primary use-case for this library is for an embedded device using the Embassy async framework. 
 Therefore it is async-first and I am initially only planning on implementing the bits I really need.
-This project is still very much alpha quality so please be aware of that.
+This project is still undergoing significant churn and testing so just be aware of that
 
 Implemented so far:
 - Read a file
@@ -106,6 +121,7 @@ Implemented so far:
     - Seek
 
 Work in progress:
+- Return zeros where user attempts to read past valid_data_length in file (see File::read function)
 - Truncate to specified length to preallocate a file
 - Better test coverage
 - Timestamps
@@ -118,7 +134,7 @@ Work in progress:
 
 ## Contribution
 
-If you do want to contribute then I would appreciate raised issues instead of PRs at this point in the project. 
+If you do want to contribute then I would appreciate raised issues (by humans only) instead of PRs at this point in the project. 
 I expect a lot of churn in the near future and I don't want the codebase to get unwieldy before then. 
 Also, vibe coding and agentic bots and have made the whole PR process unpleasant in recent times. 
 At some point I will open it up but please respect my need to keep this as a portfolio project for now.
@@ -133,4 +149,4 @@ It is zipped because it contains mostly zeros. You can use a crate like `mbr-nos
 
 ## Assumptions and Limitations
 
-Assume a block size of 512 bytes. Even though exFAT supports block sizes from 512 to 4096 bytes this library was primarily written with SD cards in mind and they use 512 byte blocks.
+Assume a block size of 512 bytes. Even though exFAT supports block sizes from 512 to 4096 bytes this library was primarily written with SD cards in mind and they use 512 byte blocks for now.
