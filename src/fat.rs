@@ -20,8 +20,9 @@ pub(crate) async fn next_cluster_in_fat_chain(
     let sector_id = fat_offset + cluster_id / NUM_ENTRIES as u32;
     let sector_offset = (cluster_id % NUM_ENTRIES as u32) as usize;
 
-    let buf = io.read_sector(sector_id).await?;
-    let (chunks, _remainder) = buf.as_chunks::<ENTRY_SIZE>();
+    let mut block = [0u8; BLOCK_SIZE];
+    io.read_sector(sector_id, &mut block).await?;
+    let (chunks, _remainder) = block.as_chunks::<ENTRY_SIZE>();
     let next_cluster_id = u32::from_le_bytes(chunks[sector_offset]);
 
     if (MIN_CLUSER_ID..CLUSTER_LEN).contains(&next_cluster_id) {
@@ -58,9 +59,8 @@ pub(crate) async fn update_fat_chain(
     let mut block = [0u8; BLOCK_SIZE];
     for (sector_id, value) in by_sector_id {
         // read entire sector
-        let buf = io.read_sector(sector_id).await?;
+        io.read_sector(sector_id, &mut block).await?;
 
-        block.copy_from_slice(buf);
         let (chunks, _remainder) = block.as_chunks_mut::<ENTRY_SIZE>();
 
         // mutate only the chunks pertaining to our cluster_ids

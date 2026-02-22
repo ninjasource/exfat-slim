@@ -3,7 +3,12 @@ use core::str::from_utf8;
 use bitflags::bitflags;
 use thiserror::Error;
 
-use super::utils::{read_u16_le, read_u32_le, read_u64_le};
+use crate::asynchronous::io::Block;
+
+use super::{
+    io::BLOCK_SIZE,
+    utils::{read_u16_le, read_u32_le, read_u64_le},
+};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -72,10 +77,10 @@ pub(crate) struct BootSector {
 }
 
 impl BootSector {
-    pub fn check_is_valid(value: &[u8; 512]) -> Result<(), Error> {
+    pub fn check_is_valid(value: &Block) -> Result<(), Error> {
         // jump boot
         // check that this is not MBR or GPT which is usually the first sector of an SD card
-        if &value[..2] != &[0xeb, 0x76, 0x90] {
+        if value[0] != 0xeb && value[1] != 0x76 && value[2] != 0x90 {
             return Err(Error::InvalidJumpBoot);
         }
 
@@ -90,7 +95,7 @@ impl BootSector {
         };
 
         // boot signature
-        if &value[510..512] != &[0x55, 0xaa] {
+        if value[510] != 0x55 && value[511] != 0xaa {
             return Err(Error::InvalidBootSignature);
         }
 
@@ -98,10 +103,10 @@ impl BootSector {
     }
 }
 
-impl TryFrom<&[u8; 512]> for BootSector {
+impl TryFrom<&[u8; BLOCK_SIZE]> for BootSector {
     type Error = Error;
 
-    fn try_from(value: &[u8; 512]) -> Result<Self, Self::Error> {
+    fn try_from(value: &[u8; BLOCK_SIZE]) -> Result<Self, Self::Error> {
         Self::check_is_valid(value)?;
         let partition_offset = read_u64_le::<64, _>(value);
         let volume_length = read_u64_le::<72, _>(value);

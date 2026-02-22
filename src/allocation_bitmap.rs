@@ -120,9 +120,9 @@ impl AllocationBitmap {
         by_sector_id: &BTreeMap<u32, Vec<usize>>,
         allocated: bool,
     ) -> Result<(), ExFatError> {
+        let mut block = [0u8; BLOCK_SIZE];
         for (sector_id, indices) in by_sector_id {
-            let mut block = [0u8; BLOCK_SIZE];
-            block.copy_from_slice(io.read_sector(*sector_id).await?);
+            io.read_sector(*sector_id, &mut block).await?;
             for index in indices {
                 let byte = &mut block[index / 8];
                 let bit = index % 8;
@@ -164,10 +164,12 @@ impl AllocationBitmap {
         let mut cluster_id = sector_index * BLOCK_SIZE as u32 + 2;
         let num_clusters = num_clusters as usize;
         let mut clusters = Vec::with_capacity(num_clusters);
+        let mut block = [0u8; BLOCK_SIZE];
 
         for sector_offset in sector_index..self.num_sectors {
-            let buf = io.read_sector(sector_id + sector_offset).await?;
-            let (bytes, _remainder) = buf.as_chunks::<4>();
+            io.read_sector(sector_id + sector_offset, &mut block)
+                .await?;
+            let (bytes, _remainder) = block.as_chunks::<4>();
             for chunk in bytes.iter() {
                 if u32::from_le_bytes(*chunk) != u32::MAX {
                     for byte in chunk.iter() {
@@ -206,10 +208,12 @@ impl AllocationBitmap {
         let mut cluster_id = sector_index * BLOCK_SIZE as u32 + 2;
         let mut first_cluster = None;
         let mut count = 0;
+        let mut block = [0u8; BLOCK_SIZE];
 
         for sector_offset in sector_index..self.num_sectors {
-            let buf = io.read_sector(sector_id + sector_offset).await?;
-            let (bytes, _remainder) = buf.as_chunks::<4>();
+            io.read_sector(sector_id + sector_offset, &mut block)
+                .await?;
+            let (bytes, _remainder) = block.as_chunks::<4>();
             for chunk in bytes {
                 if u32::from_le_bytes(*chunk) != u32::MAX {
                     for byte in chunk {
@@ -266,10 +270,12 @@ impl AllocationBitmap {
         let mut cluster_id = sector_index * BLOCK_SIZE as u32 + 2;
         let mut first_cluster = None;
         let mut count = 0;
+        let mut block = [0u8; BLOCK_SIZE];
 
         for sector_offset in sector_index..self.num_sectors {
-            let buf = io.read_sector(sector_id + sector_offset).await?;
-            let (bytes, _remainder) = buf.as_chunks::<4>();
+            io.read_sector(sector_id + sector_offset, &mut block)
+                .await?;
+            let (bytes, _remainder) = block.as_chunks::<4>();
             for chunk in bytes {
                 if u32::from_le_bytes(*chunk) != u32::MAX {
                     for byte in chunk {

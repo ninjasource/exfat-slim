@@ -469,8 +469,7 @@ impl DirectoryEntryChain {
 
         if self.fetch_required {
             let sector_id = self.get_current_sector_id()?;
-            let buf = io.read_sector(sector_id).await?;
-            self.buf.copy_from_slice(buf);
+            io.read_sector(sector_id, &mut self.buf).await?;
             self.fetch_required = false;
         }
 

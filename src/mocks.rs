@@ -11,8 +11,9 @@ pub struct InMemoryBlockDevice<'a> {
 
 impl<'a> BlockDevice for InMemoryBlockDevice<'a> {
     #[bisync]
-    async fn read_sector(&mut self, sector_id: u32) -> Result<&Block, IoError> {
-        Ok(&self.sectors[sector_id as usize])
+    async fn read_sector(&mut self, sector_id: u32, block: &mut Block) -> Result<(), IoError> {
+        block.copy_from_slice(&self.sectors[sector_id as usize]);
+        Ok(())
     }
 
     #[bisync]

@@ -1,3 +1,5 @@
+use crate::asynchronous::io::BLOCK_SIZE;
+
 use super::{
     bisync, directory_entry::UpcaseTableDirEntry, error::ExFatError,
     file_system::FileSystemDetails, io::BlockDevice,
@@ -34,7 +36,8 @@ impl UpcaseTable {
         io: &mut impl BlockDevice,
     ) -> Result<(), ExFatError> {
         let sector_id = fs.get_heap_sector_id(dir_entry.first_cluster)?;
-        let block = io.read_sector(sector_id).await?;
+        let mut block = [0u8; BLOCK_SIZE];
+        io.read_sector(sector_id, &mut block).await?;
         let (chars, _remainder) = block.as_chunks::<2>();
         for (to, from) in self.mapping.iter_mut().zip(chars) {
             *to = u16::from_le_bytes(*from);

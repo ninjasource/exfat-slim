@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
 use super::{
     allocation_bitmap::{Allocation, AllocationBitmap},
@@ -672,7 +672,8 @@ impl FileSystem {
         let dir_entry_offset = file_details.location.dir_entry_offset;
 
         let mut sector = [0u8; BLOCK_SIZE];
-        sector.copy_from_slice(io.read_sector(file_details.location.sector_id).await?);
+        io.read_sector(file_details.location.sector_id, &mut sector)
+            .await?;
         let (dir_entries, _remainder) = sector.as_chunks_mut::<RAW_ENTRY_LEN>();
 
         let file_dir_entry = FileDirEntry::from(&dir_entries[dir_entry_offset]);
@@ -696,8 +697,7 @@ impl FileSystem {
                 break;
             } else {
                 sector_id += 1;
-                let block = io.read_sector(sector_id).await?;
-                sector.copy_from_slice(block);
+                io.read_sector(sector_id, &mut sector).await?;
                 from = 0;
             }
         }
@@ -878,8 +878,8 @@ pub(crate) async fn write_dir_entries_to_disk(
 ) -> Result<(), ExFatError> {
     let mut sector_id = location.sector_id;
     let mut offset = location.dir_entry_offset * RAW_ENTRY_LEN;
-    let mut block = Box::new([0u8; BLOCK_SIZE]);
-    block.copy_from_slice(io.read_sector(location.sector_id).await?);
+    let mut block = [0u8; BLOCK_SIZE];
+    io.read_sector(location.sector_id, &mut block).await?;
 
     for (index, dir_entry) in dir_entries.iter().enumerate() {
         block[offset..offset + RAW_ENTRY_LEN].copy_from_slice(dir_entry);
@@ -898,7 +898,7 @@ pub(crate) async fn write_dir_entries_to_disk(
             // because we asked for a valid dir entry set
             offset = 0;
             sector_id += 1;
-            block.copy_from_slice(io.read_sector(sector_id).await?);
+            io.read_sector(sector_id, &mut block).await?;
         }
     }
 
@@ -958,8 +958,9 @@ async fn read_boot_sector(
     io: &mut impl BlockDevice,
     sector_id: u32,
 ) -> Result<BootSector, ExFatError> {
-    let buf = io.read_sector(sector_id).await?;
-    let boot_sector: BootSector = buf.try_into()?;
+    let mut block = [0u8; BLOCK_SIZE];
+    io.read_sector(sector_id, &mut block).await?;
+    let boot_sector: BootSector = (&block).try_into()?;
     // TODO: run checks
     Ok(boot_sector)
 }
@@ -971,13 +972,14 @@ async fn read_root_dir(
 ) -> Result<FileSystem, ExFatError> {
     let cluster_id = details.first_cluster_of_root_dir;
     let sector_id = details.get_heap_sector_id(cluster_id)?;
-    let buf = io.read_sector(sector_id).await?;
+    let mut block = [0u8; BLOCK_SIZE];
+    io.read_sector(sector_id, &mut block).await?;
 
     let mut allocation_bitmap_dir_entry: Option<AllocationBitmapDirEntry> = None;
     let mut volume_label: Option<VolumeLabelDirEntry> = None;
     let mut upcase_table_dir_entry: Option<UpcaseTableDirEntry> = None;
 
-    let (chunks, _remainder) = buf.as_chunks::<RAW_ENTRY_LEN>();
+    let (chunks, _remainder) = block.as_chunks::<RAW_ENTRY_LEN>();
 
     for chunk in chunks {
         let entry_type_val = chunk[0];

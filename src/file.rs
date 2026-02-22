@@ -280,8 +280,9 @@ impl File {
             .min(buf.len() as u64) as usize;
 
         // read a single sector and copy the bytes into the user supplied buffer
-        let sector_buf = io.read_sector(sector_id).await?;
-        buf[..num_bytes].copy_from_slice(&sector_buf[sector_offset..sector_offset + num_bytes]);
+        let mut block = [0u8; BLOCK_SIZE];
+        io.read_sector(sector_id, &mut block).await?;
+        buf[..num_bytes].copy_from_slice(&block[sector_offset..sector_offset + num_bytes]);
 
         // update file read cursor position
         self.move_file_cursor_for_reads(io, num_bytes).await?;
@@ -617,12 +618,11 @@ impl File {
         // we need to read the existing sector and add in the bit we want to write
         // for max efficiency the user should write in block size chunks
         if start_index > 0 || end_index < BLOCK_SIZE {
-            let block = io.read_sector(sector_id).await?;
-            let mut temp = [0u8; BLOCK_SIZE];
+            let mut block = [0u8; BLOCK_SIZE];
+            io.read_sector(sector_id, &mut block).await?;
             let len = end_index - start_index;
-            temp.copy_from_slice(block);
-            temp[start_index..end_index].copy_from_slice(&buf[..len]);
-            io.write_sector(sector_id, &temp).await?;
+            block[start_index..end_index].copy_from_slice(&buf[..len]);
+            io.write_sector(sector_id, &block).await?;
             self.move_file_cursor_for_writes(len, cluster_ids)?;
             return Ok(len);
         }

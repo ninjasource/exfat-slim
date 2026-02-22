@@ -89,11 +89,11 @@ pub(crate) fn _decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
 #[bisync]
 pub async fn set_volume_dirty(io: &mut impl BlockDevice, is_dirty: bool) -> Result<(), ExFatError> {
     let sector_id = 0; // boot sector
-    let mut sector = [0u8; BLOCK_SIZE];
-    sector.copy_from_slice(io.read_sector(sector_id).await?);
-    let mut volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(&sector));
+    let mut block = [0u8; BLOCK_SIZE];
+    io.read_sector(sector_id, &mut block).await?;
+    let mut volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(&block));
     volume_flags.set(VolumeFlags::VolumeDirty, is_dirty);
-    sector[106..108].copy_from_slice(&volume_flags.bits().to_le_bytes());
-    io.write_sector(sector_id, &sector).await?;
+    block[106..108].copy_from_slice(&volume_flags.bits().to_le_bytes());
+    io.write_sector(sector_id, &block).await?;
     Ok(())
 }

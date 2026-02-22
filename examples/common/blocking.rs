@@ -29,7 +29,7 @@ impl InMemoryBlockDevice {
 }
 
 impl BlockDevice for InMemoryBlockDevice {
-    fn read_sector(&mut self, sector_id: u32) -> Result<&Block, IoError> {
+    fn read_sector(&mut self, sector_id: u32, block: &mut Block) -> Result<(), IoError> {
         let sector_id_with_offset = sector_id + self.sector_offset;
         match self.last_sector.as_ref() {
             Some(x) if *x == sector_id_with_offset => {
@@ -37,14 +37,14 @@ impl BlockDevice for InMemoryBlockDevice {
             }
             _ => {
                 print("READ", sector_id_with_offset, sector_id, false);
-                let pos = sector_id_with_offset as usize * BLOCK_SIZE;
-                self.data_block
-                    .copy_from_slice(&self.image[pos..pos + BLOCK_SIZE]);
-                self.last_sector = Some(sector_id_with_offset)
+                self.last_sector = Some(sector_id_with_offset);
             }
         }
 
-        Ok(&self.data_block)
+        let pos = sector_id_with_offset as usize * BLOCK_SIZE;
+        block.copy_from_slice(&self.image[pos..pos + BLOCK_SIZE]);
+
+        Ok(())
     }
 
     fn write_sector(&mut self, sector_id: u32, block: &Block) -> Result<(), IoError> {
