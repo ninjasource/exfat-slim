@@ -110,7 +110,7 @@ impl<'a> OpenBuilder<'a> {
     ///
     /// Path can contain a nested directory structure but relative paths are not supported
     #[bisync]
-    pub async fn open(&self, io: &mut impl BlockDevice, path: &str) -> Result<File, ExFatError> {
+    pub async fn open(&self, io: &impl BlockDevice, path: &str) -> Result<File, ExFatError> {
         let options = self.build();
 
         // attempt to get the file details
@@ -253,7 +253,7 @@ impl File {
     #[bisync]
     pub async fn read(
         &mut self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         buf: &mut [u8],
     ) -> Result<Option<usize>, ExFatError> {
         if !self.open_options.read {
@@ -303,7 +303,7 @@ impl File {
     #[bisync]
     pub async fn read_to_end(
         &mut self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         buf: &mut Vec<u8>,
     ) -> Result<usize, ExFatError> {
         let len = self.details.valid_data_length as usize;
@@ -327,10 +327,7 @@ impl File {
 
     /// Read all bytes from file and interprets them as a utf8 encoded string
     #[bisync]
-    pub async fn read_to_string(
-        &mut self,
-        io: &mut impl BlockDevice,
-    ) -> Result<String, ExFatError> {
+    pub async fn read_to_string(&mut self, io: &impl BlockDevice) -> Result<String, ExFatError> {
         // because multi byte characters may cross sector boundaries
         // I recon its safer to read the entire file into a buffer before decoding it
         let mut buf = Vec::new();
@@ -343,7 +340,7 @@ impl File {
     ///
     /// This function will automatically increase the length of the file if necessary
     #[bisync]
-    pub async fn write(&mut self, io: &mut impl BlockDevice, buf: &[u8]) -> Result<(), ExFatError> {
+    pub async fn write(&mut self, io: &impl BlockDevice, buf: &[u8]) -> Result<(), ExFatError> {
         if !self.open_options.write {
             return Err(ExFatError::WriteNotEnabled);
         }
@@ -415,7 +412,7 @@ impl File {
 
     /// Seek to an offset, in bytes, in the file
     #[bisync]
-    pub async fn seek(&mut self, io: &mut impl BlockDevice, cursor: u64) -> Result<(), ExFatError> {
+    pub async fn seek(&mut self, io: &impl BlockDevice, cursor: u64) -> Result<(), ExFatError> {
         if cursor > self.details.valid_data_length {
             return Err(ExFatError::SeekOutOfRange);
         }
@@ -456,7 +453,7 @@ impl File {
     #[bisync]
     async fn get_or_allocate_clusters(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         num_bytes: usize,
     ) -> Result<(Vec<u32>, bool), ExFatError> {
         if self.cursor > self.details.data_length {
@@ -576,7 +573,7 @@ impl File {
     #[bisync]
     async fn convert_file_to_fat_chain_if_required(
         &mut self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
     ) -> Result<(), ExFatError> {
         if self
             .details
@@ -602,7 +599,7 @@ impl File {
     #[bisync]
     async fn write_partial_sector(
         &mut self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         buf: &[u8],
         cluster_ids: &mut impl Iterator<Item = u32>,
     ) -> Result<usize, ExFatError> {
@@ -633,7 +630,7 @@ impl File {
     #[bisync]
     async fn get_file_dir_entry_set(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
     ) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError> {
         let mut chain = DirectoryEntryChain::new_from_location(&self.details.location, &self.fs);
 
@@ -667,7 +664,7 @@ impl File {
     #[bisync]
     async fn move_file_cursor_for_reads(
         &mut self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         num_bytes: usize,
     ) -> Result<(), ExFatError> {
         self.cursor += num_bytes as u64;
@@ -719,7 +716,7 @@ impl File {
 
 #[bisync]
 pub(crate) async fn next_file_entry(
-    io: &mut impl BlockDevice,
+    io: &impl BlockDevice,
     entries: &mut DirectoryEntryChain,
     filter: &impl DirectoryEntryFilter,
 ) -> Result<Option<FileDetails>, ExFatError> {
@@ -853,7 +850,7 @@ impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
 
 #[bisync]
 async fn get_leaf_file_entry(
-    io: &mut impl BlockDevice,
+    io: &impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     path: &str,
@@ -912,7 +909,7 @@ fn is_root_directory(path: &str) -> bool {
 
 #[bisync]
 pub(crate) async fn directory_list(
-    io: &mut impl BlockDevice,
+    io: &impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     path: &str,
@@ -965,7 +962,7 @@ impl DirectoryIterator {
     #[bisync]
     pub async fn next(
         &mut self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
     ) -> Result<Option<DirectoryEntry>, ExFatError> {
         let filter = AllPassFilter {};
         Ok(next_file_entry(io, &mut self.entries, &filter)
@@ -976,7 +973,7 @@ impl DirectoryIterator {
 
 #[bisync]
 pub(crate) async fn find_file_or_directory(
-    io: &mut impl BlockDevice,
+    io: &impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     path: &str,
@@ -989,7 +986,7 @@ pub(crate) async fn find_file_or_directory(
 // TODO: figure out visibility (pub or private)
 #[bisync]
 pub(crate) async fn find_file_inner(
-    io: &mut impl BlockDevice,
+    io: &impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     path: &str,

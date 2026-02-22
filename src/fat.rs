@@ -13,7 +13,7 @@ const NUM_ENTRIES: usize = BLOCK_SIZE / ENTRY_SIZE;
 /// gets the next cluster_id in the fat chain
 #[bisync]
 pub(crate) async fn next_cluster_in_fat_chain(
-    io: &mut impl BlockDevice,
+    io: & impl BlockDevice,
     fat_offset: u32, // from boot_sector
     cluster_id: u32,
 ) -> Result<Option<u32>, ExFatError> {
@@ -35,7 +35,7 @@ pub(crate) async fn next_cluster_in_fat_chain(
 /// updates the fat chain
 #[bisync]
 pub(crate) async fn update_fat_chain(
-    io: &mut impl BlockDevice,
+    io: & impl BlockDevice,
     fat_offset: u32, // from boot_sector
     cluster_ids: &[u32],
 ) -> Result<(), ExFatError> {

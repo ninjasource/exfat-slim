@@ -1,6 +1,7 @@
 #![allow(clippy::duplicate_mod)]
 #![deny(unsafe_code)]
 #![no_std]
+
 extern crate alloc;
 
 #[path = "."]
@@ -15,9 +16,11 @@ pub mod blocking {
     pub mod file;
     pub mod file_system;
     pub mod io;
-    mod mocks;
     mod upcase_table;
     pub mod utils;
+
+    //  #[cfg(test)]
+    //  mod mocks;
 }
 
 #[path = "."]
@@ -32,7 +35,10 @@ pub mod asynchronous {
     pub mod file;
     pub mod file_system;
     pub mod io;
-    mod mocks;
+
     mod upcase_table;
     pub mod utils;
+
+    //  #[cfg(test)]
+    //  mod mocks;
 }

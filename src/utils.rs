@@ -87,7 +87,7 @@ pub(crate) fn _decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
 }
 
 #[bisync]
-pub async fn set_volume_dirty(io: &mut impl BlockDevice, is_dirty: bool) -> Result<(), ExFatError> {
+pub async fn set_volume_dirty(io: &impl BlockDevice, is_dirty: bool) -> Result<(), ExFatError> {
     let sector_id = 0; // boot sector
     let mut block = [0u8; BLOCK_SIZE];
     io.read_sector(sector_id, &mut block).await?;

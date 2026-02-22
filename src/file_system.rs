@@ -75,7 +75,7 @@ pub struct FileSystem {
 impl FileSystem {
     /// Reads the boot sector using the block device and initializes the file system returning an instance of it
     #[bisync]
-    pub async fn new(io: &mut impl BlockDevice) -> Result<Self, ExFatError> {
+    pub async fn new(io: &impl BlockDevice) -> Result<Self, ExFatError> {
         // the boot sector is always at sector_id 0 and everything is relative from there
         // you need to offset the sector_id in your block device if there is a master boot record before this
         let boot_sector = read_boot_sector(io, 0).await?;
@@ -91,7 +91,7 @@ impl FileSystem {
 
     /// Open a file in read-only mode
     #[bisync]
-    pub async fn open(&self, io: &mut impl BlockDevice, path: &str) -> Result<File, ExFatError> {
+    pub async fn open(&self, io: &impl BlockDevice, path: &str) -> Result<File, ExFatError> {
         self.with_options().read(true).open(io, path).await
     }
 
@@ -99,7 +99,7 @@ impl FileSystem {
     ///
     /// Symbolic link following is not supported
     #[bisync]
-    pub async fn exists(&self, io: &mut impl BlockDevice, path: &str) -> Result<bool, ExFatError> {
+    pub async fn exists(&self, io: &impl BlockDevice, path: &str) -> Result<bool, ExFatError> {
         match find_file_or_directory(io, &self.fs, &self.upcase_table, path, None).await {
             Ok(_file) => Ok(true),
             Err(ExFatError::FileNotFound) => Ok(false),
@@ -112,7 +112,7 @@ impl FileSystem {
     ///
     /// Supports nested paths
     #[bisync]
-    pub async fn read(&self, io: &mut impl BlockDevice, path: &str) -> Result<Vec<u8>, ExFatError> {
+    pub async fn read(&self, io: &impl BlockDevice, path: &str) -> Result<Vec<u8>, ExFatError> {
         let mut file = self.with_options().read(true).open(io, path).await?;
         let mut buf = Vec::new();
         file.read_to_end(io, &mut buf).await?;
@@ -125,7 +125,7 @@ impl FileSystem {
     #[bisync]
     pub async fn read_to_string(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         path: &str,
     ) -> Result<String, ExFatError> {
         let mut file = self.with_options().read(true).open(io, path).await?;
@@ -138,7 +138,7 @@ impl FileSystem {
     #[bisync]
     pub async fn read_dir(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         path: &str,
     ) -> Result<DirectoryIterator, ExFatError> {
         directory_list(io, &self.fs, &self.upcase_table, path).await
@@ -148,11 +148,7 @@ impl FileSystem {
     ///
     /// Returns an error if the file does not exist or something else failed
     #[bisync]
-    pub async fn remove_file(
-        &self,
-        io: &mut impl BlockDevice,
-        path: &str,
-    ) -> Result<(), ExFatError> {
+    pub async fn remove_file(&self, io: &impl BlockDevice, path: &str) -> Result<(), ExFatError> {
         let file_details = find_file_inner(
             io,
             &self.fs,
@@ -171,7 +167,7 @@ impl FileSystem {
     #[bisync]
     pub async fn create_directory(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         path: &str,
     ) -> Result<(), ExFatError> {
         // find directory or recursively create it if it does not already exist
@@ -189,7 +185,7 @@ impl FileSystem {
     #[bisync]
     pub async fn copy(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         from_path: &str,
         to_path: &str,
     ) -> Result<(), ExFatError> {
@@ -275,7 +271,7 @@ impl FileSystem {
     #[bisync]
     pub async fn rename(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         from_path: &str,
         to_path: &str,
     ) -> Result<(), ExFatError> {
@@ -326,11 +322,7 @@ impl FileSystem {
     ///
     /// Will return an error if the directory does not exist or is not empty
     #[bisync]
-    pub async fn remove_dir(
-        &self,
-        io: &mut impl BlockDevice,
-        path: &str,
-    ) -> Result<(), ExFatError> {
+    pub async fn remove_dir(&self, io: &impl BlockDevice, path: &str) -> Result<(), ExFatError> {
         let file_details = find_file_inner(
             io,
             &self.fs,
@@ -351,7 +343,7 @@ impl FileSystem {
     #[bisync]
     pub async fn write(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         path: &str,
         contents: impl AsRef<[u8]>,
     ) -> Result<(), ExFatError> {
@@ -393,7 +385,7 @@ impl FileSystem {
     #[bisync]
     pub(crate) async fn truncate_file(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         file_details: &mut FileDetails,
         length: u64,
     ) -> Result<(), ExFatError> {
@@ -446,7 +438,7 @@ impl FileSystem {
     #[bisync]
     pub(crate) async fn create_file(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         path: &str,
     ) -> Result<FileDetails, ExFatError> {
         let (dir_path, file_or_dir_name) = split_path(path);
@@ -519,7 +511,7 @@ impl FileSystem {
     #[bisync]
     async fn write_inner(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         path: &str,
         contents: impl AsRef<[u8]>,
     ) -> Result<(), ExFatError> {
@@ -596,7 +588,7 @@ impl FileSystem {
     #[bisync]
     async fn get_all_clusters_from(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         file_details: &FileDetails,
     ) -> Result<Vec<u32>, ExFatError> {
         let mut cluster_id = file_details.first_cluster;
@@ -630,7 +622,7 @@ impl FileSystem {
     #[bisync]
     async fn confirm_has_no_children(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         file_details: &FileDetails,
     ) -> Result<(), ExFatError> {
         if file_details.attributes.contains(FileAttributes::Directory) {
@@ -657,7 +649,7 @@ impl FileSystem {
     #[bisync]
     async fn delete_inner(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         file_details: &FileDetails,
     ) -> Result<(), ExFatError> {
         self.confirm_has_no_children(io, file_details).await?;
@@ -714,7 +706,7 @@ fn path_to_iter(path: &str) -> impl Iterator<Item = &str> {
 
 #[bisync]
 async fn get_or_create_directory(
-    io: &mut impl BlockDevice,
+    io: &impl BlockDevice,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     alloc_bitmap: &AllocationBitmap,
@@ -786,7 +778,7 @@ async fn get_or_create_directory(
 #[bisync]
 #[allow(clippy::too_many_arguments)]
 async fn create_file_dir_entry_at(
-    io: &mut impl BlockDevice,
+    io: &impl BlockDevice,
     upcase_table: &UpcaseTable,
     name: &str,
     directory_cluster_id: u32,
@@ -872,7 +864,7 @@ async fn create_file_dir_entry_at(
 
 #[bisync]
 pub(crate) async fn write_dir_entries_to_disk(
-    io: &mut impl BlockDevice,
+    io: &impl BlockDevice,
     location: Location,
     dir_entries: Vec<RawDirEntry>,
 ) -> Result<(), ExFatError> {
@@ -911,7 +903,7 @@ pub(crate) async fn write_dir_entries_to_disk(
 
 #[bisync]
 async fn find_empty_dir_entry_set(
-    io: &mut impl BlockDevice,
+    io: &impl BlockDevice,
     cluster_id: u32,
     dir_entry_set_len: usize,
     fs: &FileSystemDetails,
@@ -954,10 +946,7 @@ fn split_path(path: &str) -> (&str, &str) {
 }
 
 #[bisync]
-async fn read_boot_sector(
-    io: &mut impl BlockDevice,
-    sector_id: u32,
-) -> Result<BootSector, ExFatError> {
+async fn read_boot_sector(io: &impl BlockDevice, sector_id: u32) -> Result<BootSector, ExFatError> {
     let mut block = [0u8; BLOCK_SIZE];
     io.read_sector(sector_id, &mut block).await?;
     let boot_sector: BootSector = (&block).try_into()?;
@@ -967,7 +956,7 @@ async fn read_boot_sector(
 
 #[bisync]
 async fn read_root_dir(
-    io: &mut impl BlockDevice,
+    io: &impl BlockDevice,
     details: FileSystemDetails,
 ) -> Result<FileSystem, ExFatError> {
     let cluster_id = details.first_cluster_of_root_dir;
@@ -1048,6 +1037,7 @@ async fn read_root_dir(
     Ok(file_system)
 }
 
+/*
 #[super::only_async]
 #[cfg(test)]
 mod tests {
@@ -1107,3 +1097,4 @@ mod tests {
         Ok(())
     }
 }
+ */

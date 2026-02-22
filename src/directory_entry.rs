@@ -444,7 +444,7 @@ impl DirectoryEntryChain {
     #[bisync]
     pub async fn next<'a>(
         &'a mut self,
-        io: &mut impl BlockDevice,
+        io: & impl BlockDevice,
     ) -> Result<Option<(&'a [u8; RAW_ENTRY_LEN], Location)>, ExFatError> {
         if self.dir_entry_offset >= DIR_ENTRIES_PER_BLOCK {
             self.cluster_offset += 1;
@@ -483,7 +483,7 @@ impl DirectoryEntryChain {
 
 #[bisync]
 pub(crate) async fn next_file_dir_entry(
-    io: &mut impl BlockDevice,
+    io: & impl BlockDevice,
     entries: &mut DirectoryEntryChain,
 ) -> Result<Option<(FileDirEntry, Location)>, ExFatError> {
     while let Some((entry, location)) = entries.next(io).await? {

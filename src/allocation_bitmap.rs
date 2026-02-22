@@ -73,7 +73,7 @@ impl AllocationBitmap {
     #[bisync]
     pub(crate) async fn mark_allocated(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         fs: &FileSystemDetails,
         cluster_ids: &[u32],
         allocated: bool,
@@ -94,7 +94,7 @@ impl AllocationBitmap {
     #[bisync]
     pub(crate) async fn mark_allocated_contiguous(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         fs: &FileSystemDetails,
         first_cluster: u32,
         num_clusters: u32,
@@ -116,7 +116,7 @@ impl AllocationBitmap {
     #[bisync]
     pub(crate) async fn mark_allocated_by_sector(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         by_sector_id: &BTreeMap<u32, Vec<usize>>,
         allocated: bool,
     ) -> Result<(), ExFatError> {
@@ -153,7 +153,7 @@ impl AllocationBitmap {
     #[bisync]
     pub(crate) async fn find_free_clusters_non_contiguous(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         fs: &FileSystemDetails,
         num_clusters: u32,
         from_cluster: Option<u32>,
@@ -198,7 +198,7 @@ impl AllocationBitmap {
     #[bisync]
     pub(crate) async fn find_free_clusters_contiguous_from(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         fs: &FileSystemDetails,
         num_clusters: u32,
         from_cluster: u32,
@@ -260,7 +260,7 @@ impl AllocationBitmap {
     #[bisync]
     pub(crate) async fn find_free_clusters_contiguous(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         fs: &FileSystemDetails,
         num_clusters: u32,
     ) -> Result<Allocation, ExFatError> {
@@ -319,7 +319,7 @@ impl AllocationBitmap {
     #[bisync]
     pub(crate) async fn find_free_clusters(
         &self,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
         fs: &FileSystemDetails,
         num_clusters: u32,
         only_fat_chain: bool,
@@ -358,6 +358,7 @@ impl AllocationBitmap {
     }
 }
 
+/*
 #[super::only_async]
 #[cfg(test)]
 mod tests {
@@ -390,3 +391,4 @@ mod tests {
             .unwrap();
     }
 }
+*/

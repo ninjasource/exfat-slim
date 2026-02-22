@@ -33,7 +33,7 @@ impl UpcaseTable {
         &mut self,
         dir_entry: &UpcaseTableDirEntry,
         fs: &FileSystemDetails,
-        io: &mut impl BlockDevice,
+        io: &impl BlockDevice,
     ) -> Result<(), ExFatError> {
         let sector_id = fs.get_heap_sector_id(dir_entry.first_cluster)?;
         let mut block = [0u8; BLOCK_SIZE];
