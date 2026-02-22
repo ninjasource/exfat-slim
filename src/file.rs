@@ -948,10 +948,12 @@ pub struct DirectoryEntry {
 }
 
 impl DirectoryEntry {
+    /// file or directly name
     pub fn file_name(&self) -> String {
         self.details.name.clone()
     }
 
+    /// metadata for the file or directory
     pub fn metadata(&self) -> Metadata {
         Metadata {
             details: self.details.clone(),

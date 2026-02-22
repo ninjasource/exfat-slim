@@ -11,8 +11,8 @@ pub enum ExFatError {
     #[error("directory entry ({0:?})")]
     DirectoryEntry(#[from] directory_entry::Error),
 
-    #[error("boot sector ({0:?})")]
-    BootSector(#[from] boot_sector::Error),
+    #[error("boot sector not valid exFAT ({0:?})")]
+    NotExFat(#[from] boot_sector::Error),
 
     #[error("end of fat chain")]
     EndOfFatChain,

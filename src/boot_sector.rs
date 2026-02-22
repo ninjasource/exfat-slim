@@ -1,4 +1,4 @@
-use core::str::{Utf8Error, from_utf8};
+use core::str::from_utf8;
 
 use bitflags::bitflags;
 use thiserror::Error;
@@ -7,20 +7,24 @@ use super::utils::{read_u16_le, read_u32_le, read_u64_le};
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("invalid utf8 string encountered ({0})")]
-    Utf8(#[from] Utf8Error),
+    /// if you attempt to read an exfat file system boot sector but you've actually read the
+    /// master boot record (MBR) or GPT boot record of an SD card then you will typically encounter
+    /// this error. The MBR typically points to the boot sector of the exFAT file system.
+    /// Alternatively if you attempt to read another file system you will also encounter this
+    #[error("invalid jump boot as boot_sector[..2] expected [0xeb, 0x76, 0x90]")]
+    InvalidJumpBoot,
+
+    #[error("invalid file system name at boot_sector[3..11] expected \"EXFAT   \"")]
+    InvalidFileSystemName,
+
+    #[error("invalid boot signature at boot_sector[510..512] expected [0x55, 0xaa]")]
+    InvalidBootSignature,
 }
 
 /// boot sector describes the exfat volume structure
 #[derive(Debug)]
 #[allow(unused)]
 pub(crate) struct BootSector {
-    /// must be [235, 118, 144]
-    pub jump_boot: [u8; 3],
-
-    /// must be "EXFAT   "
-    pub file_system_name: heapless::String<8>,
-
     /// media-relative offset of the partition which hosts this exFAT volume
     pub partition_offset: u64,
 
@@ -67,14 +71,38 @@ pub(crate) struct BootSector {
     pub percent_in_use: u8,
 }
 
+impl BootSector {
+    pub fn check_is_valid(value: &[u8; 512]) -> Result<(), Error> {
+        // jump boot
+        // check that this is not MBR or GPT which is usually the first sector of an SD card
+        if &value[..2] != &[0xeb, 0x76, 0x90] {
+            return Err(Error::InvalidJumpBoot);
+        }
+
+        // file system name
+        match from_utf8(&value[3..11]) {
+            Ok(s) => {
+                if s != "EXFAT   " {
+                    return Err(Error::InvalidFileSystemName);
+                }
+            }
+            Err(_e) => return Err(Error::InvalidFileSystemName),
+        };
+
+        // boot signature
+        if &value[510..512] != &[0x55, 0xaa] {
+            return Err(Error::InvalidBootSignature);
+        }
+
+        Ok(())
+    }
+}
+
 impl TryFrom<&[u8; 512]> for BootSector {
     type Error = Error;
 
     fn try_from(value: &[u8; 512]) -> Result<Self, Self::Error> {
-        let mut jump_boot = [0u8; 3]; // should be [0xEB, 0x76, 0x90]
-        jump_boot.copy_from_slice(&value[..3]); // should be "EXFAT   "
-        let mut file_system_name = heapless::String::<8>::new();
-        file_system_name.push_str(from_utf8(&value[3..11])?).ok();
+        Self::check_is_valid(value)?;
         let partition_offset = read_u64_le::<64, _>(value);
         let volume_length = read_u64_le::<72, _>(value);
         let fat_offset = read_u32_le::<80, _>(value);
@@ -92,8 +120,6 @@ impl TryFrom<&[u8; 512]> for BootSector {
         let percent_in_use = value[112];
 
         Ok(BootSector {
-            jump_boot,
-            file_system_name,
             partition_offset,
             volume_length,
             fat_offset,
