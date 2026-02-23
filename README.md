@@ -36,20 +36,21 @@ let contents: String = fs
 
 Listing all files and folders in the folder "/temp2/hello2"
 ```rust
-let mut io = InMemoryBlockDevice::new(); // your SD card driver
-let fs = FileSystem::new(&mut io).await?;
+let io = InMemoryBlockDevice::new(); // your SD card driver
+let io_cloned = InMemoryBlockDevice::new(); // your SD card driver
+let fs = FileSystem::new(io).await?;
 
 let path = "/temp2/hello2";
-let mut list: DirectoryIterator = fs.read_dir(&mut io, path).await?;
-while let Some(item) = list.next(&mut io).await? {
+let mut list: DirectoryIterator = fs.read_dir(path).await?;
+while let Some(item) = list.next(&mut io_cloned).await? {
     println!("{:?}", item);
 }
 ```
 
 Open a file for writing, make some writes, change the file cursor, overwrite some data, read the contents
 ```rust
-    let mut io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(&mut io).await?;
+    let io = InMemoryBlockDevice::new();
+    let fs = FileSystem::new(io).await?;
     let path = "/temp2/test7.txt";
 
     let mut file = fs
@@ -60,12 +61,12 @@ Open a file for writing, make some writes, change the file cursor, overwrite som
         .open(&mut io, path)
         .await?;
 
-    file.write(&mut io, b"hello").await?;
-    file.write(&mut io, b" world").await?;
-    file.seek(&mut io, 6).await?;
-    file.write(&mut io, b"W").await?;
+    file.write(b"hello").await?;
+    file.write(b" world").await?;
+    file.seek(6).await?;
+    file.write(b"W").await?;
 
-    let contents = fs.read_to_string(&mut io, path).await?;
+    let contents = fs.read_to_string(path).await?;
     println!("{contents}"); // hello World
 ```
 
