@@ -8,12 +8,19 @@ use log::info;
 async fn main() -> Result<(), ExFatError> {
     env_logger::init();
     color_backtrace::install();
-    info!("deleting file");
 
-    let mut io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(&mut io).await?;
-    fs.remove_file(&mut io, "/temp2/hello2/shoe/test.txt")
-        .await?;
+    let io = InMemoryBlockDevice::new();
+    let fs = FileSystem::new(io).await?;
+    let path = "/temp2/hello2/shoe/test.txt";
+
+    let exists = fs.exists(path).await?;
+    info!("file exists: {exists}");
+
+    info!("deleting file");
+    fs.remove_file(path).await?;
+
+    let exists = fs.exists(path).await?;
+    info!("file exists: {exists}");
 
     Ok(())
 }

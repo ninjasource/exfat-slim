@@ -5,23 +5,18 @@ use super::{
     allocation_bitmap::{Allocation, AllocationBitmap},
     bisync,
     directory_entry::{
-        DirectoryEntryChain, FileAttributes, FileNameDirEntry, GeneralSecondaryFlags, Location,
-        RAW_ENTRY_LEN, StreamExtensionDirEntry, next_file_dir_entry, update_checksum,
+        DirectoryEntryChain, FileAttributes, GeneralSecondaryFlags, Location, RAW_ENTRY_LEN,
+        StreamExtensionDirEntry, update_checksum,
     },
     error::ExFatError,
-    fat,
-    fat::next_cluster_in_fat_chain,
-    file_system::FileSystem,
-    file_system::FileSystemDetails,
-    file_system::write_dir_entries_to_disk,
+    fat::{self, next_cluster_in_fat_chain},
+    file_system::{FileSystem, FileSystemDetails, write_dir_entries_to_disk},
     io::{BLOCK_SIZE, BlockDevice},
-    upcase_table::UpcaseTable,
-    utils::encode_utf16_upcase_and_hash,
 };
 
 #[derive(Clone, Debug)]
-pub struct OpenBuilder<'a> {
-    file_system: &'a FileSystem,
+pub struct OpenBuilder<'a, D: BlockDevice> {
+    file_system: &'a FileSystem<D>,
     read: bool,
     write: bool,
     append: bool,
@@ -40,8 +35,8 @@ pub struct OpenOptions {
     pub create_new: bool,
 }
 
-impl<'a> OpenBuilder<'a> {
-    pub fn new(file_system: &'a FileSystem) -> Self {
+impl<'a, D: BlockDevice> OpenBuilder<'a, D> {
+    pub fn new(file_system: &'a FileSystem<D>) -> Self {
         Self {
             file_system,
             read: false,
@@ -110,18 +105,14 @@ impl<'a> OpenBuilder<'a> {
     ///
     /// Path can contain a nested directory structure but relative paths are not supported
     #[bisync]
-    pub async fn open(&self, io: &impl BlockDevice, path: &str) -> Result<File, ExFatError> {
+    pub async fn open(&self, path: &str) -> Result<File<D>, ExFatError> {
         let options = self.build();
 
         // attempt to get the file details
-        let file_details = find_file_or_directory(
-            io,
-            &self.file_system.fs,
-            &self.file_system.upcase_table,
-            path,
-            Some(FileAttributes::Archive),
-        )
-        .await;
+        let file_details = self
+            .file_system
+            .find_file_or_directory(path, Some(FileAttributes::Archive))
+            .await;
 
         // get file details or create if required
         let file_details = match file_details {
@@ -131,16 +122,14 @@ impl<'a> OpenBuilder<'a> {
                 }
 
                 if options.truncate {
-                    self.file_system
-                        .truncate_file(io, &mut file_details, 0)
-                        .await?;
+                    self.file_system.truncate_file(&mut file_details, 0).await?;
                 }
 
                 file_details
             }
             Err(ExFatError::FileNotFound) => {
                 if options.create || options.create_new {
-                    self.file_system.create_file(io, path).await?
+                    self.file_system.create_file(path).await?
                 } else {
                     return Err(ExFatError::FileNotFound);
                 }
@@ -184,7 +173,7 @@ impl FileDetails {
 
 #[derive(Debug)]
 pub struct Metadata {
-    details: FileDetails,
+    pub(crate) details: FileDetails,
 }
 
 // TODO: add created and modified timestamps here
@@ -210,7 +199,8 @@ impl Metadata {
     }
 }
 
-pub struct File {
+pub struct File<D: BlockDevice> {
+    dev: D,
     fs: FileSystemDetails,
     pub(crate) details: FileDetails,
     current_cluster: u32,
@@ -219,9 +209,9 @@ pub struct File {
     open_options: OpenOptions,
 }
 
-impl File {
+impl<D: BlockDevice> File<D> {
     pub(crate) fn new(
-        file_system: &FileSystem,
+        file_system: &FileSystem<D>,
         file_details: &FileDetails,
         open_options: &OpenOptions,
     ) -> Self {
@@ -231,6 +221,7 @@ impl File {
             0
         };
         Self {
+            dev: file_system.dev.clone(),
             fs: file_system.fs.clone(),
             details: file_details.clone(),
             current_cluster: file_details.first_cluster,
@@ -251,11 +242,7 @@ impl File {
     ///
     /// Read begins at the cursor position and ends at the lesser of the buf or file length
     #[bisync]
-    pub async fn read(
-        &mut self,
-        io: &impl BlockDevice,
-        buf: &mut [u8],
-    ) -> Result<Option<usize>, ExFatError> {
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, ExFatError> {
         if !self.open_options.read {
             return Err(ExFatError::ReadNotEnabled);
         }
@@ -281,11 +268,11 @@ impl File {
 
         // read a single sector and copy the bytes into the user supplied buffer
         let mut block = [0u8; BLOCK_SIZE];
-        io.read_sector(sector_id, &mut block).await?;
+        self.dev.read_sector(sector_id, &mut block).await?;
         buf[..num_bytes].copy_from_slice(&block[sector_offset..sector_offset + num_bytes]);
 
         // update file read cursor position
-        self.move_file_cursor_for_reads(io, num_bytes).await?;
+        self.move_file_cursor_for_reads(num_bytes).await?;
 
         Ok(Some(num_bytes))
     }
@@ -301,11 +288,7 @@ impl File {
     /// Exfat has the concept of valid_data_length which is less than or equal to data_length.
     /// If a zero length Vec is passed it will be extended to data_length size and the bytes between valid_data_length and data_length will contain zeros.
     #[bisync]
-    pub async fn read_to_end(
-        &mut self,
-        io: &impl BlockDevice,
-        buf: &mut Vec<u8>,
-    ) -> Result<usize, ExFatError> {
+    pub async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize, ExFatError> {
         let len = self.details.valid_data_length as usize;
         let valid_len = self.details.valid_data_length as usize;
 
@@ -318,20 +301,20 @@ impl File {
         // we are only interested in reading valid_data_length bytes as the rest are garbage and we return zeros instead (initialized above)
         let (blocks, remainder) = buf[start..start + valid_len].as_chunks_mut::<BLOCK_SIZE>();
         for block in blocks {
-            self.read(io, block.as_mut_slice()).await?;
+            self.read(block.as_mut_slice()).await?;
         }
-        self.read(io, remainder).await?;
+        self.read(remainder).await?;
 
         Ok(len)
     }
 
     /// Read all bytes from file and interprets them as a utf8 encoded string
     #[bisync]
-    pub async fn read_to_string(&mut self, io: &impl BlockDevice) -> Result<String, ExFatError> {
+    pub async fn read_to_string(&mut self) -> Result<String, ExFatError> {
         // because multi byte characters may cross sector boundaries
         // I recon its safer to read the entire file into a buffer before decoding it
         let mut buf = Vec::new();
-        let len = self.read_to_end(io, &mut buf).await?;
+        let len = self.read_to_end(&mut buf).await?;
         let decoded = from_utf8(&buf[..len])?.into();
         Ok(decoded)
     }
@@ -340,7 +323,7 @@ impl File {
     ///
     /// This function will automatically increase the length of the file if necessary
     #[bisync]
-    pub async fn write(&mut self, io: &impl BlockDevice, buf: &[u8]) -> Result<(), ExFatError> {
+    pub async fn write(&mut self, buf: &[u8]) -> Result<(), ExFatError> {
         if !self.open_options.write {
             return Err(ExFatError::WriteNotEnabled);
         }
@@ -353,17 +336,17 @@ impl File {
         self.update_data_length(buf.len());
         let has_fat_chain_original = !flags.contains(GeneralSecondaryFlags::NoFatChain);
 
-        let (cluster_ids, has_fat_chain) = self.get_or_allocate_clusters(io, buf.len()).await?;
+        let (cluster_ids, has_fat_chain) = self.get_or_allocate_clusters(buf.len()).await?;
 
         if !has_fat_chain_original && has_fat_chain {
             // if file had no fat chain before we set one up for existing data
-            self.convert_file_to_fat_chain_if_required(io).await?;
+            self.convert_file_to_fat_chain_if_required().await?;
         }
 
         let mut cluster_ids = cluster_ids.into_iter();
 
         // write the first sector (could be partially full)
-        let len = self.write_partial_sector(io, buf, &mut cluster_ids).await?;
+        let len = self.write_partial_sector(buf, &mut cluster_ids).await?;
 
         // if there are still more bytes to write
         if len < buf.len() {
@@ -373,13 +356,13 @@ impl File {
             // write full sectors
             for block in blocks {
                 let sector_id = self.get_current_sector_id()?;
-                io.write_sector(sector_id, block).await?;
+                self.dev.write_sector(sector_id, block).await?;
                 self.move_file_cursor_for_writes(block.len(), &mut cluster_ids)?;
             }
 
             // write the last sector (could be partially full)
             let _len = self
-                .write_partial_sector(io, remainder, &mut cluster_ids)
+                .write_partial_sector(remainder, &mut cluster_ids)
                 .await?;
         }
 
@@ -389,7 +372,7 @@ impl File {
             || flags != self.details.flags
         {
             // read dir entries for this file from disk
-            let mut dir_entries = self.get_file_dir_entry_set(io).await?;
+            let mut dir_entries = self.get_file_dir_entry_set().await?;
 
             // the stream ext is always the second entry
             let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
@@ -404,7 +387,7 @@ impl File {
             update_checksum(&mut dir_entries);
 
             // write to disk - only the directory entries are written.
-            write_dir_entries_to_disk(io, self.details.location, dir_entries).await?;
+            write_dir_entries_to_disk(&self.dev, self.details.location, dir_entries).await?;
         }
 
         Ok(())
@@ -412,7 +395,7 @@ impl File {
 
     /// Seek to an offset, in bytes, in the file
     #[bisync]
-    pub async fn seek(&mut self, io: &impl BlockDevice, cursor: u64) -> Result<(), ExFatError> {
+    pub async fn seek(&mut self, cursor: u64) -> Result<(), ExFatError> {
         if cursor > self.details.valid_data_length {
             return Err(ExFatError::SeekOutOfRange);
         }
@@ -431,7 +414,7 @@ impl File {
             self.current_cluster = self.details.first_cluster;
 
             for _ in 0..num_clusters {
-                match next_cluster_in_fat_chain(io, self.fs.fat_offset, self.current_cluster)
+                match next_cluster_in_fat_chain(&self.dev, self.fs.fat_offset, self.current_cluster)
                     .await?
                 {
                     Some(cluster_id) => self.current_cluster = cluster_id,
@@ -453,7 +436,6 @@ impl File {
     #[bisync]
     async fn get_or_allocate_clusters(
         &self,
-        io: &impl BlockDevice,
         num_bytes: usize,
     ) -> Result<(Vec<u32>, bool), ExFatError> {
         if self.cursor > self.details.data_length {
@@ -493,7 +475,7 @@ impl File {
             // follow the fat chain and build up
             for _ in 0..num_allocated_clusters {
                 if let Some(next_id) =
-                    next_cluster_in_fat_chain(io, self.fs.fat_offset, cluster_id).await?
+                    next_cluster_in_fat_chain(&self.dev, self.fs.fat_offset, cluster_id).await?
                 {
                     cluster_id = next_id;
                     allocated_cluster_ids.push(cluster_id);
@@ -520,7 +502,7 @@ impl File {
         let allocation = self
             .alloc_bitmap
             .find_free_clusters(
-                io,
+                &self.dev,
                 &self.fs,
                 num_unallocated_clusters,
                 has_fat_chain,
@@ -542,13 +524,13 @@ impl File {
                 // set fat chain for newly allocated clusters
                 let mut combined = vec![self.current_cluster];
                 combined.extend_from_slice(&clusters);
-                fat::update_fat_chain(io, self.fs.fat_offset, &combined).await?;
+                fat::update_fat_chain(&self.dev, self.fs.fat_offset, &combined).await?;
                 clusters
             }
         };
 
         self.alloc_bitmap
-            .mark_allocated(io, &self.fs, &cluster_ids, true)
+            .mark_allocated(&self.dev, &self.fs, &cluster_ids, true)
             .await?;
 
         allocated_cluster_ids.extend_from_slice(&cluster_ids);
@@ -571,10 +553,7 @@ impl File {
 
     /// helps to convert a file that had no_fat_chain to one with a fat chain
     #[bisync]
-    async fn convert_file_to_fat_chain_if_required(
-        &mut self,
-        io: &impl BlockDevice,
-    ) -> Result<(), ExFatError> {
+    async fn convert_file_to_fat_chain_if_required(&mut self) -> Result<(), ExFatError> {
         if self
             .details
             .flags
@@ -590,7 +569,7 @@ impl File {
                 (self.details.first_cluster..self.current_cluster).collect();
 
             // update fat chain
-            fat::update_fat_chain(io, self.fs.fat_offset, &cluster_ids).await?;
+            fat::update_fat_chain(&self.dev, self.fs.fat_offset, &cluster_ids).await?;
         }
 
         Ok(())
@@ -599,7 +578,6 @@ impl File {
     #[bisync]
     async fn write_partial_sector(
         &mut self,
-        io: &impl BlockDevice,
         buf: &[u8],
         cluster_ids: &mut impl Iterator<Item = u32>,
     ) -> Result<usize, ExFatError> {
@@ -616,10 +594,10 @@ impl File {
         // for max efficiency the user should write in block size chunks
         if start_index > 0 || end_index < BLOCK_SIZE {
             let mut block = [0u8; BLOCK_SIZE];
-            io.read_sector(sector_id, &mut block).await?;
+            self.dev.read_sector(sector_id, &mut block).await?;
             let len = end_index - start_index;
             block[start_index..end_index].copy_from_slice(&buf[..len]);
-            io.write_sector(sector_id, &block).await?;
+            self.dev.write_sector(sector_id, &block).await?;
             self.move_file_cursor_for_writes(len, cluster_ids)?;
             return Ok(len);
         }
@@ -628,10 +606,7 @@ impl File {
     }
 
     #[bisync]
-    async fn get_file_dir_entry_set(
-        &self,
-        io: &impl BlockDevice,
-    ) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError> {
+    async fn get_file_dir_entry_set(&self) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError> {
         let mut chain = DirectoryEntryChain::new_from_location(&self.details.location, &self.fs);
 
         let mut counter = 0;
@@ -639,7 +614,7 @@ impl File {
         let mut dir_entries = Vec::with_capacity(self.details.secondary_count as usize + 1);
 
         // copy all directory entries for the file into a Vec
-        while let Some((dir_entry, _location)) = chain.next(io).await? {
+        while let Some((dir_entry, _location)) = chain.next(&self.dev).await? {
             let mut entry = [0u8; RAW_ENTRY_LEN];
             entry.copy_from_slice(dir_entry);
             dir_entries.push(entry);
@@ -662,11 +637,7 @@ impl File {
     }
 
     #[bisync]
-    async fn move_file_cursor_for_reads(
-        &mut self,
-        io: &impl BlockDevice,
-        num_bytes: usize,
-    ) -> Result<(), ExFatError> {
+    async fn move_file_cursor_for_reads(&mut self, num_bytes: usize) -> Result<(), ExFatError> {
         self.cursor += num_bytes as u64;
 
         // assume that num_bytes is only ever up to the end of the current cluster
@@ -681,7 +652,8 @@ impl File {
                 // no fat chain so all clusters are consecutive for this file
                 self.current_cluster += 1;
             } else if let Some(next_cluster_id) =
-                next_cluster_in_fat_chain(io, self.fs.fat_offset, self.current_cluster).await?
+                next_cluster_in_fat_chain(&self.dev, self.fs.fat_offset, self.current_cluster)
+                    .await?
             {
                 self.current_cluster = next_cluster_id;
             } else {
@@ -711,289 +683,5 @@ impl File {
         }
 
         Ok(())
-    }
-}
-
-#[bisync]
-pub(crate) async fn next_file_entry(
-    io: &impl BlockDevice,
-    entries: &mut DirectoryEntryChain,
-    filter: &impl DirectoryEntryFilter,
-) -> Result<Option<FileDetails>, ExFatError> {
-    'outer: loop {
-        if let Some((file_dir_entry, location)) = next_file_dir_entry(io, entries).await? {
-            if let Some((stream_entry, _location)) = entries.next(io).await? {
-                // TODO: check entry type
-                let stream_entry: StreamExtensionDirEntry = stream_entry.into();
-                if !filter.hash(stream_entry.name_hash, file_dir_entry.file_attributes) {
-                    continue 'outer;
-                }
-
-                // read the entire file_name
-                let name_length = stream_entry.name_length as usize;
-                let mut file_name: Vec<u16> = Vec::with_capacity(name_length);
-                'inner: loop {
-                    if let Some((file_name_entry, _location)) = entries.next(io).await? {
-                        // TODO: check entry type
-                        let file_name_entry: FileNameDirEntry = file_name_entry.into();
-                        let len =
-                            (name_length - file_name.len()).min(file_name_entry.file_name.len());
-                        file_name.extend_from_slice(&file_name_entry.file_name[..len]);
-                        if file_name.len() == name_length {
-                            break 'inner;
-                        }
-                    } else {
-                        return Ok(None);
-                    }
-                }
-
-                if !filter.file_name(&file_name) {
-                    continue 'outer;
-                }
-
-                let name = decode_utf16(file_name)?;
-                let file_details = FileDetails {
-                    attributes: file_dir_entry.file_attributes,
-                    data_length: stream_entry.data_length,
-                    valid_data_length: stream_entry.valid_data_length,
-                    first_cluster: stream_entry.first_cluster,
-                    name,
-                    location,
-                    flags: stream_entry.general_secondary_flags,
-                    secondary_count: file_dir_entry.secondary_count,
-                };
-                return Ok(Some(file_details));
-            } else {
-                return Ok(None);
-            }
-        } else {
-            return Ok(None);
-        }
-    }
-}
-
-fn decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
-    let decoded = core::char::decode_utf16(buf)
-        .map(|r| {
-            // TODO reject illegal characters like quotes (see spec)
-            r.map_err(|_| ExFatError::InvalidUtf16String {
-                reason: "invalid u16 char detected",
-            })
-        })
-        .collect::<Result<String, ExFatError>>()?;
-    Ok(decoded)
-}
-
-pub trait DirectoryEntryFilter {
-    fn hash(&self, file_name_hash: u16, file_attributes: FileAttributes) -> bool;
-    fn file_name(&self, file_name: &[u16]) -> bool;
-}
-
-pub struct AllPassFilter {}
-
-impl DirectoryEntryFilter for AllPassFilter {
-    fn hash(&self, _file_name_hash: u16, _file_attributes: FileAttributes) -> bool {
-        true
-    }
-
-    fn file_name(&self, _file_name: &[u16]) -> bool {
-        true
-    }
-}
-
-pub struct ExactNameFilter<'a> {
-    upcase_table: &'a UpcaseTable,
-    file_name: Vec<u16>,
-    file_name_hash: u16,
-    file_attributes: Option<FileAttributes>,
-}
-
-impl<'a> ExactNameFilter<'a> {
-    pub(crate) fn new(
-        file_name_str: &str,
-        upcase_table: &'a UpcaseTable,
-        file_attributes: Option<FileAttributes>,
-    ) -> Self {
-        let (file_name, file_name_hash) = encode_utf16_upcase_and_hash(file_name_str, upcase_table);
-        Self {
-            upcase_table,
-            file_name,
-            file_name_hash,
-            file_attributes,
-        }
-    }
-}
-
-impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
-    fn hash(&self, file_name_hash: u16, file_attributes: FileAttributes) -> bool {
-        match self.file_attributes {
-            Some(attributes) => {
-                self.file_name_hash == file_name_hash && file_attributes.contains(attributes)
-            }
-            None => self.file_name_hash == file_name_hash,
-        }
-    }
-
-    fn file_name(&self, file_name: &[u16]) -> bool {
-        // perform case insensitive name match
-        for (left, right) in self.file_name.iter().zip(file_name.iter()) {
-            let upcased = self.upcase_table.upcase(*right);
-            if *left != upcased {
-                // name does not match
-                return false;
-            }
-        }
-
-        true
-    }
-}
-
-#[bisync]
-async fn get_leaf_file_entry(
-    io: &impl BlockDevice,
-    fs: &FileSystemDetails,
-    upcase_table: &UpcaseTable,
-    path: &str,
-    file_attributes: Option<FileAttributes>,
-) -> Result<Option<FileDetails>, ExFatError> {
-    let mut splits = path
-        .split(['/', '\\'])
-        .filter(|part| !part.is_empty())
-        .map(|c| c.trim())
-        .peekable();
-
-    let mut cluster_id = fs.first_cluster_of_root_dir;
-
-    while let Some(part) = splits.next() {
-        let is_last = splits.peek().is_none();
-        let attributes = if is_last {
-            file_attributes
-        } else {
-            Some(FileAttributes::Directory)
-        };
-
-        let filter = ExactNameFilter::new(part, upcase_table, attributes);
-        let mut entries = DirectoryEntryChain::new(cluster_id, fs);
-        let file_details = next_file_entry(io, &mut entries, &filter).await?;
-
-        match file_details {
-            Some(file_details) => {
-                if is_last {
-                    // file or directory (there might be a directory and a file with the same name but that would have been filtered out above)
-                    return Ok(Some(file_details));
-                } else {
-                    // directory
-                    if file_details.attributes.contains(FileAttributes::Directory) {
-                        cluster_id = file_details.first_cluster
-                    } else {
-                        return Ok(None);
-                    }
-                }
-            }
-            None => return Ok(None),
-        }
-    }
-
-    Ok(None)
-}
-
-fn is_root_directory(path: &str) -> bool {
-    let mut splits = path
-        .split(['/', '\\'])
-        .filter(|part| !part.is_empty())
-        .map(|c| c.trim())
-        .peekable();
-
-    splits.peek().is_none()
-}
-
-#[bisync]
-pub(crate) async fn directory_list(
-    io: &impl BlockDevice,
-    fs: &FileSystemDetails,
-    upcase_table: &UpcaseTable,
-    path: &str,
-) -> Result<DirectoryIterator, ExFatError> {
-    let cluster_id = if is_root_directory(path) {
-        fs.first_cluster_of_root_dir
-    } else {
-        match get_leaf_file_entry(io, fs, upcase_table, path, Some(FileAttributes::Directory))
-            .await?
-        {
-            Some(file_details) => {
-                if file_details.attributes.contains(FileAttributes::Directory) {
-                    file_details.first_cluster
-                } else {
-                    return Err(ExFatError::DirectoryNotFound);
-                }
-            }
-            None => return Err(ExFatError::DirectoryNotFound),
-        }
-    };
-
-    let entries = DirectoryEntryChain::new(cluster_id, fs);
-    Ok(DirectoryIterator { entries })
-}
-
-pub struct DirectoryIterator {
-    entries: DirectoryEntryChain,
-}
-
-#[derive(Debug)]
-pub struct DirectoryEntry {
-    details: FileDetails,
-}
-
-impl DirectoryEntry {
-    /// file or directly name
-    pub fn file_name(&self) -> String {
-        self.details.name.clone()
-    }
-
-    /// metadata for the file or directory
-    pub fn metadata(&self) -> Metadata {
-        Metadata {
-            details: self.details.clone(),
-        }
-    }
-}
-
-impl DirectoryIterator {
-    #[bisync]
-    pub async fn next(
-        &mut self,
-        io: &impl BlockDevice,
-    ) -> Result<Option<DirectoryEntry>, ExFatError> {
-        let filter = AllPassFilter {};
-        Ok(next_file_entry(io, &mut self.entries, &filter)
-            .await?
-            .map(|x| DirectoryEntry { details: x.clone() }))
-    }
-}
-
-#[bisync]
-pub(crate) async fn find_file_or_directory(
-    io: &impl BlockDevice,
-    fs: &FileSystemDetails,
-    upcase_table: &UpcaseTable,
-    path: &str,
-    file_attributes: Option<FileAttributes>,
-) -> Result<FileDetails, ExFatError> {
-    let file_details = find_file_inner(io, fs, upcase_table, path, file_attributes).await?;
-    Ok(file_details)
-}
-
-// TODO: figure out visibility (pub or private)
-#[bisync]
-pub(crate) async fn find_file_inner(
-    io: &impl BlockDevice,
-    fs: &FileSystemDetails,
-    upcase_table: &UpcaseTable,
-    path: &str,
-    file_attributes: Option<FileAttributes>,
-) -> Result<FileDetails, ExFatError> {
-    match get_leaf_file_entry(io, fs, upcase_table, path, file_attributes).await? {
-        Some(file_details) => Ok(file_details),
-        None => Err(ExFatError::FileNotFound),
     }
 }

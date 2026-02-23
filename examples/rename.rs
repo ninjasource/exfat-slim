@@ -9,25 +9,25 @@ async fn main() -> Result<(), ExFatError> {
     env_logger::init();
     color_backtrace::install();
 
-    let mut io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(&mut io).await?;
+    let io = InMemoryBlockDevice::new();
+    let mut io_cloned = io.clone();
+    let fs = FileSystem::new(io).await?;
 
     // rename file
-    fs.rename(&mut io, "/temp2/test6.txt", "/temp2/test6x.txt")
-        .await?;
+    fs.rename("/temp2/test6.txt", "/temp2/test6x.txt").await?;
 
     // move folder
-    fs.rename(&mut io, "/temp2/hello2", "/hello2").await?;
+    fs.rename("/temp2/hello2", "/hello2").await?;
 
     let path = "/temp2";
-    let mut list = fs.read_dir(&mut io, path).await?;
-    while let Some(item) = list.next(&mut io).await? {
+    let mut list = fs.read_dir(path).await?;
+    while let Some(item) = list.next(&mut io_cloned).await? {
         info!("{:?}", item);
     }
 
     info!(
         "directory '/hello2' exists: {}",
-        fs.exists(&mut io, "/hello2").await?
+        fs.exists("/hello2").await?
     );
     Ok(())
 }

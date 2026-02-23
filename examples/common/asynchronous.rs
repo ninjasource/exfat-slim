@@ -3,15 +3,41 @@ use exfat_slim::asynchronous::io::{BLOCK_SIZE, Block, BlockDevice, IoError};
 use flate2::read::GzDecoder;
 use std::fs;
 use std::io::Read;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
+#[derive(Clone)]
 pub struct InMemoryBlockDevice {
+    inner: Arc<Mutex<Inner>>,
+}
+
+impl InMemoryBlockDevice {
+    pub fn new() -> Self {
+        let inner = Arc::new(Mutex::new(Inner::new()));
+        Self { inner }
+    }
+}
+
+impl BlockDevice for InMemoryBlockDevice {
+    async fn read_sector(&self, sector_id: u32, block: &mut Block) -> Result<(), IoError> {
+        let mut g = self.inner.lock().await;
+        g.read_sector(sector_id, block)
+    }
+
+    async fn write_sector(&self, sector_id: u32, block: &Block) -> Result<(), IoError> {
+        let mut g = self.inner.lock().await;
+        g.write_sector(sector_id, block)
+    }
+}
+
+pub struct Inner {
     pub image: Vec<u8>,
     pub sector_offset: u32,
     pub data_block: [u8; BLOCK_SIZE],
     last_sector: Option<u32>,
 }
 
-impl InMemoryBlockDevice {
+impl Inner {
     pub fn new() -> Self {
         // this sd card image is 10MB uncompressed
         let buf = fs::read(EXAMPLE_EXFAT_IMAGE).unwrap();
@@ -26,10 +52,8 @@ impl InMemoryBlockDevice {
             last_sector: None,
         }
     }
-}
 
-impl BlockDevice for InMemoryBlockDevice {
-    async fn read_sector(&mut self, sector_id: u32, block: &mut Block) -> Result<(), IoError> {
+    fn read_sector(&mut self, sector_id: u32, block: &mut Block) -> Result<(), IoError> {
         let sector_id_with_offset = sector_id + self.sector_offset;
         match self.last_sector.as_ref() {
             Some(x) if *x == sector_id_with_offset => {
@@ -46,7 +70,7 @@ impl BlockDevice for InMemoryBlockDevice {
         Ok(())
     }
 
-    async fn write_sector(&mut self, sector_id: u32, block: &Block) -> Result<(), IoError> {
+    fn write_sector(&mut self, sector_id: u32, block: &Block) -> Result<(), IoError> {
         let sector_id_with_offset = sector_id + self.sector_offset;
         print("WRITE", sector_id_with_offset, sector_id, false);
         let pos = sector_id_with_offset as usize * BLOCK_SIZE;

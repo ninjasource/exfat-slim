@@ -8,14 +8,14 @@ async fn main() -> Result<(), ExFatError> {
     env_logger::init();
     color_backtrace::install();
 
-    let mut io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(&mut io).await?;
+    let io = InMemoryBlockDevice::new();
+    let fs = FileSystem::new(io).await?;
     let path = "/temp2/test7.txt";
 
     // this will create any folders that do not exist
-    fs.write(&mut io, path, b"hello").await?;
+    fs.write(path, b"hello").await?;
 
-    info!("file created: {}", fs.exists(&mut io, path).await?);
+    info!("file created: {}", fs.exists(path).await?);
 
     Ok(())
 }

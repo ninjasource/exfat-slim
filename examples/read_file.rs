@@ -10,12 +10,9 @@ async fn main() -> Result<(), ExFatError> {
     color_backtrace::install();
     info!("reading file");
 
-    let mut io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(&mut io).await?;
-    info!("{fs:?}");
-    let contents = fs
-        .read_to_string(&mut io, "/temp2/hello2/shoe/test.txt")
-        .await?;
+    let io = InMemoryBlockDevice::new();
+    let fs = FileSystem::new(io).await?;
+    let contents = fs.read_to_string("/temp2/hello2/shoe/test.txt").await?;
     info!("{contents}");
 
     Ok(())

@@ -11,56 +11,55 @@ async fn main() -> Result<(), ExFatError> {
 
     // read the boot sector of the file system
     info!("reading boot sector of file system");
-    let mut io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(&mut io).await?;
-    info!("fs {:?}", fs);
+    let io = InMemoryBlockDevice::new();
+    let mut io_cloned = io.clone();
+    let fs = FileSystem::new(io).await?;
 
     let directory = "/bubble/gum";
     let path = format!("{directory}/blue.txt");
 
     // confirm that the directory does not yet exist
     info!("checking if directory exists");
-    let exists = fs.exists(&mut io, directory).await?;
+    let exists = fs.exists(directory).await?;
     info!("{directory} exists: {exists}");
 
     // confirm that the file does not yet exist
     info!("checking if file exists");
-    let exists = fs.exists(&mut io, &path).await?;
+    let exists = fs.exists(&path).await?;
     info!("{path} exists: {exists}");
 
     // write bytes to a file
     info!("writing bytes to file");
-    fs.write(&mut io, &path, b"hello").await?;
+    fs.write(&path, b"hello").await?;
     info!("wrote file to disk");
 
     // confirm that the directory exists
     info!("checking if directory exists");
-    let exists = fs.exists(&mut io, directory).await?;
+    let exists = fs.exists(directory).await?;
     info!("{directory} directory exists: {exists}");
 
     // confirm that the file exists
     info!("checking if file exists");
-    let exists = fs.exists(&mut io, &path).await?;
+    let exists = fs.exists(&path).await?;
     info!("{path} file exists: {exists}");
 
     // create an empty directory
     info!("creating empty directory: my_dir");
-    fs.create_directory(&mut io, &format!("{directory}/my_dir"))
-        .await?;
+    fs.create_directory(&format!("{directory}/my_dir")).await?;
 
     // confirm that the file was created in the directory
     info!("list entries in directory {directory}");
-    let mut list = fs.read_dir(&mut io, directory).await?;
-    while let Some(item) = list.next(&mut io).await? {
+    let mut list = fs.read_dir(directory).await?;
+    while let Some(item) = list.next(&mut io_cloned).await? {
         info!("{:?}", item);
     }
 
     // confirm that the file exists
-    let exists = fs.exists(&mut io, &path).await?;
+    let exists = fs.exists(&path).await?;
     info!("{path} file exists: {exists}");
 
     // confirm that the bytes were written to the file
-    let contents = fs.read_to_string(&mut io, &path).await?;
+    let contents = fs.read_to_string(&path).await?;
     info!("contents: {contents}");
 
     Ok(())

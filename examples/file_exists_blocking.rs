@@ -9,10 +9,10 @@ fn main() -> Result<(), ExFatError> {
     env_logger::init();
     color_backtrace::install();
 
-    let mut io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(&mut io)?;
-    let exists = fs.exists(&mut io, "/temp2/hello2/shoe/test.txt")?;
-    info!("{exists}");
+    let io = InMemoryBlockDevice::new();
+    let fs = FileSystem::new(io)?;
+    let exists = fs.exists("/temp2/hello2/shoe/test.txt")?;
+    info!("exists: {exists}");
 
     Ok(())
 }

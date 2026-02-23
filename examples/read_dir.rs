@@ -10,12 +10,13 @@ async fn main() -> Result<(), ExFatError> {
     color_backtrace::install();
     info!("reading root dir:");
 
-    let mut io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(&mut io).await?;
+    let io = InMemoryBlockDevice::new();
+    let mut io_cloned = io.clone();
+    let fs = FileSystem::new(io).await?;
 
     let path = ""; // root dir
-    let mut dir = fs.read_dir(&mut io, path).await?;
-    while let Some(entry) = dir.next(&mut io).await? {
+    let mut dir = fs.read_dir(path).await?;
+    while let Some(entry) = dir.next(&mut io_cloned).await? {
         let entry_type = if entry.metadata().is_dir() {
             "DIR"
         } else {

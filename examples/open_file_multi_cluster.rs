@@ -20,8 +20,8 @@ async fn main() -> Result<(), ExFatError> {
     env_logger::init();
     color_backtrace::install();
 
-    let mut io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(&mut io).await?;
+    let io = InMemoryBlockDevice::new();
+    let fs = FileSystem::new(io).await?;
     let path = "/temp2/test7.txt";
 
     let mut file = fs
@@ -29,15 +29,15 @@ async fn main() -> Result<(), ExFatError> {
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&mut io, path)
+        .open(path)
         .await?;
 
-    file.write(&mut io, b"hello").await?;
-    file.write(&mut io, b" world").await?;
-    file.seek(&mut io, 6).await?;
-    file.write(&mut io, b"W").await?;
+    file.write(b"hello").await?;
+    file.write(b" world").await?;
+    file.seek(6).await?;
+    file.write(b"W").await?;
 
-    let contents = fs.read_to_string(&mut io, path).await?;
+    let contents = fs.read_to_string(path).await?;
     println!("Contents: `{contents}`");
 
     drop(file);
@@ -46,25 +46,25 @@ async fn main() -> Result<(), ExFatError> {
         .with_options()
         .write(true)
         .append(true)
-        .open(&mut io, path)
+        .open(path)
         .await?;
 
-    file.write(&mut io, b". How are things?").await?;
+    file.write(b". How are things?").await?;
 
-    let contents = fs.read_to_string(&mut io, path).await?;
+    let contents = fs.read_to_string(path).await?;
     println!("{contents}");
 
-    let mut expected = fs.read(&mut io, path).await?;
+    let mut expected = fs.read(path).await?;
     let mut dest = vec![0u8; 100000];
     fill_random_ascii(&mut dest);
 
-    file.write(&mut io, &dest).await?;
+    file.write(&dest).await?;
 
     expected.append(&mut dest);
 
     drop(file);
 
-    let actual = fs.read(&mut io, path).await?;
+    let actual = fs.read(path).await?;
 
     for (index, (left, right)) in expected.iter().zip(&actual).enumerate() {
         if left != right {

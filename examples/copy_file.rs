@@ -8,15 +8,14 @@ async fn main() -> Result<(), ExFatError> {
     env_logger::init();
     color_backtrace::install();
 
-    let mut io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(&mut io).await?;
+    let io = InMemoryBlockDevice::new();
+    let fs = FileSystem::new(io).await?;
 
     // copy file
-    fs.copy(&mut io, "/temp2/test6.txt", "/temp1/test6.txt")
-        .await?;
+    fs.copy("/temp2/test6.txt", "/temp1/test6.txt").await?;
 
-    let s1 = fs.read_to_string(&mut io, "/temp2/test6.txt").await?;
-    let s2 = fs.read_to_string(&mut io, "/temp1/test6.txt").await?;
+    let s1 = fs.read_to_string("/temp2/test6.txt").await?;
+    let s2 = fs.read_to_string("/temp1/test6.txt").await?;
     info!("file1: {s1} file2: {s2}");
 
     Ok(())

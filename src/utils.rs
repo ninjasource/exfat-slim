@@ -97,3 +97,15 @@ pub async fn set_volume_dirty(io: &impl BlockDevice, is_dirty: bool) -> Result<(
     io.write_sector(sector_id, &block).await?;
     Ok(())
 }
+
+pub(crate) fn decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
+    let decoded = core::char::decode_utf16(buf)
+        .map(|r| {
+            // TODO reject illegal characters like quotes (see spec)
+            r.map_err(|_| ExFatError::InvalidUtf16String {
+                reason: "invalid u16 char detected",
+            })
+        })
+        .collect::<Result<String, ExFatError>>()?;
+    Ok(decoded)
+}
