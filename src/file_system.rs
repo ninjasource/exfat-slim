@@ -41,6 +41,16 @@ pub(crate) struct FileSystemDetails {
 }
 
 impl FileSystemDetails {
+    pub const fn empty() -> Self {
+        Self {
+            cluster_heap_offset: 0,
+            fat_offset: 0,
+            sectors_per_cluster: 64,
+            cluster_length: 32768,
+            first_cluster_of_root_dir: 0,
+        }
+    }
+
     pub fn new(boot_sector: &BootSector) -> Self {
         let cluster_length =
             boot_sector.bytes_per_sector as u32 * boot_sector.sectors_per_cluster as u32;
@@ -74,6 +84,19 @@ pub struct FileSystem<D: BlockDevice> {
 }
 
 impl<D: BlockDevice> FileSystem<D> {
+    pub const fn empty(io: D) -> Self {
+        let fs = FileSystemDetails::empty();
+        let upcase_table = UpcaseTable::empty();
+        let alloc_bitmap = AllocationBitmap::empty();
+
+        Self {
+            dev: io,
+            fs,
+            upcase_table,
+            alloc_bitmap,
+        }
+    }
+
     /// Reads the boot sector using the block device and initializes the file system returning an instance of it
     #[bisync]
     pub async fn new(io: D) -> Result<Self, ExFatError> {

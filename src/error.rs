@@ -3,6 +3,7 @@ use thiserror::Error;
 use super::{boot_sector, directory_entry, io};
 
 #[non_exhaustive]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Error, Debug)]
 pub enum ExFatError {
     #[error("io")]
@@ -32,8 +33,8 @@ pub enum ExFatError {
     #[error("directory not found")]
     DirectoryNotFound,
 
-    #[error("invalid utf8 bytes ({0})")]
-    Utf8Error(#[from] core::str::Utf8Error),
+    #[error("invalid utf8 bytes")]
+    Utf8Error,
 
     #[error("disk is full")]
     DiskFull,

@@ -44,6 +44,14 @@ pub(crate) enum Allocation {
 }
 
 impl AllocationBitmap {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            first_cluster: 0,
+            num_sectors: 10,
+            _max_cluster_id: 0,
+        }
+    }
+
     pub fn new(alloc_bitmap: &AllocationBitmapDirEntry) -> Self {
         let num_sectors = alloc_bitmap.data_length.div_ceil(BLOCK_SIZE as u64) as u32;
 

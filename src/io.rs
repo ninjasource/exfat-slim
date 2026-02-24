@@ -5,12 +5,15 @@ use super::bisync;
 pub const BLOCK_SIZE: usize = 512;
 pub type Block = [u8; BLOCK_SIZE];
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Error, Debug)]
 pub enum IoError {
     #[error("seek to position ({pos })")]
     Seek { pos: u64 },
     #[error("read exact")]
     ReadExact,
+    #[error("no sd card")]
+    NoSdCard,
 }
 
 #[allow(async_fn_in_trait)]

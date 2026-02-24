@@ -315,7 +315,9 @@ impl<D: BlockDevice> File<D> {
         // I recon its safer to read the entire file into a buffer before decoding it
         let mut buf = Vec::new();
         let len = self.read_to_end(&mut buf).await?;
-        let decoded = from_utf8(&buf[..len])?.into();
+        let decoded = from_utf8(&buf[..len])
+            .map_err(|_| ExFatError::Utf8Error)?
+            .into();
         Ok(decoded)
     }
 

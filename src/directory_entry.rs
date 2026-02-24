@@ -15,6 +15,7 @@ pub const DIR_ENTRIES_PER_BLOCK: usize = BLOCK_SIZE / RAW_ENTRY_LEN;
 
 pub type RawDirEntry = [u8; RAW_ENTRY_LEN];
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("invalid uft16 string encountered ({reason})")]

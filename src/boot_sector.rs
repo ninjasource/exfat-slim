@@ -10,6 +10,7 @@ use super::{
     utils::{read_u16_le, read_u32_le, read_u64_le},
 };
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Error, Debug)]
 pub enum Error {
     /// if you attempt to read an exfat file system boot sector but you've actually read the

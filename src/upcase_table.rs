@@ -28,6 +28,10 @@ impl Default for UpcaseTable {
 }
 
 impl UpcaseTable {
+    pub(crate) const fn empty() -> Self {
+        Self { mapping: [0; 128] }
+    }
+
     #[bisync]
     pub(crate) async fn load(
         &mut self,
