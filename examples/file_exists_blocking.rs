@@ -5,7 +5,7 @@ use exfat_slim::blocking::{error::ExFatError, file_system::FileSystem};
 use log::info;
 
 // in order to use this library in a blocking way just use the `blocking` module above instead of the `asynchronous` one
-fn main() -> Result<(), ExFatError> {
+fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     env_logger::init();
     color_backtrace::install();
 

@@ -3,15 +3,13 @@ use core::str::from_utf8;
 use bitflags::bitflags;
 use thiserror::Error;
 
-use crate::asynchronous::io::Block;
-
 use super::{
-    io::BLOCK_SIZE,
+    io::{BLOCK_SIZE, Block},
     utils::{read_u16_le, read_u32_le, read_u64_le},
 };
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone, Copy)]
 pub enum Error {
     /// if you attempt to read an exfat file system boot sector but you've actually read the
     /// master boot record (MBR) or GPT boot record of an SD card then you will typically encounter

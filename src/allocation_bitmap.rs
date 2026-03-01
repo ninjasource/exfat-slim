@@ -65,10 +65,10 @@ impl AllocationBitmap {
         }
     }
 
-    fn calc_allocation_position(
+    fn calc_allocation_position<D: BlockDevice>(
         first_sector_id: u32,
         cluster_id: u32,
-    ) -> Result<(u32, usize), ExFatError> {
+    ) -> Result<(u32, usize), ExFatError<D>> {
         if cluster_id < 2 {
             return Err(ExFatError::InvalidClusterId(cluster_id));
         }
@@ -79,13 +79,13 @@ impl AllocationBitmap {
     }
 
     #[bisync]
-    pub(crate) async fn mark_allocated(
+    pub(crate) async fn mark_allocated<D: BlockDevice>(
         &self,
-        io: &impl BlockDevice,
+        io: &D,
         fs: &FileSystemDetails,
         cluster_ids: &[u32],
         allocated: bool,
-    ) -> Result<(), ExFatError> {
+    ) -> Result<(), ExFatError<D>> {
         let mut by_sector_id = BTreeMap::<u32, Vec<usize>>::new();
         let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
 
@@ -100,14 +100,14 @@ impl AllocationBitmap {
     }
 
     #[bisync]
-    pub(crate) async fn mark_allocated_contiguous(
+    pub(crate) async fn mark_allocated_contiguous<D: BlockDevice>(
         &self,
-        io: &impl BlockDevice,
+        io: &D,
         fs: &FileSystemDetails,
         first_cluster: u32,
         num_clusters: u32,
         allocated: bool,
-    ) -> Result<(), ExFatError> {
+    ) -> Result<(), ExFatError<D>> {
         let mut by_sector_id = BTreeMap::<u32, Vec<usize>>::new();
         let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
 
@@ -122,15 +122,17 @@ impl AllocationBitmap {
     }
 
     #[bisync]
-    pub(crate) async fn mark_allocated_by_sector(
+    pub(crate) async fn mark_allocated_by_sector<D: BlockDevice>(
         &self,
-        io: &impl BlockDevice,
+        io: &D,
         by_sector_id: &BTreeMap<u32, Vec<usize>>,
         allocated: bool,
-    ) -> Result<(), ExFatError> {
+    ) -> Result<(), ExFatError<D>> {
         let mut block = [0u8; BLOCK_SIZE];
         for (sector_id, indices) in by_sector_id {
-            io.read_sector(*sector_id, &mut block).await?;
+            io.read_sector(*sector_id, &mut block)
+                .await
+                .map_err(ExFatError::Io)?;
             for index in indices {
                 let byte = &mut block[index / 8];
                 let bit = index % 8;
@@ -150,7 +152,9 @@ impl AllocationBitmap {
                 }
             }
 
-            io.write_sector(*sector_id, &block).await?;
+            io.write_sector(*sector_id, &block)
+                .await
+                .map_err(ExFatError::Io)?;
         }
 
         Ok(())
@@ -159,13 +163,13 @@ impl AllocationBitmap {
     /// locates the next free set of contiguous clusters.
     /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
     #[bisync]
-    pub(crate) async fn find_free_clusters_non_contiguous(
+    pub(crate) async fn find_free_clusters_non_contiguous<D: BlockDevice>(
         &self,
-        io: &impl BlockDevice,
+        io: &D,
         fs: &FileSystemDetails,
         num_clusters: u32,
         from_cluster: Option<u32>,
-    ) -> Result<Allocation, ExFatError> {
+    ) -> Result<Allocation, ExFatError<D>> {
         let from_cluster = from_cluster.unwrap_or(self.first_cluster);
         let sector_id = fs.get_heap_sector_id(from_cluster)?;
         let sector_index = (from_cluster - 2) / BLOCK_SIZE as u32;
@@ -176,7 +180,8 @@ impl AllocationBitmap {
 
         for sector_offset in sector_index..self.num_sectors {
             io.read_sector(sector_id + sector_offset, &mut block)
-                .await?;
+                .await
+                .map_err(ExFatError::Io)?;
             let (bytes, _remainder) = block.as_chunks::<4>();
             for chunk in bytes.iter() {
                 if u32::from_le_bytes(*chunk) != u32::MAX {
@@ -204,13 +209,13 @@ impl AllocationBitmap {
     /// locates the next free set of contiguous clusters.
     /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
     #[bisync]
-    pub(crate) async fn find_free_clusters_contiguous_from(
+    pub(crate) async fn find_free_clusters_contiguous_from<D: BlockDevice>(
         &self,
-        io: &impl BlockDevice,
+        io: &D,
         fs: &FileSystemDetails,
         num_clusters: u32,
         from_cluster: u32,
-    ) -> Result<Allocation, ExFatError> {
+    ) -> Result<Allocation, ExFatError<D>> {
         let sector_id = fs.get_heap_sector_id(from_cluster)?;
         let sector_index = (from_cluster - 2) / BLOCK_SIZE as u32;
         let mut cluster_id = sector_index * BLOCK_SIZE as u32 + 2;
@@ -220,7 +225,8 @@ impl AllocationBitmap {
 
         for sector_offset in sector_index..self.num_sectors {
             io.read_sector(sector_id + sector_offset, &mut block)
-                .await?;
+                .await
+                .map_err(ExFatError::Io)?;
             let (bytes, _remainder) = block.as_chunks::<4>();
             for chunk in bytes {
                 if u32::from_le_bytes(*chunk) != u32::MAX {
@@ -266,12 +272,12 @@ impl AllocationBitmap {
     /// locates the next free set of contiguous clusters.
     /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
     #[bisync]
-    pub(crate) async fn find_free_clusters_contiguous(
+    pub(crate) async fn find_free_clusters_contiguous<D: BlockDevice>(
         &self,
-        io: &impl BlockDevice,
+        io: &D,
         fs: &FileSystemDetails,
         num_clusters: u32,
-    ) -> Result<Allocation, ExFatError> {
+    ) -> Result<Allocation, ExFatError<D>> {
         let first_cluster = self.first_cluster;
         let sector_id = fs.get_heap_sector_id(first_cluster)?;
         let sector_index = (first_cluster - 2) / BLOCK_SIZE as u32;
@@ -282,7 +288,8 @@ impl AllocationBitmap {
 
         for sector_offset in sector_index..self.num_sectors {
             io.read_sector(sector_id + sector_offset, &mut block)
-                .await?;
+                .await
+                .map_err(ExFatError::Io)?;
             let (bytes, _remainder) = block.as_chunks::<4>();
             for chunk in bytes {
                 if u32::from_le_bytes(*chunk) != u32::MAX {
@@ -325,14 +332,14 @@ impl AllocationBitmap {
     /// if successful, this function will always return num_clusters number of free clusters
     /// if num_clusters free clusters not be found the function will return DiskFull
     #[bisync]
-    pub(crate) async fn find_free_clusters(
+    pub(crate) async fn find_free_clusters<D: BlockDevice>(
         &self,
-        io: &impl BlockDevice,
+        io: &D,
         fs: &FileSystemDetails,
         num_clusters: u32,
         only_fat_chain: bool,
         current_cluster: Option<u32>,
-    ) -> Result<Allocation, ExFatError> {
+    ) -> Result<Allocation, ExFatError<D>> {
         if only_fat_chain {
             self.find_free_clusters_non_contiguous(io, fs, num_clusters, current_cluster)
                 .await

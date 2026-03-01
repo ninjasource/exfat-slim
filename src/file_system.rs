@@ -63,7 +63,10 @@ impl FileSystemDetails {
         }
     }
 
-    pub fn get_heap_sector_id(&self, cluster_id: u32) -> Result<u32, ExFatError> {
+    pub fn get_heap_sector_id<D: BlockDevice>(
+        &self,
+        cluster_id: u32,
+    ) -> Result<u32, ExFatError<D>> {
         if cluster_id < 2 {
             return Err(ExFatError::InvalidClusterId(cluster_id));
         }
@@ -99,7 +102,7 @@ impl<D: BlockDevice> FileSystem<D> {
 
     /// Reads the boot sector using the block device and initializes the file system returning an instance of it
     #[bisync]
-    pub async fn new(io: D) -> Result<Self, ExFatError> {
+    pub async fn new(io: D) -> Result<Self, ExFatError<D>> {
         // the boot sector is always at sector_id 0 and everything is relative from there
         // you need to offset the sector_id in your block device if there is a master boot record before this
         let boot_sector = read_boot_sector(&io, 0).await?;
@@ -115,7 +118,7 @@ impl<D: BlockDevice> FileSystem<D> {
 
     /// Open a file in read-only mode
     #[bisync]
-    pub async fn open(&self, path: &str) -> Result<File<D>, ExFatError> {
+    pub async fn open(&self, path: &str) -> Result<File<D>, ExFatError<D>> {
         self.with_options().read(true).open(path).await
     }
 
@@ -124,7 +127,7 @@ impl<D: BlockDevice> FileSystem<D> {
         &self,
         path: &str,
         file_attributes: Option<FileAttributes>,
-    ) -> Result<FileDetails, ExFatError> {
+    ) -> Result<FileDetails, ExFatError<D>> {
         let file_details = self.find_file_inner(path, file_attributes).await?;
         Ok(file_details)
     }
@@ -135,7 +138,7 @@ impl<D: BlockDevice> FileSystem<D> {
         &self,
         path: &str,
         file_attributes: Option<FileAttributes>,
-    ) -> Result<FileDetails, ExFatError> {
+    ) -> Result<FileDetails, ExFatError<D>> {
         match get_leaf_file_entry(
             &self.dev,
             &self.fs,
@@ -154,7 +157,7 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// Symbolic link following is not supported
     #[bisync]
-    pub async fn exists(&self, path: &str) -> Result<bool, ExFatError> {
+    pub async fn exists(&self, path: &str) -> Result<bool, ExFatError<D>> {
         match self.find_file_or_directory(path, None).await {
             Ok(_file) => Ok(true),
             Err(ExFatError::FileNotFound) => Ok(false),
@@ -167,7 +170,7 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// Supports nested paths
     #[bisync]
-    pub async fn read(&self, path: &str) -> Result<Vec<u8>, ExFatError> {
+    pub async fn read(&self, path: &str) -> Result<Vec<u8>, ExFatError<D>> {
         let mut file = self.with_options().read(true).open(path).await?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await?;
@@ -178,7 +181,7 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// Supports nested paths
     #[bisync]
-    pub async fn read_to_string(&self, path: &str) -> Result<String, ExFatError> {
+    pub async fn read_to_string(&self, path: &str) -> Result<String, ExFatError<D>> {
         let mut file = self.with_options().read(true).open(path).await?;
         file.read_to_string().await
     }
@@ -187,7 +190,7 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// Supports nested paths
     #[bisync]
-    pub async fn read_dir(&self, path: &str) -> Result<DirectoryIterator, ExFatError> {
+    pub async fn read_dir(&self, path: &str) -> Result<DirectoryIterator, ExFatError<D>> {
         directory_list(&self.dev, &self.fs, &self.upcase_table, path).await
     }
 
@@ -195,7 +198,7 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// Returns an error if the file does not exist or something else failed
     #[bisync]
-    pub async fn remove_file(&self, path: &str) -> Result<(), ExFatError> {
+    pub async fn remove_file(&self, path: &str) -> Result<(), ExFatError<D>> {
         let file_details = self
             .find_file_inner(path, Some(FileAttributes::Archive))
             .await?;
@@ -207,7 +210,7 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// The dir path can be nested
     #[bisync]
-    pub async fn create_directory(&self, path: &str) -> Result<(), ExFatError> {
+    pub async fn create_directory(&self, path: &str) -> Result<(), ExFatError<D>> {
         // find directory or recursively create it if it does not already exist
         let _cluster_id = self.get_or_create_directory(path).await?;
         Ok(())
@@ -218,7 +221,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// If directories in the to_path do not exist they will be created
     /// File attributes will also be copied but timestamps will be new
     #[bisync]
-    pub async fn copy(&self, from_path: &str, to_path: &str) -> Result<(), ExFatError> {
+    pub async fn copy(&self, from_path: &str, to_path: &str) -> Result<(), ExFatError<D>> {
         if from_path == to_path {
             return Err(ExFatError::InvalidFileName {
                 reason: "cannot copy file to the same exact location",
@@ -274,7 +277,10 @@ impl<D: BlockDevice> FileSystem<D> {
                 let mut buf = [0u8; BLOCK_SIZE];
 
                 while let Some(_len) = file.read(&mut buf).await? {
-                    self.dev.write_sector(sector_id, &buf).await?;
+                    self.dev
+                        .write_sector(sector_id, &buf)
+                        .await
+                        .map_err(ExFatError::Io)?;
                     sector_id += 1;
                 }
             }
@@ -295,7 +301,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// If the file or directory changes parent directories then this is considered to be a file move, otherwise a rename
     /// If the to_path contains directories that don't yet exist they will be created.
     #[bisync]
-    pub async fn rename(&self, from_path: &str, to_path: &str) -> Result<(), ExFatError> {
+    pub async fn rename(&self, from_path: &str, to_path: &str) -> Result<(), ExFatError<D>> {
         // in exFAT a directory cannot have a directory and file with the same name in it so no need to filter here
         let file_details = self.find_file_inner(from_path, None).await?;
 
@@ -332,7 +338,7 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// Will return an error if the directory does not exist or is not empty
     #[bisync]
-    pub async fn remove_dir(&self, path: &str) -> Result<(), ExFatError> {
+    pub async fn remove_dir(&self, path: &str) -> Result<(), ExFatError<D>> {
         let file_details = self
             .find_file_inner(path, Some(FileAttributes::Directory))
             .await?;
@@ -346,7 +352,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// This function will create any directories in the path that do not already exist.
     /// Relative paths are not supported.
     #[bisync]
-    pub async fn write(&self, path: &str, contents: impl AsRef<[u8]>) -> Result<(), ExFatError> {
+    pub async fn write(&self, path: &str, contents: impl AsRef<[u8]>) -> Result<(), ExFatError<D>> {
         // delete the file if it already exists
         match self
             .find_file_inner(path, Some(FileAttributes::Archive))
@@ -384,7 +390,7 @@ impl<D: BlockDevice> FileSystem<D> {
         &self,
         file_details: &mut FileDetails,
         length: u64,
-    ) -> Result<(), ExFatError> {
+    ) -> Result<(), ExFatError<D>> {
         // TODO: support length greater than 0 for preallocated files
         if length > 0 {
             unimplemented!("length greater than 0 not yet supported")
@@ -432,7 +438,7 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 
     #[bisync]
-    pub(crate) async fn create_file(&self, path: &str) -> Result<FileDetails, ExFatError> {
+    pub(crate) async fn create_file(&self, path: &str) -> Result<FileDetails, ExFatError<D>> {
         let (dir_path, file_or_dir_name) = split_path(path);
         let num_clusters = 1;
 
@@ -498,7 +504,11 @@ impl<D: BlockDevice> FileSystem<D> {
 
     // assume that the file does not already exist
     #[bisync]
-    async fn write_inner(&self, path: &str, contents: impl AsRef<[u8]>) -> Result<(), ExFatError> {
+    async fn write_inner(
+        &self,
+        path: &str,
+        contents: impl AsRef<[u8]>,
+    ) -> Result<(), ExFatError<D>> {
         let (dir_path, file_name) = split_path(path);
         // find directory or recursively create it if it does not already exist
         let directory_cluster_id = self.get_or_create_directory(dir_path).await?;
@@ -544,7 +554,10 @@ impl<D: BlockDevice> FileSystem<D> {
 
                 // write all block size chunks
                 for block in chunks {
-                    self.dev.write_sector(sector_id, block).await?;
+                    self.dev
+                        .write_sector(sector_id, block)
+                        .await
+                        .map_err(ExFatError::Io)?;
                     sector_id += 1;
                 }
 
@@ -552,7 +565,10 @@ impl<D: BlockDevice> FileSystem<D> {
                 if !remainder.is_empty() {
                     let mut block = [0u8; BLOCK_SIZE];
                     block[..remainder.len()].copy_from_slice(remainder);
-                    self.dev.write_sector(sector_id, &block).await?;
+                    self.dev
+                        .write_sector(sector_id, &block)
+                        .await
+                        .map_err(ExFatError::Io)?;
                 }
             }
             Allocation::FatChain {
@@ -569,7 +585,7 @@ impl<D: BlockDevice> FileSystem<D> {
     async fn get_all_clusters_from(
         &self,
         file_details: &FileDetails,
-    ) -> Result<Vec<u32>, ExFatError> {
+    ) -> Result<Vec<u32>, ExFatError<D>> {
         let mut cluster_id = file_details.first_cluster;
         let num_clusters = file_details.get_num_clusters(self.fs.cluster_length);
 
@@ -599,7 +615,10 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 
     #[bisync]
-    async fn confirm_has_no_children(&self, file_details: &FileDetails) -> Result<(), ExFatError> {
+    async fn confirm_has_no_children(
+        &self,
+        file_details: &FileDetails,
+    ) -> Result<(), ExFatError<D>> {
         if file_details.attributes.contains(FileAttributes::Directory) {
             let mut reader = DirectoryEntryChain::new(file_details.first_cluster, &self.fs);
 
@@ -622,7 +641,7 @@ impl<D: BlockDevice> FileSystem<D> {
     // the only difference between deleting a file and a directory is that we must
     // first check tha the directory is empty.
     #[bisync]
-    async fn delete_inner(&self, file_details: &FileDetails) -> Result<(), ExFatError> {
+    async fn delete_inner(&self, file_details: &FileDetails) -> Result<(), ExFatError<D>> {
         self.confirm_has_no_children(file_details).await?;
 
         // TODO: if this is no-fat-chain then don't use the FAT
@@ -637,7 +656,8 @@ impl<D: BlockDevice> FileSystem<D> {
         let mut sector = [0u8; BLOCK_SIZE];
         self.dev
             .read_sector(file_details.location.sector_id, &mut sector)
-            .await?;
+            .await
+            .map_err(ExFatError::Io)?;
         let (dir_entries, _remainder) = sector.as_chunks_mut::<RAW_ENTRY_LEN>();
 
         let file_dir_entry = FileDirEntry::from(&dir_entries[dir_entry_offset]);
@@ -655,13 +675,19 @@ impl<D: BlockDevice> FileSystem<D> {
                 count -= 1;
             }
 
-            self.dev.write_sector(sector_id, &sector).await?;
+            self.dev
+                .write_sector(sector_id, &sector)
+                .await
+                .map_err(ExFatError::Io)?;
 
             if count == 0 {
                 break;
             } else {
                 sector_id += 1;
-                self.dev.read_sector(sector_id, &mut sector).await?;
+                self.dev
+                    .read_sector(sector_id, &mut sector)
+                    .await
+                    .map_err(ExFatError::Io)?;
                 from = 0;
             }
         }
@@ -670,7 +696,7 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 
     #[bisync]
-    async fn get_or_create_directory(&self, path: &str) -> Result<u32, ExFatError> {
+    async fn get_or_create_directory(&self, path: &str) -> Result<u32, ExFatError<D>> {
         let mut names = path_to_iter(path).peekable();
         let mut cluster_id = self.fs.first_cluster_of_root_dir;
 
@@ -748,7 +774,7 @@ impl<D: BlockDevice> FileSystem<D> {
         stream_ext_flags: GeneralSecondaryFlags,
         valid_data_length: u64,
         data_length: u64,
-    ) -> Result<FileDetails, ExFatError> {
+    ) -> Result<FileDetails, ExFatError<D>> {
         let (utf16_name, name_hash) = encode_utf16_and_hash(name, &self.upcase_table);
         let dir_entry_set_len = calc_dir_entry_set_len(&utf16_name);
         let location = self
@@ -828,7 +854,7 @@ impl<D: BlockDevice> FileSystem<D> {
         &self,
         cluster_id: u32,
         dir_entry_set_len: usize,
-    ) -> Result<Location, ExFatError> {
+    ) -> Result<Location, ExFatError<D>> {
         let mut entries = DirectoryEntryChain::new(cluster_id, &self.fs);
         let mut counter = 0;
         let mut start = None;
@@ -862,15 +888,17 @@ impl<D: BlockDevice> FileSystem<D> {
 }
 
 #[bisync]
-pub(crate) async fn write_dir_entries_to_disk(
-    io: &impl BlockDevice,
+pub(crate) async fn write_dir_entries_to_disk<D: BlockDevice>(
+    io: &D,
     location: Location,
     dir_entries: Vec<RawDirEntry>,
-) -> Result<(), ExFatError> {
+) -> Result<(), ExFatError<D>> {
     let mut sector_id = location.sector_id;
     let mut offset = location.dir_entry_offset * RAW_ENTRY_LEN;
     let mut block = [0u8; BLOCK_SIZE];
-    io.read_sector(location.sector_id, &mut block).await?;
+    io.read_sector(location.sector_id, &mut block)
+        .await
+        .map_err(ExFatError::Io)?;
 
     for (index, dir_entry) in dir_entries.iter().enumerate() {
         block[offset..offset + RAW_ENTRY_LEN].copy_from_slice(dir_entry);
@@ -878,7 +906,9 @@ pub(crate) async fn write_dir_entries_to_disk(
 
         // move to the next sector if required
         if offset >= BLOCK_SIZE {
-            io.write_sector(sector_id, &block).await?;
+            io.write_sector(sector_id, &block)
+                .await
+                .map_err(ExFatError::Io)?;
 
             // if this is the last entry
             if index == dir_entries.len() - 1 {
@@ -889,12 +919,16 @@ pub(crate) async fn write_dir_entries_to_disk(
             // because we asked for a valid dir entry set
             offset = 0;
             sector_id += 1;
-            io.read_sector(sector_id, &mut block).await?;
+            io.read_sector(sector_id, &mut block)
+                .await
+                .map_err(ExFatError::Io)?;
         }
     }
 
     if offset < BLOCK_SIZE {
-        io.write_sector(sector_id, &block).await?;
+        io.write_sector(sector_id, &block)
+            .await
+            .map_err(ExFatError::Io)?;
     }
 
     Ok(())
@@ -913,9 +947,14 @@ fn split_path(path: &str) -> (&str, &str) {
 }
 
 #[bisync]
-async fn read_boot_sector(io: &impl BlockDevice, sector_id: u32) -> Result<BootSector, ExFatError> {
+async fn read_boot_sector<D: BlockDevice>(
+    io: &D,
+    sector_id: u32,
+) -> Result<BootSector, ExFatError<D>> {
     let mut block = [0u8; BLOCK_SIZE];
-    io.read_sector(sector_id, &mut block).await?;
+    io.read_sector(sector_id, &mut block)
+        .await
+        .map_err(ExFatError::Io)?;
     let boot_sector: BootSector = (&block).try_into()?;
     // TODO: run checks
     Ok(boot_sector)
@@ -925,11 +964,13 @@ async fn read_boot_sector(io: &impl BlockDevice, sector_id: u32) -> Result<BootS
 async fn read_root_dir<D: BlockDevice>(
     io: D,
     details: FileSystemDetails,
-) -> Result<FileSystem<D>, ExFatError> {
+) -> Result<FileSystem<D>, ExFatError<D>> {
     let cluster_id = details.first_cluster_of_root_dir;
     let sector_id = details.get_heap_sector_id(cluster_id)?;
     let mut block = [0u8; BLOCK_SIZE];
-    io.read_sector(sector_id, &mut block).await?;
+    io.read_sector(sector_id, &mut block)
+        .await
+        .map_err(ExFatError::Io)?;
 
     let mut allocation_bitmap_dir_entry: Option<AllocationBitmapDirEntry> = None;
     let mut volume_label: Option<VolumeLabelDirEntry> = None;

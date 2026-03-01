@@ -105,7 +105,7 @@ impl<'a, D: BlockDevice> OpenBuilder<'a, D> {
     ///
     /// Path can contain a nested directory structure but relative paths are not supported
     #[bisync]
-    pub async fn open(&self, path: &str) -> Result<File<D>, ExFatError> {
+    pub async fn open(&self, path: &str) -> Result<File<D>, ExFatError<D>> {
         let options = self.build();
 
         // attempt to get the file details
@@ -242,7 +242,7 @@ impl<D: BlockDevice> File<D> {
     ///
     /// Read begins at the cursor position and ends at the lesser of the buf or file length
     #[bisync]
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, ExFatError> {
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, ExFatError<D>> {
         if !self.open_options.read {
             return Err(ExFatError::ReadNotEnabled);
         }
@@ -268,7 +268,10 @@ impl<D: BlockDevice> File<D> {
 
         // read a single sector and copy the bytes into the user supplied buffer
         let mut block = [0u8; BLOCK_SIZE];
-        self.dev.read_sector(sector_id, &mut block).await?;
+        self.dev
+            .read_sector(sector_id, &mut block)
+            .await
+            .map_err(ExFatError::Io)?;
         buf[..num_bytes].copy_from_slice(&block[sector_offset..sector_offset + num_bytes]);
 
         // update file read cursor position
@@ -288,7 +291,7 @@ impl<D: BlockDevice> File<D> {
     /// Exfat has the concept of valid_data_length which is less than or equal to data_length.
     /// If a zero length Vec is passed it will be extended to data_length size and the bytes between valid_data_length and data_length will contain zeros.
     #[bisync]
-    pub async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize, ExFatError> {
+    pub async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize, ExFatError<D>> {
         let len = self.details.valid_data_length as usize;
         let valid_len = self.details.valid_data_length as usize;
 
@@ -310,7 +313,7 @@ impl<D: BlockDevice> File<D> {
 
     /// Read all bytes from file and interprets them as a utf8 encoded string
     #[bisync]
-    pub async fn read_to_string(&mut self) -> Result<String, ExFatError> {
+    pub async fn read_to_string(&mut self) -> Result<String, ExFatError<D>> {
         // because multi byte characters may cross sector boundaries
         // I recon its safer to read the entire file into a buffer before decoding it
         let mut buf = Vec::new();
@@ -325,7 +328,7 @@ impl<D: BlockDevice> File<D> {
     ///
     /// This function will automatically increase the length of the file if necessary
     #[bisync]
-    pub async fn write(&mut self, buf: &[u8]) -> Result<(), ExFatError> {
+    pub async fn write(&mut self, buf: &[u8]) -> Result<(), ExFatError<D>> {
         if !self.open_options.write {
             return Err(ExFatError::WriteNotEnabled);
         }
@@ -358,7 +361,10 @@ impl<D: BlockDevice> File<D> {
             // write full sectors
             for block in blocks {
                 let sector_id = self.get_current_sector_id()?;
-                self.dev.write_sector(sector_id, block).await?;
+                self.dev
+                    .write_sector(sector_id, block)
+                    .await
+                    .map_err(ExFatError::Io)?;
                 self.move_file_cursor_for_writes(block.len(), &mut cluster_ids)?;
             }
 
@@ -397,7 +403,7 @@ impl<D: BlockDevice> File<D> {
 
     /// Seek to an offset, in bytes, in the file
     #[bisync]
-    pub async fn seek(&mut self, cursor: u64) -> Result<(), ExFatError> {
+    pub async fn seek(&mut self, cursor: u64) -> Result<(), ExFatError<D>> {
         if cursor > self.details.valid_data_length {
             return Err(ExFatError::SeekOutOfRange);
         }
@@ -439,7 +445,7 @@ impl<D: BlockDevice> File<D> {
     async fn get_or_allocate_clusters(
         &self,
         num_bytes: usize,
-    ) -> Result<(Vec<u32>, bool), ExFatError> {
+    ) -> Result<(Vec<u32>, bool), ExFatError<D>> {
         if self.cursor > self.details.data_length {
             return Err(ExFatError::SeekOutOfRange);
         }
@@ -546,7 +552,7 @@ impl<D: BlockDevice> File<D> {
         self.details.valid_data_length = valid_data_length;
     }
 
-    fn get_current_sector_id(&self) -> Result<u32, ExFatError> {
+    fn get_current_sector_id(&self) -> Result<u32, ExFatError<D>> {
         let cluster_offset_bytes = self.cursor % self.fs.cluster_length as u64;
         let start_sector_id = self.fs.get_heap_sector_id(self.current_cluster)?;
         let sector_id = start_sector_id + cluster_offset_bytes as u32 / BLOCK_SIZE as u32;
@@ -555,7 +561,7 @@ impl<D: BlockDevice> File<D> {
 
     /// helps to convert a file that had no_fat_chain to one with a fat chain
     #[bisync]
-    async fn convert_file_to_fat_chain_if_required(&mut self) -> Result<(), ExFatError> {
+    async fn convert_file_to_fat_chain_if_required(&mut self) -> Result<(), ExFatError<D>> {
         if self
             .details
             .flags
@@ -582,7 +588,7 @@ impl<D: BlockDevice> File<D> {
         &mut self,
         buf: &[u8],
         cluster_ids: &mut impl Iterator<Item = u32>,
-    ) -> Result<usize, ExFatError> {
+    ) -> Result<usize, ExFatError<D>> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -596,10 +602,16 @@ impl<D: BlockDevice> File<D> {
         // for max efficiency the user should write in block size chunks
         if start_index > 0 || end_index < BLOCK_SIZE {
             let mut block = [0u8; BLOCK_SIZE];
-            self.dev.read_sector(sector_id, &mut block).await?;
+            self.dev
+                .read_sector(sector_id, &mut block)
+                .await
+                .map_err(ExFatError::Io)?;
             let len = end_index - start_index;
             block[start_index..end_index].copy_from_slice(&buf[..len]);
-            self.dev.write_sector(sector_id, &block).await?;
+            self.dev
+                .write_sector(sector_id, &block)
+                .await
+                .map_err(ExFatError::Io)?;
             self.move_file_cursor_for_writes(len, cluster_ids)?;
             return Ok(len);
         }
@@ -608,7 +620,7 @@ impl<D: BlockDevice> File<D> {
     }
 
     #[bisync]
-    async fn get_file_dir_entry_set(&self) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError> {
+    async fn get_file_dir_entry_set(&self) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError<D>> {
         let mut chain = DirectoryEntryChain::new_from_location(&self.details.location, &self.fs);
 
         let mut counter = 0;
@@ -639,7 +651,7 @@ impl<D: BlockDevice> File<D> {
     }
 
     #[bisync]
-    async fn move_file_cursor_for_reads(&mut self, num_bytes: usize) -> Result<(), ExFatError> {
+    async fn move_file_cursor_for_reads(&mut self, num_bytes: usize) -> Result<(), ExFatError<D>> {
         self.cursor += num_bytes as u64;
 
         // assume that num_bytes is only ever up to the end of the current cluster
@@ -670,7 +682,7 @@ impl<D: BlockDevice> File<D> {
         &mut self,
         num_bytes: usize,
         cluster_ids: &mut impl Iterator<Item = u32>,
-    ) -> Result<(), ExFatError> {
+    ) -> Result<(), ExFatError<D>> {
         self.cursor += num_bytes as u64;
 
         // assume that num_bytes is only ever up to the end of the current cluster

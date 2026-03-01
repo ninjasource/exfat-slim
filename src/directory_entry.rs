@@ -16,7 +16,7 @@ pub const DIR_ENTRIES_PER_BLOCK: usize = BLOCK_SIZE / RAW_ENTRY_LEN;
 pub type RawDirEntry = [u8; RAW_ENTRY_LEN];
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone, Copy)]
 pub enum Error {
     #[error("invalid uft16 string encountered ({reason})")]
     InvalidUtf16String { reason: &'static str },
@@ -435,18 +435,18 @@ impl DirectoryEntryChain {
         }
     }
 
-    fn get_current_sector_id(&self) -> Result<u32, ExFatError> {
-        let mut sector_id = self.fs.get_heap_sector_id(self.cluster_id)?;
+    fn get_current_sector_id<D: BlockDevice>(&self) -> Result<u32, ExFatError<D>> {
+        let mut sector_id = self.fs.get_heap_sector_id::<D>(self.cluster_id)?;
         sector_id += self.cluster_offset as u32;
 
         Ok(sector_id)
     }
 
     #[bisync]
-    pub async fn next<'a>(
+    pub async fn next<'a, D: BlockDevice>(
         &'a mut self,
-        io: &impl BlockDevice,
-    ) -> Result<Option<(&'a [u8; RAW_ENTRY_LEN], Location)>, ExFatError> {
+        io: &D,
+    ) -> Result<Option<(&'a [u8; RAW_ENTRY_LEN], Location)>, ExFatError<D>> {
         if self.dir_entry_offset >= DIR_ENTRIES_PER_BLOCK {
             self.cluster_offset += 1;
             self.dir_entry_offset = 0;
@@ -469,24 +469,26 @@ impl DirectoryEntryChain {
         }
 
         if self.fetch_required {
-            let sector_id = self.get_current_sector_id()?;
-            io.read_sector(sector_id, &mut self.buf).await?;
+            let sector_id = self.get_current_sector_id::<D>()?;
+            io.read_sector(sector_id, &mut self.buf)
+                .await
+                .map_err(ExFatError::Io)?;
             self.fetch_required = false;
         }
 
         let (entries, _remainder) = self.buf.as_chunks::<RAW_ENTRY_LEN>();
         let entry = &entries[self.dir_entry_offset];
-        let location = Location::new(self.get_current_sector_id()?, self.dir_entry_offset);
+        let location = Location::new(self.get_current_sector_id::<D>()?, self.dir_entry_offset);
         self.dir_entry_offset += 1;
         Ok(Some((entry, location)))
     }
 }
 
 #[bisync]
-pub(crate) async fn next_file_dir_entry(
-    io: &impl BlockDevice,
+pub(crate) async fn next_file_dir_entry<D: BlockDevice>(
+    io: &D,
     entries: &mut DirectoryEntryChain,
-) -> Result<Option<(FileDirEntry, Location)>, ExFatError> {
+) -> Result<Option<(FileDirEntry, Location)>, ExFatError<D>> {
     while let Some((entry, location)) = entries.next(io).await? {
         let entry_type_val = entry[0];
         match EntryType::from(entry_type_val) {

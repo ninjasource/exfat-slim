@@ -74,7 +74,7 @@ pub(crate) fn calc_hash_u16(utf16_file_name: &[u16]) -> u16 {
     hash
 }
 
-pub(crate) fn _decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
+pub(crate) fn _decode_utf16<D: BlockDevice>(buf: Vec<u16>) -> Result<String, ExFatError<D>> {
     let decoded = core::char::decode_utf16(buf)
         .map(|r| {
             // TODO reject illegal character like quotes (see spec)
@@ -82,23 +82,27 @@ pub(crate) fn _decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
                 reason: "invalid u16 char detected",
             })
         })
-        .collect::<Result<String, ExFatError>>()?;
+        .collect::<Result<String, ExFatError<D>>>()?;
     Ok(decoded)
 }
 
 #[bisync]
-pub async fn set_volume_dirty(io: &impl BlockDevice, is_dirty: bool) -> Result<(), ExFatError> {
+pub async fn set_volume_dirty<D: BlockDevice>(io: &D, is_dirty: bool) -> Result<(), ExFatError<D>> {
     let sector_id = 0; // boot sector
     let mut block = [0u8; BLOCK_SIZE];
-    io.read_sector(sector_id, &mut block).await?;
+    io.read_sector(sector_id, &mut block)
+        .await
+        .map_err(ExFatError::Io)?;
     let mut volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(&block));
     volume_flags.set(VolumeFlags::VolumeDirty, is_dirty);
     block[106..108].copy_from_slice(&volume_flags.bits().to_le_bytes());
-    io.write_sector(sector_id, &block).await?;
+    io.write_sector(sector_id, &block)
+        .await
+        .map_err(ExFatError::Io)?;
     Ok(())
 }
 
-pub(crate) fn decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
+pub(crate) fn decode_utf16<D: BlockDevice>(buf: Vec<u16>) -> Result<String, ExFatError<D>> {
     let decoded = core::char::decode_utf16(buf)
         .map(|r| {
             // TODO reject illegal characters like quotes (see spec)
@@ -106,6 +110,6 @@ pub(crate) fn decode_utf16(buf: Vec<u16>) -> Result<String, ExFatError> {
                 reason: "invalid u16 char detected",
             })
         })
-        .collect::<Result<String, ExFatError>>()?;
+        .collect::<Result<String, ExFatError<D>>>()?;
     Ok(decoded)
 }

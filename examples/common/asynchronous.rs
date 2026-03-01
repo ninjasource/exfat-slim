@@ -1,12 +1,12 @@
 use super::{EXAMPLE_EXFAT_IMAGE, print};
-use exfat_slim::asynchronous::io::{BLOCK_SIZE, Block, BlockDevice, IoError};
+use exfat_slim::asynchronous::io::{BLOCK_SIZE, Block, BlockDevice};
 use flate2::read::GzDecoder;
 use std::fs;
 use std::io::Read;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InMemoryBlockDevice {
     inner: Arc<Mutex<Inner>>,
 }
@@ -19,17 +19,20 @@ impl InMemoryBlockDevice {
 }
 
 impl BlockDevice for InMemoryBlockDevice {
-    async fn read_sector(&self, sector_id: u32, block: &mut Block) -> Result<(), IoError> {
+    type Error = ();
+
+    async fn read_sector(&self, sector_id: u32, block: &mut Block) -> Result<(), Self::Error> {
         let mut g = self.inner.lock().await;
         g.read_sector(sector_id, block)
     }
 
-    async fn write_sector(&self, sector_id: u32, block: &Block) -> Result<(), IoError> {
+    async fn write_sector(&self, sector_id: u32, block: &Block) -> Result<(), Self::Error> {
         let mut g = self.inner.lock().await;
         g.write_sector(sector_id, block)
     }
 }
 
+#[derive(Debug)]
 pub struct Inner {
     pub image: Vec<u8>,
     pub sector_offset: u32,
@@ -53,7 +56,7 @@ impl Inner {
         }
     }
 
-    fn read_sector(&mut self, sector_id: u32, block: &mut Block) -> Result<(), IoError> {
+    fn read_sector(&mut self, sector_id: u32, block: &mut Block) -> Result<(), ()> {
         let sector_id_with_offset = sector_id + self.sector_offset;
         match self.last_sector.as_ref() {
             Some(x) if *x == sector_id_with_offset => {
@@ -70,7 +73,7 @@ impl Inner {
         Ok(())
     }
 
-    fn write_sector(&mut self, sector_id: u32, block: &Block) -> Result<(), IoError> {
+    fn write_sector(&mut self, sector_id: u32, block: &Block) -> Result<(), ()> {
         let sector_id_with_offset = sector_id + self.sector_offset;
         print("WRITE", sector_id_with_offset, sector_id, false);
         let pos = sector_id_with_offset as usize * BLOCK_SIZE;

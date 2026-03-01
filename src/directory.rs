@@ -79,11 +79,11 @@ impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
 }
 
 #[bisync]
-pub(crate) async fn next_file_entry(
-    io: &impl BlockDevice,
+pub(crate) async fn next_file_entry<D: BlockDevice>(
+    io: &D,
     entries: &mut DirectoryEntryChain,
     filter: &impl DirectoryEntryFilter,
-) -> Result<Option<FileDetails>, ExFatError> {
+) -> Result<Option<FileDetails>, ExFatError<D>> {
     'outer: loop {
         if let Some((file_dir_entry, location)) = next_file_dir_entry(io, entries).await? {
             if let Some((stream_entry, _location)) = entries.next(io).await? {
@@ -137,13 +137,13 @@ pub(crate) async fn next_file_entry(
 }
 
 #[bisync]
-pub(crate) async fn get_leaf_file_entry(
-    io: &impl BlockDevice,
+pub(crate) async fn get_leaf_file_entry<D: BlockDevice>(
+    io: &D,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     path: &str,
     file_attributes: Option<FileAttributes>,
-) -> Result<Option<FileDetails>, ExFatError> {
+) -> Result<Option<FileDetails>, ExFatError<D>> {
     let mut splits = path
         .split(['/', '\\'])
         .filter(|part| !part.is_empty())
@@ -196,12 +196,12 @@ fn is_root_directory(path: &str) -> bool {
 }
 
 #[bisync]
-pub(crate) async fn directory_list(
-    io: &impl BlockDevice,
+pub(crate) async fn directory_list<D: BlockDevice>(
+    io: &D,
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     path: &str,
-) -> Result<DirectoryIterator, ExFatError> {
+) -> Result<DirectoryIterator, ExFatError<D>> {
     let cluster_id = if is_root_directory(path) {
         fs.first_cluster_of_root_dir
     } else {
@@ -248,10 +248,10 @@ impl DirectoryEntry {
 
 impl DirectoryIterator {
     #[bisync]
-    pub async fn next(
+    pub async fn next<D: BlockDevice>(
         &mut self,
-        io: &impl BlockDevice,
-    ) -> Result<Option<DirectoryEntry>, ExFatError> {
+        io: &D,
+    ) -> Result<Option<DirectoryEntry>, ExFatError<D>> {
         let filter = AllPassFilter {};
         Ok(next_file_entry(io, &mut self.entries, &filter)
             .await?

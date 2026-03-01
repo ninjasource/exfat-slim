@@ -12,16 +12,18 @@ const NUM_ENTRIES: usize = BLOCK_SIZE / ENTRY_SIZE;
 
 /// gets the next cluster_id in the fat chain
 #[bisync]
-pub(crate) async fn next_cluster_in_fat_chain(
-    io: &impl BlockDevice,
+pub(crate) async fn next_cluster_in_fat_chain<D: BlockDevice>(
+    io: &D,
     fat_offset: u32, // from boot_sector
     cluster_id: u32,
-) -> Result<Option<u32>, ExFatError> {
+) -> Result<Option<u32>, ExFatError<D>> {
     let sector_id = fat_offset + cluster_id / NUM_ENTRIES as u32;
     let sector_offset = (cluster_id % NUM_ENTRIES as u32) as usize;
 
     let mut block = [0u8; BLOCK_SIZE];
-    io.read_sector(sector_id, &mut block).await?;
+    io.read_sector(sector_id, &mut block)
+        .await
+        .map_err(ExFatError::Io)?;
     let (chunks, _remainder) = block.as_chunks::<ENTRY_SIZE>();
     let next_cluster_id = u32::from_le_bytes(chunks[sector_offset]);
 
@@ -34,11 +36,11 @@ pub(crate) async fn next_cluster_in_fat_chain(
 
 /// updates the fat chain
 #[bisync]
-pub(crate) async fn update_fat_chain(
-    io: &impl BlockDevice,
+pub(crate) async fn update_fat_chain<D: BlockDevice>(
+    io: &D,
     fat_offset: u32, // from boot_sector
     cluster_ids: &[u32],
-) -> Result<(), ExFatError> {
+) -> Result<(), ExFatError<D>> {
     // the next cluster that each cluster points to (cluster_id, next_cluster_id)
     // e.g. &[1,2,3,4] => [(1,2), (2,3), (3,4)]
     let cluster_id_pairs = cluster_ids.windows(2).map(|w| (w[0], w[1]));
@@ -59,7 +61,9 @@ pub(crate) async fn update_fat_chain(
     let mut block = [0u8; BLOCK_SIZE];
     for (sector_id, value) in by_sector_id {
         // read entire sector
-        io.read_sector(sector_id, &mut block).await?;
+        io.read_sector(sector_id, &mut block)
+            .await
+            .map_err(ExFatError::Io)?;
 
         let (chunks, _remainder) = block.as_chunks_mut::<ENTRY_SIZE>();
 
@@ -70,7 +74,9 @@ pub(crate) async fn update_fat_chain(
         }
 
         // write entire sector
-        io.write_sector(sector_id, &block).await?;
+        io.write_sector(sector_id, &block)
+            .await
+            .map_err(ExFatError::Io)?;
     }
 
     Ok(())

@@ -5,7 +5,7 @@ use log::info;
 
 /// a rename can also be considered to be a move if it changes directories
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), ExFatError> {
+async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     env_logger::init();
     color_backtrace::install();
 
