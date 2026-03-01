@@ -10,7 +10,6 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     color_backtrace::install();
 
     let io = InMemoryBlockDevice::new();
-    let mut io_cloned = io.clone();
     let fs = FileSystem::new(io).await?;
 
     // rename file
@@ -21,7 +20,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
 
     let path = "/temp2";
     let mut list = fs.read_dir(path).await?;
-    while let Some(item) = list.next(&mut io_cloned).await? {
+    while let Some(item) = list.next_entry().await? {
         info!("{:?}", item);
     }
 

@@ -21,29 +21,26 @@ I am not knocking the amazing coding agents out there right now, its just that i
 ## Usage
 
 You will need to implement your own block device which is the piece of code that sends and receives blocks of data (usually 512 bytes) to and from your SD card, flash memory or hard drive. 
-In the examples below I have created a simple in-memory block device for demonstration purposes. 
-Since this block device may require a shared bus (like SPI) I have chosen to make all `FileSystem` calls immutable so that it can be passed around easily and make the user pass in mutable block device for every call. 
-Therefore it is up to the user to synchronise access to the block device. 
+In the examples below I have created a simple in-memory block device for demonstration purposes. It is up to the user to synchronise access to the block device. 
 
 Reading a file into a string:
 ```rust
-let mut io = InMemoryBlockDevice::new(); // your SD card driver
-let fs = FileSystem::new(&mut io).await?;
+let io = InMemoryBlockDevice::new(); // your SD card driver
+let fs = FileSystem::new(io).await?;
 let contents: String = fs
-    .read_to_string(&mut io, "/temp2/hello2/shoe/test.txt")
+    .read_to_string("/temp2/hello2/shoe/test.txt")
     .await?;
 ```
 
 Listing all files and folders in the folder "/temp2/hello2"
 ```rust
 let io = InMemoryBlockDevice::new(); // your SD card driver
-let io_cloned = InMemoryBlockDevice::new(); // your SD card driver
 let fs = FileSystem::new(io).await?;
 
 let path = "/temp2/hello2";
-let mut list: DirectoryIterator = fs.read_dir(path).await?;
-while let Some(item) = list.next(&mut io_cloned).await? {
-    println!("{:?}", item);
+let mut dir = fs.read_dir(path).await?;
+while let Some(entry) = dir.next_entry().await? {
+    println!("{:?}", entry);
 }
 ```
 

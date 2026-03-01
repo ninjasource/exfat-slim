@@ -2,16 +2,13 @@ use alloc::{string::String, vec::Vec};
 
 use super::{
     bisync,
-    directory_entry::{
-        DirectoryEntryChain, FileAttributes, FileNameDirEntry, StreamExtensionDirEntry,
-        next_file_dir_entry,
-    },
+    directory_entry::{DirectoryEntryChain, FileAttributes},
     error::ExFatError,
     file::{FileDetails, Metadata},
     file_system::FileSystemDetails,
     io::BlockDevice,
     upcase_table::UpcaseTable,
-    utils::{decode_utf16, encode_utf16_upcase_and_hash},
+    utils::encode_utf16_upcase_and_hash,
 };
 
 pub trait DirectoryEntryFilter {
@@ -79,64 +76,6 @@ impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
 }
 
 #[bisync]
-pub(crate) async fn next_file_entry<D: BlockDevice>(
-    io: &D,
-    entries: &mut DirectoryEntryChain,
-    filter: &impl DirectoryEntryFilter,
-) -> Result<Option<FileDetails>, ExFatError<D>> {
-    'outer: loop {
-        if let Some((file_dir_entry, location)) = next_file_dir_entry(io, entries).await? {
-            if let Some((stream_entry, _location)) = entries.next(io).await? {
-                // TODO: check entry type
-                let stream_entry: StreamExtensionDirEntry = stream_entry.into();
-                if !filter.hash(stream_entry.name_hash, file_dir_entry.file_attributes) {
-                    continue 'outer;
-                }
-
-                // read the entire file_name
-                let name_length = stream_entry.name_length as usize;
-                let mut file_name: Vec<u16> = Vec::with_capacity(name_length);
-                'inner: loop {
-                    if let Some((file_name_entry, _location)) = entries.next(io).await? {
-                        // TODO: check entry type
-                        let file_name_entry: FileNameDirEntry = file_name_entry.into();
-                        let len =
-                            (name_length - file_name.len()).min(file_name_entry.file_name.len());
-                        file_name.extend_from_slice(&file_name_entry.file_name[..len]);
-                        if file_name.len() == name_length {
-                            break 'inner;
-                        }
-                    } else {
-                        return Ok(None);
-                    }
-                }
-
-                if !filter.file_name(&file_name) {
-                    continue 'outer;
-                }
-
-                let name = decode_utf16(file_name)?;
-                let file_details = FileDetails {
-                    attributes: file_dir_entry.file_attributes,
-                    data_length: stream_entry.data_length,
-                    valid_data_length: stream_entry.valid_data_length,
-                    first_cluster: stream_entry.first_cluster,
-                    name,
-                    location,
-                    flags: stream_entry.general_secondary_flags,
-                    secondary_count: file_dir_entry.secondary_count,
-                };
-                return Ok(Some(file_details));
-            } else {
-                return Ok(None);
-            }
-        } else {
-            return Ok(None);
-        }
-    }
-}
-
-#[bisync]
 pub(crate) async fn get_leaf_file_entry<D: BlockDevice>(
     io: &D,
     fs: &FileSystemDetails,
@@ -161,8 +100,8 @@ pub(crate) async fn get_leaf_file_entry<D: BlockDevice>(
         };
 
         let filter = ExactNameFilter::new(part, upcase_table, attributes);
-        let mut entries = DirectoryEntryChain::new(cluster_id, fs);
-        let file_details = next_file_entry(io, &mut entries, &filter).await?;
+        let mut entries = DirectoryEntryChain::new(cluster_id, fs, io.clone());
+        let file_details = entries.next_file_entry(&filter).await?;
 
         match file_details {
             Some(file_details) => {
@@ -201,7 +140,7 @@ pub(crate) async fn directory_list<D: BlockDevice>(
     fs: &FileSystemDetails,
     upcase_table: &UpcaseTable,
     path: &str,
-) -> Result<DirectoryIterator, ExFatError<D>> {
+) -> Result<DirectoryIterator<D>, ExFatError<D>> {
     let cluster_id = if is_root_directory(path) {
         fs.first_cluster_of_root_dir
     } else {
@@ -219,12 +158,12 @@ pub(crate) async fn directory_list<D: BlockDevice>(
         }
     };
 
-    let entries = DirectoryEntryChain::new(cluster_id, fs);
+    let entries = DirectoryEntryChain::new(cluster_id, fs, io.clone());
     Ok(DirectoryIterator { entries })
 }
 
-pub struct DirectoryIterator {
-    entries: DirectoryEntryChain,
+pub struct DirectoryIterator<D: BlockDevice> {
+    entries: DirectoryEntryChain<D>,
 }
 
 #[derive(Debug)]
@@ -246,14 +185,13 @@ impl DirectoryEntry {
     }
 }
 
-impl DirectoryIterator {
+impl<D: BlockDevice> DirectoryIterator<D> {
     #[bisync]
-    pub async fn next<D: BlockDevice>(
-        &mut self,
-        io: &D,
-    ) -> Result<Option<DirectoryEntry>, ExFatError<D>> {
+    pub async fn next_entry(&mut self) -> Result<Option<DirectoryEntry>, ExFatError<D>> {
         let filter = AllPassFilter {};
-        Ok(next_file_entry(io, &mut self.entries, &filter)
+        Ok(self
+            .entries
+            .next_file_entry(&filter)
             .await?
             .map(|x| DirectoryEntry { details: x.clone() }))
     }

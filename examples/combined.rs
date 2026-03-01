@@ -12,7 +12,6 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     // read the boot sector of the file system
     info!("reading boot sector of file system");
     let io = InMemoryBlockDevice::new();
-    let mut io_cloned = io.clone();
     let fs = FileSystem::new(io).await?;
 
     let directory = "/bubble/gum";
@@ -50,7 +49,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     // confirm that the file was created in the directory
     info!("list entries in directory {directory}");
     let mut list = fs.read_dir(directory).await?;
-    while let Some(item) = list.next(&mut io_cloned).await? {
+    while let Some(item) = list.next_entry().await? {
         info!("{:?}", item);
     }
 

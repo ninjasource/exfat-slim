@@ -4,9 +4,7 @@ use super::{
     allocation_bitmap::{Allocation, AllocationBitmap},
     bisync,
     boot_sector::BootSector,
-    directory::{
-        DirectoryIterator, ExactNameFilter, directory_list, get_leaf_file_entry, next_file_entry,
-    },
+    directory::{DirectoryIterator, ExactNameFilter, directory_list, get_leaf_file_entry},
     directory_entry::{
         AllocationBitmapDirEntry, DirectoryEntryChain, EntryType, FileAttributes, FileDirEntry,
         FileNameDirEntry, GeneralSecondaryFlags, Location, RAW_ENTRY_LEN, RawDirEntry,
@@ -190,7 +188,7 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// Supports nested paths
     #[bisync]
-    pub async fn read_dir(&self, path: &str) -> Result<DirectoryIterator, ExFatError<D>> {
+    pub async fn read_dir(&self, path: &str) -> Result<DirectoryIterator<D>, ExFatError<D>> {
         directory_list(&self.dev, &self.fs, &self.upcase_table, path).await
     }
 
@@ -396,12 +394,16 @@ impl<D: BlockDevice> FileSystem<D> {
             unimplemented!("length greater than 0 not yet supported")
         }
 
-        let mut chain = DirectoryEntryChain::new_from_location(&file_details.location, &self.fs);
+        let mut chain = DirectoryEntryChain::new_from_location(
+            &file_details.location,
+            &self.fs,
+            self.dev.clone(),
+        );
         let mut counter = 0;
         let mut dir_entries = Vec::with_capacity(file_details.secondary_count as usize + 1);
 
         // copy all directory entries for the file into a Vec
-        while let Some((dir_entry, _location)) = chain.next(&self.dev).await? {
+        while let Some((dir_entry, _location)) = chain.next().await? {
             let mut entry = [0u8; RAW_ENTRY_LEN];
             entry.copy_from_slice(dir_entry);
             dir_entries.push(entry);
@@ -620,9 +622,10 @@ impl<D: BlockDevice> FileSystem<D> {
         file_details: &FileDetails,
     ) -> Result<(), ExFatError<D>> {
         if file_details.attributes.contains(FileAttributes::Directory) {
-            let mut reader = DirectoryEntryChain::new(file_details.first_cluster, &self.fs);
+            let mut reader =
+                DirectoryEntryChain::new(file_details.first_cluster, &self.fs, self.dev.clone());
 
-            while let Some((dir_entry, _location)) = reader.next(&self.dev).await? {
+            while let Some((dir_entry, _location)) = reader.next().await? {
                 let entry_type_val = dir_entry[0];
                 match EntryType::from(entry_type_val) {
                     EntryType::UnusedOrEndOfDirectory => {
@@ -708,8 +711,8 @@ impl<D: BlockDevice> FileSystem<D> {
                 &self.upcase_table,
                 Some(FileAttributes::Directory),
             );
-            let mut entries = DirectoryEntryChain::new(cluster_id, &self.fs);
-            let file_details = next_file_entry(&self.dev, &mut entries, &filter).await?;
+            let mut entries = DirectoryEntryChain::new(cluster_id, &self.fs, self.dev.clone());
+            let file_details = entries.next_file_entry(&filter).await?;
 
             match file_details {
                 Some(file_details) => {
@@ -855,10 +858,10 @@ impl<D: BlockDevice> FileSystem<D> {
         cluster_id: u32,
         dir_entry_set_len: usize,
     ) -> Result<Location, ExFatError<D>> {
-        let mut entries = DirectoryEntryChain::new(cluster_id, &self.fs);
+        let mut entries = DirectoryEntryChain::new(cluster_id, &self.fs, self.dev.clone());
         let mut counter = 0;
         let mut start = None;
-        while let Some((entry, location)) = entries.next(&self.dev).await? {
+        while let Some((entry, location)) = entries.next().await? {
             let entry_type_val = entry[0];
             match EntryType::from(entry_type_val) {
                 EntryType::UnusedOrEndOfDirectory => {

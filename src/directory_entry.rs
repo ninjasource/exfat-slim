@@ -1,12 +1,16 @@
+use alloc::vec::Vec;
 use bitflags::bitflags;
 use thiserror::Error;
 
 use super::{
     bisync,
+    directory::DirectoryEntryFilter,
     error::ExFatError,
     fat::next_cluster_in_fat_chain,
+    file::FileDetails,
     file_system::FileSystemDetails,
     io::{BLOCK_SIZE, BlockDevice},
+    utils::decode_utf16,
     utils::{read_u16_le, read_u32_le, read_u64_le},
 };
 
@@ -395,7 +399,8 @@ fn decode_utf16_le<const N: usize>(bytes: &[u8]) -> Result<heapless::String<N>, 
     Ok(decoded)
 }
 
-pub(crate) struct DirectoryEntryChain {
+pub(crate) struct DirectoryEntryChain<D: BlockDevice> {
+    dev: D,
     cluster_id: u32,
     fs: FileSystemDetails,
     // offset, in number of sectors, from start of cluster
@@ -406,8 +411,8 @@ pub(crate) struct DirectoryEntryChain {
     fetch_required: bool,
 }
 
-impl DirectoryEntryChain {
-    pub fn new_from_location(location: &Location, fs: &FileSystemDetails) -> Self {
+impl<D: BlockDevice> DirectoryEntryChain<D> {
+    pub fn new_from_location(location: &Location, fs: &FileSystemDetails, dev: D) -> Self {
         // This is so gross, make it better
         let sector_id_from_start = location.sector_id - fs.cluster_heap_offset;
         let cluster_id = 2 + sector_id_from_start / fs.sectors_per_cluster as u32;
@@ -415,6 +420,7 @@ impl DirectoryEntryChain {
         let dir_entry_offset = location.dir_entry_offset;
 
         Self {
+            dev,
             buf: [0; BLOCK_SIZE],
             fs: fs.clone(),
             cluster_id,
@@ -424,8 +430,9 @@ impl DirectoryEntryChain {
         }
     }
 
-    pub fn new(cluster_id: u32, fs: &FileSystemDetails) -> Self {
+    pub fn new(cluster_id: u32, fs: &FileSystemDetails, dev: D) -> Self {
         Self {
+            dev,
             buf: [0; BLOCK_SIZE],
             fs: fs.clone(),
             cluster_id,
@@ -435,18 +442,96 @@ impl DirectoryEntryChain {
         }
     }
 
-    fn get_current_sector_id<D: BlockDevice>(&self) -> Result<u32, ExFatError<D>> {
+    #[bisync]
+    pub(crate) async fn next_file_dir_entry(
+        &mut self,
+    ) -> Result<Option<(FileDirEntry, Location)>, ExFatError<D>> {
+        while let Some((entry, location)) = self.next().await? {
+            let entry_type_val = entry[0];
+            match EntryType::from(entry_type_val) {
+                EntryType::UnusedOrEndOfDirectory => {
+                    if is_end_of_directory(entry) {
+                        return Ok(None);
+                    }
+                }
+                EntryType::FileAndDirectory => {
+                    let file_entry: FileDirEntry = entry.into();
+                    return Ok(Some((file_entry, location)));
+                }
+                _entry_type => {} // ignore and keep going
+            }
+        }
+
+        Ok(None)
+    }
+
+    #[bisync]
+    pub(crate) async fn next_file_entry(
+        &mut self,
+        filter: &impl DirectoryEntryFilter,
+    ) -> Result<Option<FileDetails>, ExFatError<D>> {
+        'outer: loop {
+            if let Some((file_dir_entry, location)) = self.next_file_dir_entry().await? {
+                if let Some((stream_entry, _location)) = self.next().await? {
+                    // TODO: check entry type
+                    let stream_entry: StreamExtensionDirEntry = stream_entry.into();
+                    if !filter.hash(stream_entry.name_hash, file_dir_entry.file_attributes) {
+                        continue 'outer;
+                    }
+
+                    // read the entire file_name
+                    let name_length = stream_entry.name_length as usize;
+                    let mut file_name: Vec<u16> = Vec::with_capacity(name_length);
+                    'inner: loop {
+                        if let Some((file_name_entry, _location)) = self.next().await? {
+                            // TODO: check entry type
+                            let file_name_entry: FileNameDirEntry = file_name_entry.into();
+                            let len = (name_length - file_name.len())
+                                .min(file_name_entry.file_name.len());
+                            file_name.extend_from_slice(&file_name_entry.file_name[..len]);
+                            if file_name.len() == name_length {
+                                break 'inner;
+                            }
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+
+                    if !filter.file_name(&file_name) {
+                        continue 'outer;
+                    }
+
+                    let name = decode_utf16(file_name)?;
+                    let file_details = FileDetails {
+                        attributes: file_dir_entry.file_attributes,
+                        data_length: stream_entry.data_length,
+                        valid_data_length: stream_entry.valid_data_length,
+                        first_cluster: stream_entry.first_cluster,
+                        name,
+                        location,
+                        flags: stream_entry.general_secondary_flags,
+                        secondary_count: file_dir_entry.secondary_count,
+                    };
+                    return Ok(Some(file_details));
+                } else {
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+
+    fn get_current_sector_id(&self) -> Result<u32, ExFatError<D>> {
         let mut sector_id = self.fs.get_heap_sector_id::<D>(self.cluster_id)?;
         sector_id += self.cluster_offset as u32;
-
         Ok(sector_id)
     }
 
     #[bisync]
-    pub async fn next<'a, D: BlockDevice>(
-        &'a mut self,
-        io: &D,
-    ) -> Result<Option<(&'a [u8; RAW_ENTRY_LEN], Location)>, ExFatError<D>> {
+    pub async fn next(
+        &mut self,
+    ) -> Result<Option<(&[u8; RAW_ENTRY_LEN], Location)>, ExFatError<D>> {
         if self.dir_entry_offset >= DIR_ENTRIES_PER_BLOCK {
             self.cluster_offset += 1;
             self.dir_entry_offset = 0;
@@ -456,7 +541,7 @@ impl DirectoryEntryChain {
         if self.cluster_offset > self.fs.sectors_per_cluster as usize {
             // we have reached the end of the cluster
             let cluster_id =
-                next_cluster_in_fat_chain(io, self.fs.fat_offset, self.cluster_id).await?;
+                next_cluster_in_fat_chain(&self.dev, self.fs.fat_offset, self.cluster_id).await?;
             match cluster_id {
                 Some(cluster_id) => {
                     self.cluster_id = cluster_id;
@@ -469,8 +554,9 @@ impl DirectoryEntryChain {
         }
 
         if self.fetch_required {
-            let sector_id = self.get_current_sector_id::<D>()?;
-            io.read_sector(sector_id, &mut self.buf)
+            let sector_id = self.get_current_sector_id()?;
+            self.dev
+                .read_sector(sector_id, &mut self.buf)
                 .await
                 .map_err(ExFatError::Io)?;
             self.fetch_required = false;
@@ -478,34 +564,10 @@ impl DirectoryEntryChain {
 
         let (entries, _remainder) = self.buf.as_chunks::<RAW_ENTRY_LEN>();
         let entry = &entries[self.dir_entry_offset];
-        let location = Location::new(self.get_current_sector_id::<D>()?, self.dir_entry_offset);
+        let location = Location::new(self.get_current_sector_id()?, self.dir_entry_offset);
         self.dir_entry_offset += 1;
         Ok(Some((entry, location)))
     }
-}
-
-#[bisync]
-pub(crate) async fn next_file_dir_entry<D: BlockDevice>(
-    io: &D,
-    entries: &mut DirectoryEntryChain,
-) -> Result<Option<(FileDirEntry, Location)>, ExFatError<D>> {
-    while let Some((entry, location)) = entries.next(io).await? {
-        let entry_type_val = entry[0];
-        match EntryType::from(entry_type_val) {
-            EntryType::UnusedOrEndOfDirectory => {
-                if is_end_of_directory(entry) {
-                    return Ok(None);
-                }
-            }
-            EntryType::FileAndDirectory => {
-                let file_entry: FileDirEntry = entry.into();
-                return Ok(Some((file_entry, location)));
-            }
-            _entry_type => {} // ignore and keep going
-        }
-    }
-
-    Ok(None)
 }
 
 pub(crate) fn is_end_of_directory(directory_entry: &[u8; 32]) -> bool {

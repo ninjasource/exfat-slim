@@ -621,14 +621,18 @@ impl<D: BlockDevice> File<D> {
 
     #[bisync]
     async fn get_file_dir_entry_set(&self) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError<D>> {
-        let mut chain = DirectoryEntryChain::new_from_location(&self.details.location, &self.fs);
+        let mut chain = DirectoryEntryChain::new_from_location(
+            &self.details.location,
+            &self.fs,
+            self.dev.clone(),
+        );
 
         let mut counter = 0;
 
         let mut dir_entries = Vec::with_capacity(self.details.secondary_count as usize + 1);
 
         // copy all directory entries for the file into a Vec
-        while let Some((dir_entry, _location)) = chain.next(&self.dev).await? {
+        while let Some((dir_entry, _location)) = chain.next().await? {
             let mut entry = [0u8; RAW_ENTRY_LEN];
             entry.copy_from_slice(dir_entry);
             dir_entries.push(entry);
