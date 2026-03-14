@@ -60,4 +60,7 @@ pub enum ExFatError<D: BlockDevice> {
 
     #[error("attempt to change the allocation bitmap to a value with no effect")]
     InvalidAllocation,
+
+    #[error("the combination of flags set when opening the file is not valid")]
+    InvalidOptions,
 }

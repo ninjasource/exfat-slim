@@ -21,14 +21,19 @@ impl InMemoryBlockDevice {
 impl BlockDevice for InMemoryBlockDevice {
     type Error = ();
 
-    async fn read_sector(&self, sector_id: u32, block: &mut Block) -> Result<(), Self::Error> {
+    async fn read(&mut self, sector_id: u32, block: &mut Block) -> Result<(), Self::Error> {
         let mut g = self.inner.lock().await;
         g.read_sector(sector_id, block)
     }
 
-    async fn write_sector(&self, sector_id: u32, block: &Block) -> Result<(), Self::Error> {
+    async fn write(&mut self, sector_id: u32, block: &Block) -> Result<(), Self::Error> {
         let mut g = self.inner.lock().await;
         g.write_sector(sector_id, block)
+    }
+
+    async fn flush(&mut self, _lba: u32, _block: &Block) -> Result<(), Self::Error> {
+        // nop because we don't use a back buffer
+        Ok(())
     }
 }
 

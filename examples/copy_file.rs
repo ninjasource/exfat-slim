@@ -9,7 +9,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     color_backtrace::install();
 
     let io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io).await?;
 
     // copy file
     fs.copy("/temp2/test6.txt", "/temp1/test6.txt").await?;

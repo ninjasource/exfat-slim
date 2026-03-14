@@ -13,7 +13,7 @@ const NUM_ENTRIES: usize = BLOCK_SIZE / ENTRY_SIZE;
 /// gets the next cluster_id in the fat chain
 #[bisync]
 pub(crate) async fn next_cluster_in_fat_chain<D: BlockDevice>(
-    io: &D,
+    io: &mut D,
     fat_offset: u32, // from boot_sector
     cluster_id: u32,
 ) -> Result<Option<u32>, ExFatError<D>> {
@@ -21,7 +21,7 @@ pub(crate) async fn next_cluster_in_fat_chain<D: BlockDevice>(
     let sector_offset = (cluster_id % NUM_ENTRIES as u32) as usize;
 
     let mut block = [0u8; BLOCK_SIZE];
-    io.read_sector(sector_id, &mut block)
+    io.read(sector_id, &mut block)
         .await
         .map_err(ExFatError::Io)?;
     let (chunks, _remainder) = block.as_chunks::<ENTRY_SIZE>();
@@ -37,7 +37,7 @@ pub(crate) async fn next_cluster_in_fat_chain<D: BlockDevice>(
 /// updates the fat chain
 #[bisync]
 pub(crate) async fn update_fat_chain<D: BlockDevice>(
-    io: &D,
+    io: &mut D,
     fat_offset: u32, // from boot_sector
     cluster_ids: &[u32],
 ) -> Result<(), ExFatError<D>> {
@@ -61,7 +61,7 @@ pub(crate) async fn update_fat_chain<D: BlockDevice>(
     let mut block = [0u8; BLOCK_SIZE];
     for (sector_id, value) in by_sector_id {
         // read entire sector
-        io.read_sector(sector_id, &mut block)
+        io.read(sector_id, &mut block)
             .await
             .map_err(ExFatError::Io)?;
 
@@ -74,9 +74,7 @@ pub(crate) async fn update_fat_chain<D: BlockDevice>(
         }
 
         // write entire sector
-        io.write_sector(sector_id, &block)
-            .await
-            .map_err(ExFatError::Io)?;
+        io.write(sector_id, &block).await.map_err(ExFatError::Io)?;
     }
 
     Ok(())

@@ -2,7 +2,7 @@ use alloc::{string::String, vec, vec::Vec};
 use core::str::from_utf8;
 
 use super::{
-    allocation_bitmap::{Allocation, AllocationBitmap},
+    allocation_bitmap::Allocation,
     bisync,
     directory_entry::{
         DirectoryEntryChain, FileAttributes, GeneralSecondaryFlags, Location, RAW_ENTRY_LEN,
@@ -10,13 +10,13 @@ use super::{
     },
     error::ExFatError,
     fat::{self, next_cluster_in_fat_chain},
-    file_system::{FileSystem, FileSystemDetails, write_dir_entries_to_disk},
+    file_system::{FileSystem, write_dir_entries_to_disk},
     io::{BLOCK_SIZE, BlockDevice},
+    utils::split_path,
 };
 
 #[derive(Clone, Debug)]
-pub struct OpenBuilder<'a, D: BlockDevice> {
-    file_system: &'a FileSystem<D>,
+pub struct OpenBuilder {
     read: bool,
     write: bool,
     append: bool,
@@ -35,10 +35,15 @@ pub struct OpenOptions {
     pub create_new: bool,
 }
 
-impl<'a, D: BlockDevice> OpenBuilder<'a, D> {
-    pub fn new(file_system: &'a FileSystem<D>) -> Self {
+impl Default for OpenBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OpenBuilder {
+    pub fn new() -> Self {
         Self {
-            file_system,
             read: false,
             write: false,
             append: false,
@@ -101,54 +106,15 @@ impl<'a, D: BlockDevice> OpenBuilder<'a, D> {
         self
     }
 
-    /// Opens a file with the options specified in the builder beforehand and the path to the file
-    ///
-    /// Path can contain a nested directory structure but relative paths are not supported
-    #[bisync]
-    pub async fn open(&self, path: &str) -> Result<File<D>, ExFatError<D>> {
-        let options = self.build();
-
-        // attempt to get the file details
-        let file_details = self
-            .file_system
-            .find_file_or_directory(path, Some(FileAttributes::Archive))
-            .await;
-
-        // get file details or create if required
-        let file_details = match file_details {
-            Ok(mut file_details) => {
-                if options.create_new {
-                    return Err(ExFatError::AlreadyExists);
-                }
-
-                if options.truncate {
-                    self.file_system.truncate_file(&mut file_details, 0).await?;
-                }
-
-                file_details
-            }
-            Err(ExFatError::FileNotFound) => {
-                if options.create || options.create_new {
-                    self.file_system.create_file(path).await?
-                } else {
-                    return Err(ExFatError::FileNotFound);
-                }
-            }
-            Err(e) => return Err(e),
-        };
-
-        Ok(File::new(self.file_system, &file_details, &options))
-    }
-
-    fn build(&self) -> OpenOptions {
-        OpenOptions {
+    pub fn build<D: BlockDevice>(&self) -> Result<OpenOptions, ExFatError<D>> {
+        Ok(OpenOptions {
             read: self.read,
             append: self.append,
             create: self.create,
             create_new: self.create_new,
             truncate: self.truncate,
             write: self.write,
-        }
+        })
     }
 }
 
@@ -199,19 +165,17 @@ impl Metadata {
     }
 }
 
-pub struct File<D: BlockDevice> {
-    dev: D,
-    fs: FileSystemDetails,
+pub struct File<'a, D: BlockDevice> {
+    fs: &'a mut FileSystem<D>,
     pub(crate) details: FileDetails,
     current_cluster: u32,
     cursor: u64,
-    alloc_bitmap: AllocationBitmap,
     open_options: OpenOptions,
 }
 
-impl<D: BlockDevice> File<D> {
+impl<'a, D: BlockDevice> File<'a, D> {
     pub(crate) fn new(
-        file_system: &FileSystem<D>,
+        fs: &'a mut FileSystem<D>,
         file_details: &FileDetails,
         open_options: &OpenOptions,
     ) -> Self {
@@ -221,12 +185,10 @@ impl<D: BlockDevice> File<D> {
             0
         };
         Self {
-            dev: file_system.dev.clone(),
-            fs: file_system.fs.clone(),
+            fs,
             details: file_details.clone(),
             current_cluster: file_details.first_cluster,
             cursor,
-            alloc_bitmap: file_system.alloc_bitmap.clone(),
             open_options: open_options.clone(),
         }
     }
@@ -256,7 +218,7 @@ impl<D: BlockDevice> File<D> {
 
         let cluster_id = self.current_cluster;
         let cluster_offset = self.get_cluster_offset();
-        let start_sector_id = self.fs.get_heap_sector_id(cluster_id)?;
+        let start_sector_id = self.fs.fs.get_heap_sector_id(cluster_id)?;
         let sector_id = start_sector_id + cluster_offset / BLOCK_SIZE as u32;
         let sector_offset = cluster_offset as usize % BLOCK_SIZE;
         let remainder_in_sector = BLOCK_SIZE - sector_offset;
@@ -268,8 +230,9 @@ impl<D: BlockDevice> File<D> {
 
         // read a single sector and copy the bytes into the user supplied buffer
         let mut block = [0u8; BLOCK_SIZE];
-        self.dev
-            .read_sector(sector_id, &mut block)
+        self.fs
+            .dev
+            .read(sector_id, &mut block)
             .await
             .map_err(ExFatError::Io)?;
         buf[..num_bytes].copy_from_slice(&block[sector_offset..sector_offset + num_bytes]);
@@ -361,8 +324,9 @@ impl<D: BlockDevice> File<D> {
             // write full sectors
             for block in blocks {
                 let sector_id = self.get_current_sector_id()?;
-                self.dev
-                    .write_sector(sector_id, block)
+                self.fs
+                    .dev
+                    .write(sector_id, block)
                     .await
                     .map_err(ExFatError::Io)?;
                 self.move_file_cursor_for_writes(block.len(), &mut cluster_ids)?;
@@ -395,7 +359,7 @@ impl<D: BlockDevice> File<D> {
             update_checksum(&mut dir_entries);
 
             // write to disk - only the directory entries are written.
-            write_dir_entries_to_disk(&self.dev, self.details.location, dir_entries).await?;
+            write_dir_entries_to_disk(&mut self.fs.dev, self.details.location, dir_entries).await?;
         }
 
         Ok(())
@@ -409,7 +373,7 @@ impl<D: BlockDevice> File<D> {
         }
 
         self.cursor = cursor;
-        let num_clusters = (cursor / self.fs.cluster_length as u64) as u32;
+        let num_clusters = (cursor / self.fs.fs.cluster_length as u64) as u32;
 
         if self
             .details
@@ -422,12 +386,88 @@ impl<D: BlockDevice> File<D> {
             self.current_cluster = self.details.first_cluster;
 
             for _ in 0..num_clusters {
-                match next_cluster_in_fat_chain(&self.dev, self.fs.fat_offset, self.current_cluster)
-                    .await?
+                match next_cluster_in_fat_chain(
+                    &mut self.fs.dev,
+                    self.fs.fs.fat_offset,
+                    self.current_cluster,
+                )
+                .await?
                 {
                     Some(cluster_id) => self.current_cluster = cluster_id,
                     None => return Err(ExFatError::EndOfFatChain),
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Copies a file from one file to another
+    ///
+    /// If directories in the to_path do not exist they will be created
+    /// File attributes will also be copied but timestamps will be new
+    #[bisync]
+    pub(crate) async fn copy_to(&mut self, to_path: &str) -> Result<(), ExFatError<D>> {
+        let (dir_path, file_or_dir_name) = split_path(to_path);
+        let num_clusters = self.num_clusters();
+
+        // find free space on the drive, preferring contiguous clusters
+        let allocation = self
+            .fs
+            .alloc_bitmap
+            .find_free_clusters(&mut self.fs.dev, &self.fs.fs, num_clusters, false, None)
+            .await?;
+
+        // find directory or recursively create it if it does not already exist
+        let directory_cluster_id = self.fs.get_or_create_directory(dir_path).await?;
+
+        match allocation {
+            Allocation::Contiguous {
+                first_cluster,
+                num_clusters,
+            } => {
+                let flags =
+                    GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain;
+
+                self.fs
+                    .create_file_dir_entry_at(
+                        file_or_dir_name,
+                        directory_cluster_id,
+                        first_cluster,
+                        self.details.attributes,
+                        flags,
+                        self.details.valid_data_length,
+                        self.details.data_length,
+                    )
+                    .await?;
+
+                self.fs
+                    .alloc_bitmap
+                    .mark_allocated_contiguous(
+                        &mut self.fs.dev,
+                        &self.fs.fs,
+                        first_cluster,
+                        num_clusters,
+                        true,
+                    )
+                    .await?;
+
+                let mut sector_id = self.fs.fs.get_heap_sector_id(first_cluster)?;
+                let mut buf = [0u8; BLOCK_SIZE];
+
+                while let Some(_len) = self.read(&mut buf).await? {
+                    self.fs
+                        .dev
+                        .write(sector_id, &buf)
+                        .await
+                        .map_err(ExFatError::Io)?;
+                    sector_id += 1;
+                }
+            }
+            Allocation::FatChain {
+                clusters: _clusters,
+            } => {
+                unimplemented!()
             }
         }
 
@@ -443,7 +483,7 @@ impl<D: BlockDevice> File<D> {
     ///   it will switch to using a fat chain and update the fat acordingly
     #[bisync]
     async fn get_or_allocate_clusters(
-        &self,
+        &mut self,
         num_bytes: usize,
     ) -> Result<(Vec<u32>, bool), ExFatError<D>> {
         if self.cursor > self.details.data_length {
@@ -452,7 +492,7 @@ impl<D: BlockDevice> File<D> {
 
         // we can fit num_bytes into the current cluster then return that cluster, no need to allocate more clusters
         let remaining_bytes_in_cluster =
-            self.fs.cluster_length - (self.cursor % self.fs.cluster_length as u64) as u32;
+            self.fs.fs.cluster_length - (self.cursor % self.fs.fs.cluster_length as u64) as u32;
 
         // fast path, exit early
         if num_bytes <= remaining_bytes_in_cluster as usize {
@@ -476,14 +516,15 @@ impl<D: BlockDevice> File<D> {
             .contains(GeneralSecondaryFlags::NoFatChain);
 
         // add already allocated clusters (don't include the current cluster hence not using div_ceil)
-        let num_allocated_clusters = allocated_bytes / (self.fs.cluster_length as usize);
+        let num_allocated_clusters = allocated_bytes / (self.fs.fs.cluster_length as usize);
 
         let mut cluster_id = self.current_cluster;
         if has_fat_chain {
             // follow the fat chain and build up
             for _ in 0..num_allocated_clusters {
                 if let Some(next_id) =
-                    next_cluster_in_fat_chain(&self.dev, self.fs.fat_offset, cluster_id).await?
+                    next_cluster_in_fat_chain(&mut self.fs.dev, self.fs.fs.fat_offset, cluster_id)
+                        .await?
                 {
                     cluster_id = next_id;
                     allocated_cluster_ids.push(cluster_id);
@@ -504,14 +545,15 @@ impl<D: BlockDevice> File<D> {
         }
 
         let num_unallocated_clusters =
-            unallocated_bytes.div_ceil(self.fs.cluster_length as usize) as u32;
+            unallocated_bytes.div_ceil(self.fs.fs.cluster_length as usize) as u32;
 
         // returns all newly allocated clusters
         let allocation = self
+            .fs
             .alloc_bitmap
             .find_free_clusters(
-                &self.dev,
-                &self.fs,
+                &mut self.fs.dev,
+                &self.fs.fs,
                 num_unallocated_clusters,
                 has_fat_chain,
                 Some(self.current_cluster),
@@ -532,13 +574,14 @@ impl<D: BlockDevice> File<D> {
                 // set fat chain for newly allocated clusters
                 let mut combined = vec![self.current_cluster];
                 combined.extend_from_slice(&clusters);
-                fat::update_fat_chain(&self.dev, self.fs.fat_offset, &combined).await?;
+                fat::update_fat_chain(&mut self.fs.dev, self.fs.fs.fat_offset, &combined).await?;
                 clusters
             }
         };
 
-        self.alloc_bitmap
-            .mark_allocated(&self.dev, &self.fs, &cluster_ids, true)
+        self.fs
+            .alloc_bitmap
+            .mark_allocated(&mut self.fs.dev, &self.fs.fs, &cluster_ids, true)
             .await?;
 
         allocated_cluster_ids.extend_from_slice(&cluster_ids);
@@ -553,10 +596,16 @@ impl<D: BlockDevice> File<D> {
     }
 
     fn get_current_sector_id(&self) -> Result<u32, ExFatError<D>> {
-        let cluster_offset_bytes = self.cursor % self.fs.cluster_length as u64;
-        let start_sector_id = self.fs.get_heap_sector_id(self.current_cluster)?;
+        let cluster_offset_bytes = self.cursor % self.fs.fs.cluster_length as u64;
+        let start_sector_id = self.fs.fs.get_heap_sector_id(self.current_cluster)?;
         let sector_id = start_sector_id + cluster_offset_bytes as u32 / BLOCK_SIZE as u32;
         Ok(sector_id)
+    }
+
+    fn num_clusters(&self) -> u32 {
+        self.details
+            .data_length
+            .div_ceil(self.fs.fs.cluster_length as u64) as u32
     }
 
     /// helps to convert a file that had no_fat_chain to one with a fat chain
@@ -577,7 +626,7 @@ impl<D: BlockDevice> File<D> {
                 (self.details.first_cluster..self.current_cluster).collect();
 
             // update fat chain
-            fat::update_fat_chain(&self.dev, self.fs.fat_offset, &cluster_ids).await?;
+            fat::update_fat_chain(&mut self.fs.dev, self.fs.fs.fat_offset, &cluster_ids).await?;
         }
 
         Ok(())
@@ -602,14 +651,16 @@ impl<D: BlockDevice> File<D> {
         // for max efficiency the user should write in block size chunks
         if start_index > 0 || end_index < BLOCK_SIZE {
             let mut block = [0u8; BLOCK_SIZE];
-            self.dev
-                .read_sector(sector_id, &mut block)
+            self.fs
+                .dev
+                .read(sector_id, &mut block)
                 .await
                 .map_err(ExFatError::Io)?;
             let len = end_index - start_index;
             block[start_index..end_index].copy_from_slice(&buf[..len]);
-            self.dev
-                .write_sector(sector_id, &block)
+            self.fs
+                .dev
+                .write(sector_id, &block)
                 .await
                 .map_err(ExFatError::Io)?;
             self.move_file_cursor_for_writes(len, cluster_ids)?;
@@ -620,19 +671,15 @@ impl<D: BlockDevice> File<D> {
     }
 
     #[bisync]
-    async fn get_file_dir_entry_set(&self) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError<D>> {
-        let mut chain = DirectoryEntryChain::new_from_location(
-            &self.details.location,
-            &self.fs,
-            self.dev.clone(),
-        );
+    async fn get_file_dir_entry_set(&mut self) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError<D>> {
+        let mut chain = DirectoryEntryChain::new_from_location(&self.details.location, &self.fs.fs);
 
         let mut counter = 0;
 
         let mut dir_entries = Vec::with_capacity(self.details.secondary_count as usize + 1);
 
         // copy all directory entries for the file into a Vec
-        while let Some((dir_entry, _location)) = chain.next().await? {
+        while let Some((dir_entry, _location)) = chain.next(self.fs).await? {
             let mut entry = [0u8; RAW_ENTRY_LEN];
             entry.copy_from_slice(dir_entry);
             dir_entries.push(entry);
@@ -646,7 +693,7 @@ impl<D: BlockDevice> File<D> {
     }
 
     fn get_cluster_offset(&self) -> u32 {
-        (self.cursor % self.fs.cluster_length as u64) as u32
+        (self.cursor % self.fs.fs.cluster_length as u64) as u32
     }
 
     // end of file
@@ -660,7 +707,9 @@ impl<D: BlockDevice> File<D> {
 
         // assume that num_bytes is only ever up to the end of the current cluster
         // here we detect if we got to the end of the cluster and hence if we need to jump to the next cluster or not
-        if num_bytes > 0 && self.cursor.is_multiple_of(self.fs.cluster_length as u64) && !self.eof()
+        if num_bytes > 0
+            && self.cursor.is_multiple_of(self.fs.fs.cluster_length as u64)
+            && !self.eof()
         {
             if self
                 .details
@@ -669,9 +718,12 @@ impl<D: BlockDevice> File<D> {
             {
                 // no fat chain so all clusters are consecutive for this file
                 self.current_cluster += 1;
-            } else if let Some(next_cluster_id) =
-                next_cluster_in_fat_chain(&self.dev, self.fs.fat_offset, self.current_cluster)
-                    .await?
+            } else if let Some(next_cluster_id) = next_cluster_in_fat_chain(
+                &mut self.fs.dev,
+                self.fs.fs.fat_offset,
+                self.current_cluster,
+            )
+            .await?
             {
                 self.current_cluster = next_cluster_id;
             } else {
@@ -691,7 +743,9 @@ impl<D: BlockDevice> File<D> {
 
         // assume that num_bytes is only ever up to the end of the current cluster
         // here we detect if we got to the end of the cluster and hence if we need to jump to the next cluster or not
-        if num_bytes > 0 && self.cursor.is_multiple_of(self.fs.cluster_length as u64) && !self.eof()
+        if num_bytes > 0
+            && self.cursor.is_multiple_of(self.fs.fs.cluster_length as u64)
+            && !self.eof()
         {
             if let Some(cluster_id) = cluster_ids.next() {
                 self.current_cluster = cluster_id;

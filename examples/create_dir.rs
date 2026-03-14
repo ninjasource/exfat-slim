@@ -10,7 +10,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     color_backtrace::install();
 
     let io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io).await?;
 
     let path = "/temp2/foo/shoe";
     fs.create_directory(path).await?;

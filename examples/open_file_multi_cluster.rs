@@ -11,6 +11,7 @@ mod common;
 use std::str::from_utf8;
 
 use crate::common::asynchronous::InMemoryBlockDevice;
+use exfat_slim::asynchronous::file::OpenBuilder;
 use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -21,17 +22,15 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     color_backtrace::install();
 
     let io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io).await?;
     let path = "/temp2/test7.txt";
 
-    let mut file = fs
-        .with_options()
+    let options = OpenBuilder::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(path)
-        .await?;
-
+        .build()?;
+    let mut file = fs.open(path, options).await?;
     file.write(b"hello").await?;
     file.write(b" world").await?;
     file.seek(6).await?;
@@ -40,15 +39,8 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let contents = fs.read_to_string(path).await?;
     println!("Contents: `{contents}`");
 
-    drop(file);
-
-    let mut file = fs
-        .with_options()
-        .write(true)
-        .append(true)
-        .open(path)
-        .await?;
-
+    let options = OpenBuilder::new().write(true).append(true).build()?;
+    let mut file = fs.open(path, options).await?;
     file.write(b". How are things?").await?;
 
     let contents = fs.read_to_string(path).await?;
@@ -58,11 +50,11 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let mut dest = vec![0u8; 100000];
     fill_random_ascii(&mut dest);
 
+    let options = OpenBuilder::new().write(true).append(true).build()?;
+    let mut file = fs.open(path, options).await?;
     file.write(&dest).await?;
 
     expected.append(&mut dest);
-
-    drop(file);
 
     let actual = fs.read(path).await?;
 

@@ -76,7 +76,7 @@ pub(crate) struct BootSector {
 }
 
 impl BootSector {
-    pub fn check_is_valid(value: &Block) -> Result<(), Error> {
+    pub(crate) fn check_is_valid(value: &Block) -> Result<(), Error> {
         // jump boot
         // check that this is not MBR or GPT which is usually the first sector of an SD card
         if value[0] != 0xeb && value[1] != 0x76 && value[2] != 0x90 {

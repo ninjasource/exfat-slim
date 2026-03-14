@@ -20,14 +20,19 @@ impl InMemoryBlockDevice {
 impl BlockDevice for InMemoryBlockDevice {
     type Error = ();
 
-    fn read_sector(&self, sector_id: u32, block: &mut Block) -> Result<(), Self::Error> {
+    fn read(&mut self, sector_id: u32, block: &mut Block) -> Result<(), Self::Error> {
         let mut g = self.inner.lock().unwrap();
         g.read_sector(sector_id, block)
     }
 
-    fn write_sector(&self, sector_id: u32, block: &Block) -> Result<(), Self::Error> {
+    fn write(&mut self, sector_id: u32, block: &Block) -> Result<(), Self::Error> {
         let mut g = self.inner.lock().unwrap();
         g.write_sector(sector_id, block)
+    }
+
+    fn flush(&mut self, _lba: u32, _block: &Block) -> Result<(), Self::Error> {
+        // nop
+        Ok(())
     }
 }
 

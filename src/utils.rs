@@ -86,19 +86,26 @@ pub(crate) fn _decode_utf16<D: BlockDevice>(buf: Vec<u16>) -> Result<String, ExF
     Ok(decoded)
 }
 
+pub(crate) fn split_path(path: &str) -> (&str, &str) {
+    path.rfind(['/', '\\']).map_or(("", path.trim()), |index| {
+        (path[..index].trim(), path[index + 1..].trim())
+    })
+}
+
 #[bisync]
-pub async fn set_volume_dirty<D: BlockDevice>(io: &D, is_dirty: bool) -> Result<(), ExFatError<D>> {
+pub async fn set_volume_dirty<D: BlockDevice>(
+    io: &mut D,
+    is_dirty: bool,
+) -> Result<(), ExFatError<D>> {
     let sector_id = 0; // boot sector
     let mut block = [0u8; BLOCK_SIZE];
-    io.read_sector(sector_id, &mut block)
+    io.read(sector_id, &mut block)
         .await
         .map_err(ExFatError::Io)?;
     let mut volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(&block));
     volume_flags.set(VolumeFlags::VolumeDirty, is_dirty);
     block[106..108].copy_from_slice(&volume_flags.bits().to_le_bytes());
-    io.write_sector(sector_id, &block)
-        .await
-        .map_err(ExFatError::Io)?;
+    io.write(sector_id, &block).await.map_err(ExFatError::Io)?;
     Ok(())
 }
 

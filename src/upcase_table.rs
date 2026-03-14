@@ -38,11 +38,11 @@ impl UpcaseTable {
         &mut self,
         dir_entry: &UpcaseTableDirEntry,
         fs: &FileSystemDetails,
-        io: &D,
+        io: &mut D,
     ) -> Result<(), ExFatError<D>> {
         let sector_id = fs.get_heap_sector_id(dir_entry.first_cluster)?;
         let mut block = [0u8; BLOCK_SIZE];
-        io.read_sector(sector_id, &mut block)
+        io.read(sector_id, &mut block)
             .await
             .map_err(ExFatError::Io)?;
         let (chars, _remainder) = block.as_chunks::<2>();

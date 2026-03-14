@@ -8,7 +8,7 @@ use super::{
     error::ExFatError,
     fat::next_cluster_in_fat_chain,
     file::FileDetails,
-    file_system::FileSystemDetails,
+    file_system::{FileSystem, FileSystemDetails},
     io::{BLOCK_SIZE, BlockDevice},
     utils::decode_utf16,
     utils::{read_u16_le, read_u32_le, read_u64_le},
@@ -101,7 +101,7 @@ pub(crate) struct FileDirEntry {
 }
 
 impl FileDirEntry {
-    pub fn serialize(&self) -> RawDirEntry {
+    pub(crate) fn serialize(&self) -> RawDirEntry {
         let mut raw = [0u8; RAW_ENTRY_LEN];
         raw[0] = EntryType::FileAndDirectory.serialize();
         raw[1] = self.secondary_count;
@@ -142,7 +142,7 @@ pub(crate) struct StreamExtensionDirEntry {
 }
 
 impl StreamExtensionDirEntry {
-    pub fn serialize(&self) -> RawDirEntry {
+    pub(crate) fn serialize(&self) -> RawDirEntry {
         let mut raw = [0u8; RAW_ENTRY_LEN];
         raw[0] = EntryType::StreamExtension.serialize();
         raw[1] = self.general_secondary_flags.bits();
@@ -163,7 +163,7 @@ pub(crate) struct FileNameDirEntry {
 }
 
 impl FileNameDirEntry {
-    pub fn serialize(&self) -> RawDirEntry {
+    pub(crate) fn serialize(&self) -> RawDirEntry {
         let mut raw = [0u8; RAW_ENTRY_LEN];
         raw[0] = EntryType::FileAndDirectory.serialize();
         raw[1] = self.general_secondary_flags.bits();
@@ -194,7 +194,7 @@ impl From<u8> for EntryType {
 }
 
 impl EntryType {
-    pub fn serialize(&self) -> u8 {
+    pub(crate) fn serialize(&self) -> u8 {
         match self {
             Self::UnusedOrEndOfDirectory => 0x00,
             Self::AllocationBitmap => 0x81,
@@ -324,7 +324,7 @@ impl From<&[u8; RAW_ENTRY_LEN]> for FileNameDirEntry {
 bitflags! {
     /// Represents a set of bitmap flags.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct BitmapFlags: u8 {
+    pub(crate) struct BitmapFlags: u8 {
         /// The value `FirstOrSecondBitmap`, at bit position `0`.
         /// 0 = 1st bitmap
         /// 1 = 2nd bitmap
@@ -334,7 +334,7 @@ bitflags! {
 
     /// Represents a set of volume flags.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct GeneralSecondaryFlags: u8 {
+    pub(crate) struct GeneralSecondaryFlags: u8 {
         /// The value `AllocationPossible`, at bit position `0`.
         /// 0 = Cluster allocation is not possible and FirstCluster and DataLength field are undefined,
         /// 1 = Cluster allocation is possible and FirstCluster and DataLength field are valid as defined.
@@ -347,7 +347,7 @@ bitflags! {
 
     /// Represents a set of file attributes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct FileAttributes: u16 {
+    pub(crate) struct FileAttributes: u16 {
         /// The value `ReadOnly`, at bit position `0`.
         const ReadOnly = 0b0000_0001;
 
@@ -366,7 +366,7 @@ bitflags! {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Location {
+pub(crate) struct Location {
     /// the absolute sector_id.
     /// all sectors in a cluster are contiguous
     pub sector_id: u32,
@@ -376,7 +376,7 @@ pub struct Location {
 }
 
 impl Location {
-    pub fn new(sector_id: u32, dir_entry_offset: usize) -> Self {
+    pub(crate) fn new(sector_id: u32, dir_entry_offset: usize) -> Self {
         Self {
             sector_id,
             dir_entry_offset,
@@ -399,8 +399,7 @@ fn decode_utf16_le<const N: usize>(bytes: &[u8]) -> Result<heapless::String<N>, 
     Ok(decoded)
 }
 
-pub(crate) struct DirectoryEntryChain<D: BlockDevice> {
-    dev: D,
+pub(crate) struct DirectoryEntryChain {
     cluster_id: u32,
     fs: FileSystemDetails,
     // offset, in number of sectors, from start of cluster
@@ -411,8 +410,8 @@ pub(crate) struct DirectoryEntryChain<D: BlockDevice> {
     fetch_required: bool,
 }
 
-impl<D: BlockDevice> DirectoryEntryChain<D> {
-    pub fn new_from_location(location: &Location, fs: &FileSystemDetails, dev: D) -> Self {
+impl DirectoryEntryChain {
+    pub(crate) fn new_from_location(location: &Location, fs: &FileSystemDetails) -> Self {
         // This is so gross, make it better
         let sector_id_from_start = location.sector_id - fs.cluster_heap_offset;
         let cluster_id = 2 + sector_id_from_start / fs.sectors_per_cluster as u32;
@@ -420,7 +419,6 @@ impl<D: BlockDevice> DirectoryEntryChain<D> {
         let dir_entry_offset = location.dir_entry_offset;
 
         Self {
-            dev,
             buf: [0; BLOCK_SIZE],
             fs: fs.clone(),
             cluster_id,
@@ -430,9 +428,8 @@ impl<D: BlockDevice> DirectoryEntryChain<D> {
         }
     }
 
-    pub fn new(cluster_id: u32, fs: &FileSystemDetails, dev: D) -> Self {
+    pub(crate) fn new(cluster_id: u32, fs: &FileSystemDetails) -> Self {
         Self {
-            dev,
             buf: [0; BLOCK_SIZE],
             fs: fs.clone(),
             cluster_id,
@@ -443,10 +440,11 @@ impl<D: BlockDevice> DirectoryEntryChain<D> {
     }
 
     #[bisync]
-    pub(crate) async fn next_file_dir_entry(
+    pub(crate) async fn next_file_dir_entry<D: BlockDevice>(
         &mut self,
+        fs: &mut FileSystem<D>,
     ) -> Result<Option<(FileDirEntry, Location)>, ExFatError<D>> {
-        while let Some((entry, location)) = self.next().await? {
+        while let Some((entry, location)) = self.next(fs).await? {
             let entry_type_val = entry[0];
             match EntryType::from(entry_type_val) {
                 EntryType::UnusedOrEndOfDirectory => {
@@ -466,13 +464,14 @@ impl<D: BlockDevice> DirectoryEntryChain<D> {
     }
 
     #[bisync]
-    pub(crate) async fn next_file_entry(
+    pub(crate) async fn next_file_entry<D: BlockDevice>(
         &mut self,
+        fs: &mut FileSystem<D>,
         filter: &impl DirectoryEntryFilter,
     ) -> Result<Option<FileDetails>, ExFatError<D>> {
         'outer: loop {
-            if let Some((file_dir_entry, location)) = self.next_file_dir_entry().await? {
-                if let Some((stream_entry, _location)) = self.next().await? {
+            if let Some((file_dir_entry, location)) = self.next_file_dir_entry(fs).await? {
+                if let Some((stream_entry, _location)) = self.next(fs).await? {
                     // TODO: check entry type
                     let stream_entry: StreamExtensionDirEntry = stream_entry.into();
                     if !filter.hash(stream_entry.name_hash, file_dir_entry.file_attributes) {
@@ -483,7 +482,7 @@ impl<D: BlockDevice> DirectoryEntryChain<D> {
                     let name_length = stream_entry.name_length as usize;
                     let mut file_name: Vec<u16> = Vec::with_capacity(name_length);
                     'inner: loop {
-                        if let Some((file_name_entry, _location)) = self.next().await? {
+                        if let Some((file_name_entry, _location)) = self.next(fs).await? {
                             // TODO: check entry type
                             let file_name_entry: FileNameDirEntry = file_name_entry.into();
                             let len = (name_length - file_name.len())
@@ -497,7 +496,7 @@ impl<D: BlockDevice> DirectoryEntryChain<D> {
                         }
                     }
 
-                    if !filter.file_name(&file_name) {
+                    if !filter.file_name(&file_name, &fs.upcase_table) {
                         continue 'outer;
                     }
 
@@ -522,15 +521,16 @@ impl<D: BlockDevice> DirectoryEntryChain<D> {
         }
     }
 
-    fn get_current_sector_id(&self) -> Result<u32, ExFatError<D>> {
+    fn get_current_sector_id<D: BlockDevice>(&self) -> Result<u32, ExFatError<D>> {
         let mut sector_id = self.fs.get_heap_sector_id::<D>(self.cluster_id)?;
         sector_id += self.cluster_offset as u32;
         Ok(sector_id)
     }
 
     #[bisync]
-    pub async fn next(
+    pub(crate) async fn next<D: BlockDevice>(
         &mut self,
+        fs: &mut FileSystem<D>,
     ) -> Result<Option<(&[u8; RAW_ENTRY_LEN], Location)>, ExFatError<D>> {
         if self.dir_entry_offset >= DIR_ENTRIES_PER_BLOCK {
             self.cluster_offset += 1;
@@ -541,7 +541,7 @@ impl<D: BlockDevice> DirectoryEntryChain<D> {
         if self.cluster_offset > self.fs.sectors_per_cluster as usize {
             // we have reached the end of the cluster
             let cluster_id =
-                next_cluster_in_fat_chain(&self.dev, self.fs.fat_offset, self.cluster_id).await?;
+                next_cluster_in_fat_chain(&mut fs.dev, self.fs.fat_offset, self.cluster_id).await?;
             match cluster_id {
                 Some(cluster_id) => {
                     self.cluster_id = cluster_id;
@@ -555,8 +555,8 @@ impl<D: BlockDevice> DirectoryEntryChain<D> {
 
         if self.fetch_required {
             let sector_id = self.get_current_sector_id()?;
-            self.dev
-                .read_sector(sector_id, &mut self.buf)
+            fs.dev
+                .read(sector_id, &mut self.buf)
                 .await
                 .map_err(ExFatError::Io)?;
             self.fetch_required = false;

@@ -11,7 +11,7 @@ pub mod blocking {
     mod allocation_bitmap;
     pub mod boot_sector;
     pub mod directory;
-    pub mod directory_entry;
+    mod directory_entry;
     pub mod error;
     mod fat;
     pub mod file;
@@ -27,11 +27,10 @@ pub mod blocking {
 #[path = "."]
 pub mod asynchronous {
     pub use bisync::asynchronous::*;
-
     mod allocation_bitmap;
     pub mod boot_sector;
     pub mod directory;
-    pub mod directory_entry;
+    mod directory_entry;
     pub mod error;
     mod fat;
     pub mod file;

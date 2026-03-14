@@ -5,45 +5,43 @@ use super::{
     directory_entry::{DirectoryEntryChain, FileAttributes},
     error::ExFatError,
     file::{FileDetails, Metadata},
-    file_system::FileSystemDetails,
+    file_system::FileSystem,
     io::BlockDevice,
     upcase_table::UpcaseTable,
     utils::encode_utf16_upcase_and_hash,
 };
 
-pub trait DirectoryEntryFilter {
+pub(crate) trait DirectoryEntryFilter {
     fn hash(&self, file_name_hash: u16, file_attributes: FileAttributes) -> bool;
-    fn file_name(&self, file_name: &[u16]) -> bool;
+    fn file_name(&self, file_name: &[u16], upcase_table: &UpcaseTable) -> bool;
 }
 
-pub struct AllPassFilter {}
+pub(crate) struct AllPassFilter {}
 
 impl DirectoryEntryFilter for AllPassFilter {
     fn hash(&self, _file_name_hash: u16, _file_attributes: FileAttributes) -> bool {
         true
     }
 
-    fn file_name(&self, _file_name: &[u16]) -> bool {
+    fn file_name(&self, _file_name: &[u16], _upcase_table: &UpcaseTable) -> bool {
         true
     }
 }
 
-pub struct ExactNameFilter<'a> {
-    upcase_table: &'a UpcaseTable,
+pub(crate) struct ExactNameFilter {
     file_name: Vec<u16>,
     file_name_hash: u16,
     file_attributes: Option<FileAttributes>,
 }
 
-impl<'a> ExactNameFilter<'a> {
+impl ExactNameFilter {
     pub(crate) fn new(
         file_name_str: &str,
-        upcase_table: &'a UpcaseTable,
+        upcase_table: &UpcaseTable,
         file_attributes: Option<FileAttributes>,
     ) -> Self {
         let (file_name, file_name_hash) = encode_utf16_upcase_and_hash(file_name_str, upcase_table);
         Self {
-            upcase_table,
             file_name,
             file_name_hash,
             file_attributes,
@@ -51,7 +49,7 @@ impl<'a> ExactNameFilter<'a> {
     }
 }
 
-impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
+impl DirectoryEntryFilter for ExactNameFilter {
     fn hash(&self, file_name_hash: u16, file_attributes: FileAttributes) -> bool {
         match self.file_attributes {
             Some(attributes) => {
@@ -61,10 +59,10 @@ impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
         }
     }
 
-    fn file_name(&self, file_name: &[u16]) -> bool {
+    fn file_name(&self, file_name: &[u16], upcase_table: &UpcaseTable) -> bool {
         // perform case insensitive name match
         for (left, right) in self.file_name.iter().zip(file_name.iter()) {
-            let upcased = self.upcase_table.upcase(*right);
+            let upcased = upcase_table.upcase(*right);
             if *left != upcased {
                 // name does not match
                 return false;
@@ -77,9 +75,7 @@ impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
 
 #[bisync]
 pub(crate) async fn get_leaf_file_entry<D: BlockDevice>(
-    io: &D,
-    fs: &FileSystemDetails,
-    upcase_table: &UpcaseTable,
+    fs: &mut FileSystem<D>,
     path: &str,
     file_attributes: Option<FileAttributes>,
 ) -> Result<Option<FileDetails>, ExFatError<D>> {
@@ -89,7 +85,7 @@ pub(crate) async fn get_leaf_file_entry<D: BlockDevice>(
         .map(|c| c.trim())
         .peekable();
 
-    let mut cluster_id = fs.first_cluster_of_root_dir;
+    let mut cluster_id = fs.fs.first_cluster_of_root_dir;
 
     while let Some(part) = splits.next() {
         let is_last = splits.peek().is_none();
@@ -99,9 +95,9 @@ pub(crate) async fn get_leaf_file_entry<D: BlockDevice>(
             Some(FileAttributes::Directory)
         };
 
-        let filter = ExactNameFilter::new(part, upcase_table, attributes);
-        let mut entries = DirectoryEntryChain::new(cluster_id, fs, io.clone());
-        let file_details = entries.next_file_entry(&filter).await?;
+        let filter = ExactNameFilter::new(part, &fs.upcase_table, attributes);
+        let mut entries = DirectoryEntryChain::new(cluster_id, &fs.fs);
+        let file_details = entries.next_file_entry(fs, &filter).await?;
 
         match file_details {
             Some(file_details) => {
@@ -136,17 +132,13 @@ fn is_root_directory(path: &str) -> bool {
 
 #[bisync]
 pub(crate) async fn directory_list<D: BlockDevice>(
-    io: &D,
-    fs: &FileSystemDetails,
-    upcase_table: &UpcaseTable,
+    fs: &mut FileSystem<D>,
     path: &str,
-) -> Result<DirectoryIterator<D>, ExFatError<D>> {
+) -> Result<DirectoryIterator, ExFatError<D>> {
     let cluster_id = if is_root_directory(path) {
-        fs.first_cluster_of_root_dir
+        fs.fs.first_cluster_of_root_dir
     } else {
-        match get_leaf_file_entry(io, fs, upcase_table, path, Some(FileAttributes::Directory))
-            .await?
-        {
+        match get_leaf_file_entry(fs, path, Some(FileAttributes::Directory)).await? {
             Some(file_details) => {
                 if file_details.attributes.contains(FileAttributes::Directory) {
                     file_details.first_cluster
@@ -158,12 +150,12 @@ pub(crate) async fn directory_list<D: BlockDevice>(
         }
     };
 
-    let entries = DirectoryEntryChain::new(cluster_id, fs, io.clone());
+    let entries = DirectoryEntryChain::new(cluster_id, &fs.fs);
     Ok(DirectoryIterator { entries })
 }
 
-pub struct DirectoryIterator<D: BlockDevice> {
-    entries: DirectoryEntryChain<D>,
+pub struct DirectoryIterator {
+    entries: DirectoryEntryChain,
 }
 
 #[derive(Debug)]
@@ -185,13 +177,16 @@ impl DirectoryEntry {
     }
 }
 
-impl<D: BlockDevice> DirectoryIterator<D> {
+impl DirectoryIterator {
     #[bisync]
-    pub async fn next_entry(&mut self) -> Result<Option<DirectoryEntry>, ExFatError<D>> {
+    pub async fn next_entry<D: BlockDevice>(
+        &mut self,
+        fs: &mut FileSystem<D>,
+    ) -> Result<Option<DirectoryEntry>, ExFatError<D>> {
         let filter = AllPassFilter {};
         Ok(self
             .entries
-            .next_file_entry(&filter)
+            .next_file_entry(fs, &filter)
             .await?
             .map(|x| DirectoryEntry { details: x.clone() }))
     }

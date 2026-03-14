@@ -26,7 +26,7 @@ In the examples below I have created a simple in-memory block device for demonst
 Reading a file into a string:
 ```rust
 let io = InMemoryBlockDevice::new(); // your SD card driver
-let fs = FileSystem::new(io).await?;
+let mut fs = FileSystem::new(io).await?;
 let contents: String = fs
     .read_to_string("/temp2/hello2/shoe/test.txt")
     .await?;
@@ -35,11 +35,11 @@ let contents: String = fs
 Listing all files and folders in the folder "/temp2/hello2"
 ```rust
 let io = InMemoryBlockDevice::new(); // your SD card driver
-let fs = FileSystem::new(io).await?;
+let mut fs = FileSystem::new(io).await?;
 
 let path = "/temp2/hello2";
 let mut dir = fs.read_dir(path).await?;
-while let Some(entry) = dir.next_entry().await? {
+while let Some(entry) = dir.next_entry(&mut fs).await? {
     println!("{:?}", entry);
 }
 ```
@@ -47,17 +47,16 @@ while let Some(entry) = dir.next_entry().await? {
 Open a file for writing, make some writes, change the file cursor, overwrite some data, read the contents
 ```rust
     let io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io).await?;
     let path = "/temp2/test7.txt";
 
-    let mut file = fs
-        .with_options()
+    // create empty read write file
+    let options = OpenBuilder::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&mut io, path)
-        .await?;
-
+        .build()?;
+    let mut file = fs.open(path, options).await?;
     file.write(b"hello").await?;
     file.write(b" world").await?;
     file.seek(6).await?;

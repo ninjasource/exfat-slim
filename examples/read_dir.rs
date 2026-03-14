@@ -11,11 +11,11 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     info!("reading root dir:");
 
     let io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io).await?;
 
     let path = ""; // root dir
     let mut dir = fs.read_dir(path).await?;
-    while let Some(entry) = dir.next_entry().await? {
+    while let Some(entry) = dir.next_entry(&mut fs).await? {
         let entry_type = if entry.metadata().is_dir() {
             "DIR"
         } else {

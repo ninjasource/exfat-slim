@@ -10,7 +10,7 @@ fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     color_backtrace::install();
 
     let io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(io)?;
+    let mut fs = FileSystem::new(io)?;
     let exists = fs.exists("/temp2/hello2/shoe/test.txt")?;
     info!("exists: {exists}");
 

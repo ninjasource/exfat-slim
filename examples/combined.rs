@@ -12,7 +12,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     // read the boot sector of the file system
     info!("reading boot sector of file system");
     let io = InMemoryBlockDevice::new();
-    let fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io).await?;
 
     let directory = "/bubble/gum";
     let path = format!("{directory}/blue.txt");
@@ -49,7 +49,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     // confirm that the file was created in the directory
     info!("list entries in directory {directory}");
     let mut list = fs.read_dir(directory).await?;
-    while let Some(item) = list.next_entry().await? {
+    while let Some(item) = list.next_entry(&mut fs).await? {
         info!("{:?}", item);
     }
 
