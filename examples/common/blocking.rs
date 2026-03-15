@@ -30,7 +30,7 @@ impl BlockDevice for InMemoryBlockDevice {
         g.write_sector(sector_id, block)
     }
 
-    fn flush(&mut self, _lba: u32, _block: &Block) -> Result<(), Self::Error> {
+    fn flush(&mut self) -> Result<(), Self::Error> {
         // nop
         Ok(())
     }

@@ -29,7 +29,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
         .write(true)
         .create(true)
         .truncate(true)
-        .build()?;
+        .build();
     let mut file = fs.open(path, options).await?;
     file.write(b"hello").await?;
     file.write(b" world").await?;
@@ -39,7 +39,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let contents = fs.read_to_string(path).await?;
     println!("Contents: `{contents}`");
 
-    let options = OpenBuilder::new().write(true).append(true).build()?;
+    let options = OpenBuilder::new().write(true).append(true).build();
     let mut file = fs.open(path, options).await?;
     file.write(b". How are things?").await?;
 
@@ -50,7 +50,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let mut dest = vec![0u8; 100000];
     fill_random_ascii(&mut dest);
 
-    let options = OpenBuilder::new().write(true).append(true).build()?;
+    let options = OpenBuilder::new().write(true).append(true).build();
     let mut file = fs.open(path, options).await?;
     file.write(&dest).await?;
 

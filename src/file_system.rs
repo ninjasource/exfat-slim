@@ -165,7 +165,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Supports nested paths
     #[bisync]
     pub async fn read(&mut self, path: &str) -> Result<Vec<u8>, ExFatError<D>> {
-        let options = OpenBuilder::new().read(true).build()?;
+        let options = OpenBuilder::new().read(true).build();
         let mut file = self.open(path, options).await?;
         //let mut file = self.with_options().read(true).open(path).await?;
         let mut buf = Vec::new();
@@ -178,7 +178,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Supports nested paths
     #[bisync]
     pub async fn read_to_string(&mut self, path: &str) -> Result<String, ExFatError<D>> {
-        let options = OpenBuilder::new().read(true).build()?;
+        let options = OpenBuilder::new().read(true).build();
         let mut file = self.open(path, options).await?;
         file.read_to_string().await
     }
@@ -224,7 +224,7 @@ impl<D: BlockDevice> FileSystem<D> {
                 reason: "cannot copy file to the same exact location",
             });
         }
-        let options = OpenBuilder::new().read(true).build()?;
+        let options = OpenBuilder::new().read(true).build();
         let mut file = self.open(from_path, options).await?;
         file.copy_to(to_path).await?;
         Ok(())

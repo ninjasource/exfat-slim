@@ -23,5 +23,5 @@ pub trait BlockDevice {
     /// flush internal buffers to disk media
     /// NOTE: this is optional but if it is a nop then writes above should flush to disk immediatly
     #[bisync]
-    async fn flush(&mut self, lba: u32, block: &Block) -> Result<(), Self::Error>;
+    async fn flush(&mut self) -> Result<(), Self::Error>;
 }

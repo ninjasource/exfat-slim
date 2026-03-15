@@ -25,7 +25,7 @@ pub struct OpenBuilder {
     create_new: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct OpenOptions {
     pub read: bool,
     pub write: bool,
@@ -106,15 +106,15 @@ impl OpenBuilder {
         self
     }
 
-    pub fn build<D: BlockDevice>(&self) -> Result<OpenOptions, ExFatError<D>> {
-        Ok(OpenOptions {
+    pub fn build(&self) -> OpenOptions {
+        OpenOptions {
             read: self.read,
             append: self.append,
             create: self.create,
             create_new: self.create_new,
             truncate: self.truncate,
             write: self.write,
-        })
+        }
     }
 }
 

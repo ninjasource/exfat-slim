@@ -31,7 +31,7 @@ impl BlockDevice for InMemoryBlockDevice {
         g.write_sector(sector_id, block)
     }
 
-    async fn flush(&mut self, _lba: u32, _block: &Block) -> Result<(), Self::Error> {
+    async fn flush(&mut self) -> Result<(), Self::Error> {
         // nop because we don't use a back buffer
         Ok(())
     }

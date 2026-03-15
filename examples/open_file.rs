@@ -18,12 +18,12 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
         .write(true)
         .create(true)
         .truncate(true)
-        .build()?;
+        .build();
     let mut file = fs.open(path, options).await?;
     file.write(b"hello world").await?;
 
     // open file for read and read contents
-    let options = OpenBuilder::new().read(true).build()?;
+    let options = OpenBuilder::new().read(true).build();
     let mut file = fs.open(path, options).await?;
     let contents = file.read_to_string().await?;
     info!("new file: \"{contents}\"");
@@ -38,7 +38,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     info!("seek to byte 6 and read again: \"{contents}\"");
 
     // append an "!" onto the end of the file
-    let options = OpenBuilder::new().write(true).append(true).build()?;
+    let options = OpenBuilder::new().write(true).append(true).build();
     let mut file = fs.open(path, options).await?;
     file.write(b"!").await?;
 
@@ -48,30 +48,30 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     info!("confirmed behaviour:  cannot read because read not enabled");
 
     // open file for read to get its contents
-    let options = OpenBuilder::new().read(true).build()?;
+    let options = OpenBuilder::new().read(true).build();
     let mut file = fs.open(path, options).await?;
     let contents = file.read_to_string().await?;
     info!("appended: \"{contents}\"");
 
     // attemt to call create_new on a file that already exists
-    let options = OpenBuilder::new().write(true).create_new(true).build()?;
+    let options = OpenBuilder::new().write(true).create_new(true).build();
     let file = fs.open(path, options).await;
     assert!(matches!(file, Err(ExFatError::AlreadyExists)));
     info!("confirmed behaviour:  cannot create new because file already exists");
 
     // create file without truncate - file already exists and seeks to position 0
-    let options = OpenBuilder::new().write(true).create(true).build()?;
+    let options = OpenBuilder::new().write(true).create(true).build();
     let mut file = fs.open(path, options).await?;
     file.write(b"12345").await?;
 
     // confirm expected changes
-    let options = OpenBuilder::new().read(true).build()?;
+    let options = OpenBuilder::new().read(true).build();
     let mut file = fs.open(path, options).await?;
     let contents = file.read_to_string().await?;
     info!("create file without truncate: \"{contents}\"");
 
     // truncate file
-    let options = OpenBuilder::new().read(true).truncate(true).build()?;
+    let options = OpenBuilder::new().read(true).truncate(true).build();
     let mut file = fs.open(path, options).await?;
     let contents = file.read_to_string().await?;
     info!("truncated: \"{contents}\"");
@@ -84,7 +84,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
         .truncate(true)
         .read(true)
         .write(true)
-        .build()?;
+        .build();
     let mut file = fs.open(path, options).await?;
     file.write(b"hello").await?;
     file.seek(0).await?;

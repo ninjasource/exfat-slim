@@ -35,6 +35,7 @@ pub mod asynchronous {
     mod fat;
     pub mod file;
     pub mod file_system;
+    pub mod fs;
     pub mod io;
     mod upcase_table;
     pub mod utils;
