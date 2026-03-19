@@ -25,15 +25,40 @@ use crate::asynchronous::{
 
 static REQ: Channel<CriticalSectionRawMutex, Req, 8> = Channel::new();
 
-#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(thiserror::Error, Debug, Clone, Copy)]
 pub enum Error {
-    NoCard,
+    #[error("unexpected response from file system actor")]
     UnexpectedResponse,
+
+    #[error("no more file handles")]
     ExhaustedFileHandles,
+
+    #[error("invalid file handle")]
     InvalidFileHandle,
 }
 
-pub enum Op {
+impl OpenOptions {
+    pub async fn open(&self, path: &str) -> Result<FileHandle, Error> {
+        let token = ReplyPool::acquire().await;
+        let req = Req {
+            op: Op::OpenFile {
+                path: path.to_string(),
+                options: self.clone(),
+            },
+            reply: token,
+        };
+        REQ.send(req).await;
+        let resp = ReplyPool::wait(token).await;
+
+        match resp {
+            Resp::FileOpen { handle } => Ok(handle),
+            _ => Err(Error::UnexpectedResponse),
+        }
+    }
+}
+
+enum Op {
     ReadToString { path: String },
     Read { path: String },
     OpenFile { path: String, options: OpenOptions },
@@ -47,7 +72,7 @@ pub enum Op {
     Metadata { handle: FileHandle },
 }
 
-pub struct Req {
+struct Req {
     op: Op,
     reply: ReplyToken,
 }
@@ -267,7 +292,7 @@ pub async fn read(path: &str) -> Result<Vec<u8>, Error> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ReplyToken {
+struct ReplyToken {
     pub slot: u8,
     pub seq: u32,
 }
@@ -306,7 +331,7 @@ fn release_slot_locked(bitmap: &mut u32, slot: u8) {
     *bitmap &= !mask;
 }
 
-pub enum Resp {
+enum Resp {
     Ok,
     Error,
     ReadToString { data: String },
@@ -359,7 +384,7 @@ impl Files {
     }
 }
 
-pub struct ReplyPool;
+struct ReplyPool;
 
 impl ReplyPool {
     /// Acquire a reply slot and create a token.

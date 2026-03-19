@@ -1,7 +1,7 @@
 mod common;
 
 use crate::common::asynchronous::InMemoryBlockDevice;
-use exfat_slim::asynchronous::{error::ExFatError, file::OpenBuilder, file_system::FileSystem};
+use exfat_slim::asynchronous::{error::ExFatError, file::OpenOptions, file_system::FileSystem};
 use log::info;
 
 #[tokio::main(flavor = "current_thread")]
@@ -14,16 +14,12 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let path = "foo.txt";
 
     // create a new file and write "hello world" to it
-    let options = OpenBuilder::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .build();
+    let options = OpenOptions::new().write(true).create(true).truncate(true);
     let mut file = fs.open(path, options).await?;
     file.write(&mut fs, b"hello world").await?;
 
     // open file for read and read contents
-    let options = OpenBuilder::new().read(true).build();
+    let options = OpenOptions::new().read(true);
     let mut file = fs.open(path, options).await?;
     let contents = file.read_to_string(&mut fs).await?;
     info!("new file: \"{contents}\"");
@@ -38,7 +34,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     info!("seek to byte 6 and read again: \"{contents}\"");
 
     // append an "!" onto the end of the file
-    let options = OpenBuilder::new().write(true).append(true).build();
+    let options = OpenOptions::new().write(true).append(true);
     let mut file = fs.open(path, options).await?;
     file.write(&mut fs, b"!").await?;
 
@@ -48,30 +44,30 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     info!("confirmed behaviour:  cannot read because read not enabled");
 
     // open file for read to get its contents
-    let options = OpenBuilder::new().read(true).build();
+    let options = OpenOptions::new().read(true);
     let mut file = fs.open(path, options).await?;
     let contents = file.read_to_string(&mut fs).await?;
     info!("appended: \"{contents}\"");
 
     // attemt to call create_new on a file that already exists
-    let options = OpenBuilder::new().write(true).create_new(true).build();
+    let options = OpenOptions::new().write(true).create_new(true);
     let file = fs.open(path, options).await;
     assert!(matches!(file, Err(ExFatError::AlreadyExists)));
     info!("confirmed behaviour:  cannot create new because file already exists");
 
     // create file without truncate - file already exists and seeks to position 0
-    let options = OpenBuilder::new().write(true).create(true).build();
+    let options = OpenOptions::new().write(true).create(true);
     let mut file = fs.open(path, options).await?;
     file.write(&mut fs, b"12345").await?;
 
     // confirm expected changes
-    let options = OpenBuilder::new().read(true).build();
+    let options = OpenOptions::new().read(true);
     let mut file = fs.open(path, options).await?;
     let contents = file.read_to_string(&mut fs).await?;
     info!("create file without truncate: \"{contents}\"");
 
     // truncate file
-    let options = OpenBuilder::new().read(true).truncate(true).build();
+    let options = OpenOptions::new().read(true).truncate(true);
     let mut file = fs.open(path, options).await?;
     let contents = file.read_to_string(&mut fs).await?;
     info!("truncated: \"{contents}\"");
@@ -79,12 +75,11 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     assert_eq!(0, metadata.len(), "file data length");
 
     // create empty read write file
-    let options = OpenBuilder::new()
+    let options = OpenOptions::new()
         .create(true)
         .truncate(true)
         .read(true)
-        .write(true)
-        .build();
+        .write(true);
     let mut file = fs.open(path, options).await?;
     file.write(&mut fs, b"hello").await?;
     file.seek(&mut fs, 0).await?;

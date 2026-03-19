@@ -15,16 +15,6 @@ use super::{
     utils::split_path,
 };
 
-#[derive(Clone, Debug)]
-pub struct OpenBuilder {
-    read: bool,
-    write: bool,
-    append: bool,
-    truncate: bool,
-    create: bool,
-    create_new: bool,
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct OpenOptions {
     pub read: bool,
@@ -35,14 +25,8 @@ pub struct OpenOptions {
     pub create_new: bool,
 }
 
-impl Default for OpenBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl OpenBuilder {
-    pub fn new() -> Self {
+impl OpenOptions {
+    pub const fn new() -> Self {
         Self {
             read: false,
             write: false,
@@ -56,7 +40,7 @@ impl OpenBuilder {
     /// Set option for read access
     ///
     /// If read it true the file should be readable if opened
-    pub fn read(&mut self, read: bool) -> &mut Self {
+    pub const fn read(mut self, read: bool) -> Self {
         self.read = read;
         self
     }
@@ -64,7 +48,7 @@ impl OpenBuilder {
     /// Set option for write access
     ///
     /// If write is true the file should be writable if opened
-    pub fn write(&mut self, write: bool) -> &mut Self {
+    pub const fn write(mut self, write: bool) -> Self {
         self.write = write;
         self
     }
@@ -74,7 +58,7 @@ impl OpenBuilder {
     /// If append is true then writes will append to a file instead of overwriting its contents
     /// Setting `.write(true).append(true)` has the same affect as only setting `.append(true)`
     /// This option does not create a file if it does not exist, use create or create_new for that
-    pub fn append(&mut self, append: bool) -> &mut Self {
+    pub const fn append(mut self, append: bool) -> Self {
         self.append = append;
         self
     }
@@ -83,7 +67,7 @@ impl OpenBuilder {
     ///
     /// If truncate is true, opening the file will truncate the file length to 0 if it already exists.
     /// The file must be opened with `.write(true)` for this to work.
-    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+    pub const fn truncate(mut self, truncate: bool) -> Self {
         self.truncate = truncate;
         self
     }
@@ -92,7 +76,7 @@ impl OpenBuilder {
     ///
     /// In order for the file to be created either `.write(true)` or `.append(true)` must be used.
     /// Calling `.create()` without `.write()` or `append()` will return an error on open
-    pub fn create(&mut self, create: bool) -> &mut Self {
+    pub const fn create(mut self, create: bool) -> Self {
         self.create = create;
         self
     }
@@ -101,11 +85,12 @@ impl OpenBuilder {
     ///
     /// In order for the file to be created either `.write(true)` or `.append(true)` must be used.
     /// If true `.create()` and `.truncate()` are ignored
-    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+    pub const fn create_new(mut self, create_new: bool) -> Self {
         self.create_new = create_new;
         self
     }
 
+    /*
     pub fn build(&self) -> OpenOptions {
         OpenOptions {
             read: self.read,
@@ -115,7 +100,7 @@ impl OpenBuilder {
             truncate: self.truncate,
             write: self.write,
         }
-    }
+    }*/
 }
 
 #[derive(Debug, Clone)]

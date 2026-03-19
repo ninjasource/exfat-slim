@@ -13,7 +13,7 @@ use super::{
     },
     error::ExFatError,
     fat::next_cluster_in_fat_chain,
-    file::{File, FileDetails, OpenBuilder, OpenOptions},
+    file::{File, FileDetails, OpenOptions},
     io::{BLOCK_SIZE, BlockDevice},
     upcase_table::UpcaseTable,
     utils::{calc_dir_entry_set_len, encode_utf16_and_hash, split_path},
@@ -160,7 +160,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Supports nested paths
     #[bisync]
     pub async fn read(&mut self, path: &str) -> Result<Vec<u8>, ExFatError<D>> {
-        let options = OpenBuilder::new().read(true).build();
+        let options = OpenOptions::new().read(true);
         let mut file = self.open(path, options).await?;
         //let mut file = self.with_options().read(true).open(path).await?;
         let mut buf = Vec::new();
@@ -173,7 +173,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Supports nested paths
     #[bisync]
     pub async fn read_to_string(&mut self, path: &str) -> Result<String, ExFatError<D>> {
-        let options = OpenBuilder::new().read(true).build();
+        let options = OpenOptions::new().read(true);
         let mut file = self.open(path, options).await?;
         file.read_to_string(self).await
     }
@@ -219,7 +219,7 @@ impl<D: BlockDevice> FileSystem<D> {
                 reason: "cannot copy file to the same exact location",
             });
         }
-        let options = OpenBuilder::new().read(true).build();
+        let options = OpenOptions::new().read(true);
         let mut file = self.open(from_path, options).await?;
         file.copy_to(self, to_path).await?;
         Ok(())
