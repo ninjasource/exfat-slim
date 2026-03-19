@@ -18,6 +18,7 @@ bitflags = { version = "2.10.0", default-features = false }
 defmt = { version = "0.3.8", default-features = false, optional = true }
 bisync = { version = "0.3.0", default-features = false }
 embassy-sync = { version = "0.7.2", default-features = false, optional = true }
+static_cell = { version = "2", default-features = false, optional = true }
 
 [dev-dependencies]
 mbr-nostd = "0.1"
@@ -37,4 +38,4 @@ rand = "0.9.2"
 [features]
 default = ["embassy"]
 defmt = ["dep:defmt"]
-embassy = ["dep:embassy-sync"]
+embassy = ["dep:embassy-sync", "dep:static_cell"]

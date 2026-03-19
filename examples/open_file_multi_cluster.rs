@@ -31,17 +31,17 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
         .truncate(true)
         .build();
     let mut file = fs.open(path, options).await?;
-    file.write(b"hello").await?;
-    file.write(b" world").await?;
-    file.seek(6).await?;
-    file.write(b"W").await?;
+    file.write(&mut fs, b"hello").await?;
+    file.write(&mut fs, b" world").await?;
+    file.seek(&mut fs, 6).await?;
+    file.write(&mut fs, b"W").await?;
 
     let contents = fs.read_to_string(path).await?;
     println!("Contents: `{contents}`");
 
     let options = OpenBuilder::new().write(true).append(true).build();
     let mut file = fs.open(path, options).await?;
-    file.write(b". How are things?").await?;
+    file.write(&mut fs, b". How are things?").await?;
 
     let contents = fs.read_to_string(path).await?;
     println!("{contents}");
@@ -52,7 +52,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
 
     let options = OpenBuilder::new().write(true).append(true).build();
     let mut file = fs.open(path, options).await?;
-    file.write(&dest).await?;
+    file.write(&mut fs, &dest).await?;
 
     expected.append(&mut dest);
 

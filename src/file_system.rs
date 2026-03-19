@@ -15,7 +15,6 @@ use super::{
     fat::next_cluster_in_fat_chain,
     file::{File, FileDetails, OpenBuilder, OpenOptions},
     io::{BLOCK_SIZE, BlockDevice},
-    only_async, only_sync,
     upcase_table::UpcaseTable,
     utils::{calc_dir_entry_set_len, encode_utf16_and_hash, split_path},
 };
@@ -111,11 +110,7 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 
     #[bisync]
-    pub async fn open<'a>(
-        &'a mut self,
-        path: &str,
-        options: OpenOptions,
-    ) -> Result<File<'a, D>, ExFatError<D>> {
+    pub async fn open(&mut self, path: &str, options: OpenOptions) -> Result<File, ExFatError<D>> {
         // attempt to get the file details
         let file_details = self
             .find_file_or_directory(path, Some(FileAttributes::Archive))
@@ -144,7 +139,7 @@ impl<D: BlockDevice> FileSystem<D> {
             Err(e) => return Err(e),
         };
 
-        Ok(File::new(self, &file_details, &options))
+        Ok(File::new(&file_details, &options))
     }
 
     /// Returns true if the file or directory exists
@@ -169,7 +164,7 @@ impl<D: BlockDevice> FileSystem<D> {
         let mut file = self.open(path, options).await?;
         //let mut file = self.with_options().read(true).open(path).await?;
         let mut buf = Vec::new();
-        file.read_to_end(&mut buf).await?;
+        file.read_to_end(self, &mut buf).await?;
         Ok(buf)
     }
 
@@ -180,7 +175,7 @@ impl<D: BlockDevice> FileSystem<D> {
     pub async fn read_to_string(&mut self, path: &str) -> Result<String, ExFatError<D>> {
         let options = OpenBuilder::new().read(true).build();
         let mut file = self.open(path, options).await?;
-        file.read_to_string().await
+        file.read_to_string(self).await
     }
 
     /// Returns an iterator over the entries in a directory
@@ -226,7 +221,7 @@ impl<D: BlockDevice> FileSystem<D> {
         }
         let options = OpenBuilder::new().read(true).build();
         let mut file = self.open(from_path, options).await?;
-        file.copy_to(to_path).await?;
+        file.copy_to(self, to_path).await?;
         Ok(())
     }
 
@@ -601,40 +596,6 @@ impl<D: BlockDevice> FileSystem<D> {
             secondary_count,
         };
         Ok(file_details)
-    }
-
-    #[allow(dead_code)]
-    #[only_async]
-    async fn with_file<R, F, Fut>(
-        &mut self,
-        path: &str,
-        options: OpenOptions,
-        f: F,
-    ) -> Result<R, ExFatError<D>>
-    where
-        F: for<'a> FnOnce(&mut File<'a, D>) -> Fut,
-        Fut: Future<Output = Result<R, ExFatError<D>>>,
-    {
-        let mut file = self.open(path, options).await?;
-        let out = f(&mut file).await?;
-
-        // TODO: close the file
-        Ok(out)
-    }
-
-    #[allow(dead_code)]
-    #[only_sync]
-    fn with_file<R>(
-        &mut self,
-        path: &str,
-        options: OpenOptions,
-        f: impl FnOnce(&mut File<'_, D>) -> Result<R, ExFatError<D>>,
-    ) -> Result<R, ExFatError<D>> {
-        let mut file = self.open(path, options)?;
-        let out = f(&mut file)?;
-
-        // TODO: close the file
-        Ok(out)
     }
 
     fn new_inner(
