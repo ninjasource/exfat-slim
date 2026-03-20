@@ -17,17 +17,81 @@ use embassy_sync::{
 };
 
 use crate::asynchronous::{
+    boot_sector, directory_entry,
     error::ExFatError,
     file::{File, Metadata, OpenOptions},
-    file_system::FileSystem,
+    file_system::{FileSystem, read_file_system_metadata},
     io::BlockDevice,
 };
 
 static REQ: Channel<CriticalSectionRawMutex, Req, 8> = Channel::new();
 
+// to keep the API simple this error type is not generic
+// as a result the BlockDevice error is turned into an error_code
+// look for implementations of the ErrorCode trate to see what these codes mean in your codebase
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(thiserror::Error, Debug, Clone, Copy)]
 pub enum Error {
+    #[error("io error code {error_code}")]
+    Io { error_code: u8 },
+
+    #[error("directory entry ({0:?})")]
+    DirectoryEntry(#[from] directory_entry::Error),
+
+    #[error("boot sector not valid exFAT ({0:?})")]
+    NotExFat(#[from] boot_sector::Error),
+
+    #[error("end of fat chain")]
+    EndOfFatChain,
+
+    #[error("invalid uft16 string encountered ({reason})")]
+    InvalidUtf16String { reason: &'static str },
+
+    #[error("invalid file name ({reason})")]
+    InvalidFileName { reason: &'static str },
+
+    #[error("invalid file system ({reason})")]
+    InvalidFileSystem { reason: &'static str },
+
+    #[error("file not found")]
+    FileNotFound,
+
+    #[error("directory not found")]
+    DirectoryNotFound,
+
+    #[error("invalid utf8 bytes")]
+    Utf8Error,
+
+    #[error("disk is full")]
+    DiskFull,
+
+    #[error("invalid cluster id ({0})")]
+    InvalidClusterId(u32),
+
+    #[error("invalid sector id ({0})")]
+    InvalidSectorId(u32),
+
+    #[error("directory is not empty")]
+    DirectoryNotEmpty,
+
+    #[error("write not enabled")]
+    WriteNotEnabled,
+
+    #[error("read not enabled")]
+    ReadNotEnabled,
+
+    #[error("file already exists")]
+    AlreadyExists,
+
+    #[error("cannot seek past the end of the valid data in the file")]
+    SeekOutOfRange,
+
+    #[error("attempt to change the allocation bitmap to a value with no effect")]
+    InvalidAllocation,
+
+    #[error("the combination of flags set when opening the file is not valid")]
+    InvalidOptions,
+
     #[error("unexpected response from file system actor")]
     UnexpectedResponse,
 
@@ -36,6 +100,39 @@ pub enum Error {
 
     #[error("invalid file handle")]
     InvalidFileHandle,
+}
+
+impl<D> From<ExFatError<D>> for Error
+where
+    D: BlockDevice,
+    D::Error: ErrorCode,
+{
+    fn from(value: ExFatError<D>) -> Self {
+        match value {
+            ExFatError::Io(e) => Error::Io {
+                error_code: e.to_error_code(),
+            },
+            ExFatError::AlreadyExists => Error::AlreadyExists,
+            ExFatError::DirectoryEntry(e) => Error::DirectoryEntry(e),
+            ExFatError::DirectoryNotEmpty => Error::DirectoryNotEmpty,
+            ExFatError::DirectoryNotFound => Error::DirectoryNotFound,
+            ExFatError::DiskFull => Error::DiskFull,
+            ExFatError::EndOfFatChain => Error::EndOfFatChain,
+            ExFatError::FileNotFound => Error::FileNotFound,
+            ExFatError::InvalidAllocation => Error::InvalidAllocation,
+            ExFatError::InvalidClusterId(id) => Error::InvalidClusterId(id),
+            ExFatError::InvalidFileName { reason } => Error::InvalidFileName { reason },
+            ExFatError::InvalidFileSystem { reason } => Error::InvalidFileSystem { reason },
+            ExFatError::InvalidOptions => Error::InvalidOptions,
+            ExFatError::InvalidSectorId(id) => Error::InvalidSectorId(id),
+            ExFatError::InvalidUtf16String { reason } => Error::InvalidUtf16String { reason },
+            ExFatError::NotExFat(e) => Error::NotExFat(e),
+            ExFatError::ReadNotEnabled => Error::ReadNotEnabled,
+            ExFatError::SeekOutOfRange => Error::SeekOutOfRange,
+            ExFatError::Utf8Error => Error::Utf8Error,
+            ExFatError::WriteNotEnabled => Error::WriteNotEnabled,
+        }
+    }
 }
 
 impl OpenOptions {
@@ -49,7 +146,7 @@ impl OpenOptions {
             reply: token,
         };
         REQ.send(req).await;
-        let resp = ReplyPool::wait(token).await;
+        let resp = ReplyPool::wait(token).await?;
 
         match resp {
             Resp::FileOpen { handle } => Ok(handle),
@@ -90,15 +187,15 @@ impl FileHandle {
             reply: token,
         };
         REQ.send(req).await;
-        let resp = ReplyPool::wait(token).await;
+        let resp = ReplyPool::wait(token).await?;
 
         match resp {
             Resp::Read { data } => {
-                if data.len() > 0 {
+                if data.is_empty() {
+                    Ok(None)
+                } else {
                     buf.copy_from_slice(&data);
                     Ok(Some(data.len()))
-                } else {
-                    Ok(None)
                 }
             }
             _ => Err(Error::UnexpectedResponse),
@@ -114,7 +211,7 @@ impl FileHandle {
             reply: token,
         };
         REQ.send(req).await;
-        let resp = ReplyPool::wait(token).await;
+        let resp = ReplyPool::wait(token).await?;
 
         match resp {
             Resp::Read { data } => Ok(data),
@@ -131,7 +228,7 @@ impl FileHandle {
             reply: token,
         };
         REQ.send(req).await;
-        let resp = ReplyPool::wait(token).await;
+        let resp = ReplyPool::wait(token).await?;
 
         match resp {
             Resp::ReadToString { data } => Ok(data),
@@ -149,7 +246,7 @@ impl FileHandle {
             reply: token,
         };
         REQ.send(req).await;
-        let resp = ReplyPool::wait(token).await;
+        let resp = ReplyPool::wait(token).await?;
 
         match resp {
             Resp::Ok => Ok(()),
@@ -167,7 +264,7 @@ impl FileHandle {
             reply: token,
         };
         REQ.send(req).await;
-        let resp = ReplyPool::wait(token).await;
+        let resp = ReplyPool::wait(token).await?;
 
         match resp {
             Resp::Ok => Ok(()),
@@ -184,7 +281,7 @@ impl FileHandle {
             reply: token,
         };
         REQ.send(req).await;
-        let resp = ReplyPool::wait(token).await;
+        let resp = ReplyPool::wait(token).await?;
 
         match resp {
             Resp::Metadata { data } => Ok(data),
@@ -202,7 +299,7 @@ impl FileHandle {
             reply: token,
         };
         REQ.send(req).await;
-        let resp = ReplyPool::wait(token).await;
+        let resp = ReplyPool::wait(token).await?;
 
         match resp {
             Resp::Ok => Ok(()),
@@ -223,7 +320,7 @@ impl FileHandle {
             reply: token,
         };
         REQ.send(req).await;
-        let resp = ReplyPool::wait(token).await;
+        let resp = ReplyPool::wait(token).await?;
 
         match resp {
             Resp::Ok => Ok(()),
@@ -249,7 +346,7 @@ pub async fn open(path: &str, options: OpenOptions) -> Result<FileHandle, Error>
         reply: token,
     };
     REQ.send(req).await;
-    let resp = ReplyPool::wait(token).await;
+    let resp = ReplyPool::wait(token).await?;
 
     match resp {
         Resp::FileOpen { handle } => Ok(handle),
@@ -266,7 +363,7 @@ pub async fn read_to_string(path: &str) -> Result<String, Error> {
         reply: token,
     };
     REQ.send(req).await;
-    let resp = ReplyPool::wait(token).await;
+    let resp = ReplyPool::wait(token).await?;
 
     match resp {
         Resp::ReadToString { data: string } => Ok(string),
@@ -283,7 +380,7 @@ pub async fn read(path: &str) -> Result<Vec<u8>, Error> {
         reply: token,
     };
     REQ.send(req).await;
-    let resp = ReplyPool::wait(token).await;
+    let resp = ReplyPool::wait(token).await?;
 
     match resp {
         Resp::Read { data } => Ok(data),
@@ -297,10 +394,15 @@ struct ReplyToken {
     pub seq: u32,
 }
 
+struct ReplySignal {
+    seq: u32,
+    resp: Result<Resp, Error>,
+}
+
 const REPLY_SLOTS: usize = 4;
 
 // Each slot carries (seq, Resp). seq prevents stale wakeups.
-static REPLY_SIGNALS: [Signal<CriticalSectionRawMutex, (u32, Resp)>; REPLY_SLOTS] =
+static REPLY_SIGNALS: [Signal<CriticalSectionRawMutex, ReplySignal>; REPLY_SLOTS] =
     [Signal::new(), Signal::new(), Signal::new(), Signal::new()];
 
 // Semaphore limits number of in-flight requests to REPLY_SLOTS.
@@ -333,7 +435,6 @@ fn release_slot_locked(bitmap: &mut u32, slot: u8) {
 
 enum Resp {
     Ok,
-    Error,
     ReadToString { data: String },
     Read { data: Vec<u8> },
     FileOpen { handle: FileHandle },
@@ -375,12 +476,14 @@ impl Files {
         }
     }
 
-    pub fn remove(&mut self, handle: FileHandle) -> Option<File> {
-        self.files.remove(&handle.0)
+    pub fn remove(&mut self, handle: FileHandle) -> Result<File, Error> {
+        self.files.remove(&handle.0).ok_or(Error::InvalidFileHandle)
     }
 
-    pub fn get(&mut self, handle: &FileHandle) -> Option<&mut File> {
-        self.files.get_mut(&handle.0)
+    pub fn get(&mut self, handle: &FileHandle) -> Result<&mut File, Error> {
+        self.files
+            .get_mut(&handle.0)
+            .ok_or(Error::InvalidFileHandle)
     }
 }
 
@@ -395,7 +498,7 @@ impl ReplyPool {
         // Claim an actual slot id.
         let slot = {
             let mut bm = SLOT_BITMAP.lock().await;
-            claim_slot_locked(&mut *bm)
+            claim_slot_locked(&mut bm)
         };
 
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -403,16 +506,16 @@ impl ReplyPool {
     }
 
     /// Wait for completion of a specific token; releases the slot afterwards.
-    pub async fn wait(token: ReplyToken) -> Resp {
+    pub async fn wait(token: ReplyToken) -> Result<Resp, Error> {
         let slot = token.slot as usize;
 
         loop {
-            let (got_seq, resp) = REPLY_SIGNALS[slot].wait().await;
-            if got_seq == token.seq {
+            let ReplySignal { seq, resp } = REPLY_SIGNALS[slot].wait().await;
+            if seq == token.seq {
                 // Release slot back to pool.
                 {
                     let mut bm = SLOT_BITMAP.lock().await;
-                    release_slot_locked(&mut *bm, token.slot);
+                    release_slot_locked(&mut bm, token.slot);
                 }
                 FREE_SLOTS.release(1);
                 return resp;
@@ -422,102 +525,116 @@ impl ReplyPool {
     }
 
     /// Actor-side: complete a request.
-    pub fn complete(token: ReplyToken, resp: Resp) {
-        REPLY_SIGNALS[token.slot as usize].signal((token.seq, resp));
+    pub fn complete(token: ReplyToken, resp: Result<Resp, Error>) {
+        let signal = ReplySignal {
+            seq: token.seq,
+            resp,
+        };
+        REPLY_SIGNALS[token.slot as usize].signal(signal);
     }
 }
 
-pub async fn fs_actor_task<D: BlockDevice>(device: D) -> Result<(), ExFatError<D>> {
-    let mut file_system = FileSystem::new(device).await?;
+pub trait ErrorCode {
+    fn to_error_code(&self) -> u8;
+}
+
+pub async fn fs_actor_task<D>(mut device: D)
+where
+    D: BlockDevice,
+    D::Error: ErrorCode,
+{
+    let rx = REQ.receiver();
+
+    let metadata = loop {
+        // there may be no sd card inserted so every request should reattempt to read the file system
+        match read_file_system_metadata(&mut device).await {
+            Ok(metadata) => break metadata,
+            Err(e) => {
+                let req = rx.receive().await;
+                ReplyPool::complete(req.reply, Err(e.into()));
+            }
+        }
+    };
+
+    let mut file_system = FileSystem::new_inner(device, metadata);
+
     let mut files: Files = Files::new();
 
-    let rx = REQ.receiver();
     loop {
-        let req = rx.receive().await;
-
-        let resp = match req.op {
-            Op::ReadToString { path } => {
-                let data = file_system.read_to_string(&path).await?;
-                Resp::ReadToString { data }
-            }
-            Op::Read { path } => {
-                let data = file_system.read(&path).await?;
-                Resp::Read { data }
-            }
-            Op::OpenFile { path, options } => {
-                let file = file_system.open(&path, options).await?;
-                let handle = files.add(file).unwrap();
-                Resp::FileOpen { handle }
-            }
-            Op::ReadFileToString { handle } => {
-                if let Some(file) = files.get(&handle) {
-                    let data = file.read_to_string(&mut file_system).await?;
-                    Resp::ReadToString { data }
-                } else {
-                    Resp::Error
-                }
-            }
-            Op::ReadFileToEnd { handle } => {
-                if let Some(file) = files.get(&handle) {
-                    let mut data = Vec::new();
-                    file.read_to_end(&mut file_system, &mut data).await?;
-                    Resp::Read { data }
-                } else {
-                    Resp::Error
-                }
-            }
-            Op::SeekFile { handle, position } => {
-                if let Some(file) = files.get(&handle) {
-                    file.seek(&mut file_system, position).await?;
-                    Resp::Ok
-                } else {
-                    Resp::Error
-                }
-            }
-            Op::ReadFile { handle, len } => {
-                if let Some(file) = files.get(&handle) {
-                    let mut data = vec![0u8; len];
-                    file.read(&mut file_system, &mut data).await?;
-                    Resp::Read { data }
-                } else {
-                    Resp::Error
-                }
-            }
-            Op::WriteFile { handle, buffer } => {
-                if let Some(file) = files.get(&handle) {
-                    file.write(&mut file_system, &buffer).await?;
-                    Resp::Ok
-                } else {
-                    Resp::Error
-                }
-            }
-            Op::CloseFile { handle } => {
-                if let Some(file) = files.remove(handle) {
-                    file.close().await?;
-                    Resp::Ok
-                } else {
-                    Resp::Error
-                }
-            }
-            Op::FlushFile { handle } => {
-                if let Some(file) = files.get(&handle) {
-                    file.flush().await?;
-                    Resp::Ok
-                } else {
-                    Resp::Error
-                }
-            }
-            Op::Metadata { handle } => {
-                if let Some(file) = files.get(&handle) {
-                    let data = file.metadata();
-                    Resp::Metadata { data }
-                } else {
-                    Resp::Error
-                }
-            }
-        };
+        let Req { op, reply } = rx.receive().await;
+        let resp = handle_req(op, &mut file_system, &mut files).await;
 
         // Complete the oneshot for this request.
-        ReplyPool::complete(req.reply, resp);
+        ReplyPool::complete(reply, resp);
     }
+}
+
+async fn handle_req<D>(
+    op: Op,
+    file_system: &mut FileSystem<D>,
+    files: &mut Files,
+) -> Result<Resp, Error>
+where
+    D: BlockDevice,
+    D::Error: ErrorCode,
+{
+    let resp = match op {
+        Op::ReadToString { path } => {
+            let data = file_system.read_to_string(&path).await?;
+            Resp::ReadToString { data }
+        }
+        Op::Read { path } => {
+            let data = file_system.read(&path).await?;
+            Resp::Read { data }
+        }
+        Op::OpenFile { path, options } => {
+            let file = file_system.open(&path, options).await?;
+            let handle = files.add(file).unwrap();
+            Resp::FileOpen { handle }
+        }
+        Op::ReadFileToString { handle } => {
+            let file = files.get(&handle)?;
+            let data = file.read_to_string(file_system).await?;
+            Resp::ReadToString { data }
+        }
+        Op::ReadFileToEnd { handle } => {
+            let file = files.get(&handle)?;
+            let mut data = Vec::new();
+            file.read_to_end(file_system, &mut data).await?;
+            Resp::Read { data }
+        }
+        Op::SeekFile { handle, position } => {
+            let file = files.get(&handle)?;
+            file.seek(file_system, position).await?;
+            Resp::Ok
+        }
+        Op::ReadFile { handle, len } => {
+            let file = files.get(&handle)?;
+            let mut data = vec![0u8; len];
+            file.read(file_system, &mut data).await?;
+            Resp::Read { data }
+        }
+        Op::WriteFile { handle, buffer } => {
+            let file = files.get(&handle)?;
+            file.write(file_system, &buffer).await?;
+            Resp::Ok
+        }
+        Op::CloseFile { handle } => {
+            let file = files.remove(handle)?;
+            file.close::<D>().await?;
+            Resp::Ok
+        }
+        Op::FlushFile { handle } => {
+            let file = files.get(&handle)?;
+            file.flush::<D>().await?;
+            Resp::Ok
+        }
+        Op::Metadata { handle } => {
+            let file = files.get(&handle)?;
+            let data = file.metadata();
+            Resp::Metadata { data }
+        }
+    };
+
+    Ok(resp)
 }

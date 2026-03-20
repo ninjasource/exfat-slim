@@ -84,6 +84,12 @@ pub struct FileSystem<D: BlockDevice> {
     pub(crate) alloc_bitmap: AllocationBitmap,
 }
 
+pub(crate) struct FileSystemMetadata {
+    details: FileSystemDetails,
+    upcase_table: UpcaseTable,
+    alloc_bitmap: AllocationBitmap,
+}
+
 impl<D: BlockDevice> FileSystem<D> {
     pub const fn empty(io: D) -> Self {
         let fs = FileSystemDetails::empty();
@@ -101,11 +107,9 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Reads the boot sector using the block device and initializes the file system returning an instance of it
     #[bisync]
     pub async fn new(mut io: D) -> Result<Self, ExFatError<D>> {
-        // the boot sector is always at sector_id 0 and everything is relative from there
-        // you need to offset the sector_id in your block device if there is a master boot record before this
-        let boot_sector = read_boot_sector(&mut io, 0).await?;
-        let details = FileSystemDetails::new(&boot_sector);
-        let fs = read_root_dir(io, details).await?;
+        let metadata = read_file_system_metadata(&mut io).await?;
+
+        let fs = Self::new_inner(io, metadata);
         Ok(fs)
     }
 
@@ -598,12 +602,12 @@ impl<D: BlockDevice> FileSystem<D> {
         Ok(file_details)
     }
 
-    fn new_inner(
-        dev: D,
-        details: FileSystemDetails,
-        upcase_table: UpcaseTable,
-        alloc_bitmap: AllocationBitmap,
-    ) -> Self {
+    pub(crate) fn new_inner(dev: D, metadata: FileSystemMetadata) -> Self {
+        let FileSystemMetadata {
+            details,
+            upcase_table,
+            alloc_bitmap,
+        } = metadata;
         Self {
             dev,
             fs: details,
@@ -912,10 +916,14 @@ async fn read_boot_sector<D: BlockDevice>(
 }
 
 #[bisync]
-async fn read_root_dir<D: BlockDevice>(
-    mut io: D,
-    details: FileSystemDetails,
-) -> Result<FileSystem<D>, ExFatError<D>> {
+pub(crate) async fn read_file_system_metadata<D: BlockDevice>(
+    io: &mut D,
+) -> Result<FileSystemMetadata, ExFatError<D>> {
+    // the boot sector is always at sector_id 0 and everything is relative from there
+    // you need to offset the sector_id in your block device if there is a master boot record before this
+    let boot_sector = read_boot_sector(io, 0).await?;
+    let details = FileSystemDetails::new(&boot_sector);
+
     let cluster_id = details.first_cluster_of_root_dir;
     let sector_id = details.get_heap_sector_id(cluster_id)?;
     let mut block = [0u8; BLOCK_SIZE];
@@ -986,14 +994,15 @@ async fn read_root_dir<D: BlockDevice>(
 
     let mut upcase_table = UpcaseTable::default();
     upcase_table
-        .load(&upcase_table_dir_entry, &details, &mut io)
+        .load(&upcase_table_dir_entry, &details, io)
         .await?;
 
     let alloc_bitmap = AllocationBitmap::new(&allocation_bitmap_dir_entry);
-
-    let file_system = FileSystem::new_inner(io, details, upcase_table, alloc_bitmap);
-
-    Ok(file_system)
+    Ok(FileSystemMetadata {
+        details,
+        upcase_table,
+        alloc_bitmap,
+    })
 }
 
 /*
