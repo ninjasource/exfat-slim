@@ -11,7 +11,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     info!("reading root dir:");
 
     let io = InMemoryBlockDevice::new();
-    let mut fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io);
 
     let path = ""; // root dir
     let mut dir = fs.read_dir(path).await?;

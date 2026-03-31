@@ -10,7 +10,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     color_backtrace::install();
 
     let io = InMemoryBlockDevice::new();
-    let mut fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io);
 
     // rename file
     fs.rename("/temp2/test6.txt", "/temp2/test6x.txt").await?;

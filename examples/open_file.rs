@@ -10,7 +10,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     color_backtrace::install();
 
     let io = InMemoryBlockDevice::new();
-    let mut fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io);
     let path = "foo.txt";
 
     // create a new file and write "hello world" to it

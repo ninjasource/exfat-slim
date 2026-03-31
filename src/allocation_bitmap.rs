@@ -8,11 +8,14 @@
 /// cluster  9  8  7  6  5  4  3  2 17 16 15 14 13 12 11 10 25 24 23 22 21 20 19 18 33 32 31 30 29 28 27 26
 /// NOTE: the above layout is not obvious from the spec but it has been confirmed with how the windows implementation writes the bits.
 /// for example an allocation bitmap of this bit string "11111111 11111111 00000111" means that clusters 2 - 20 inclusive are allocated. That is 19 clusters in total.
+/// Quote from the microsoft spec section 7.1.5 Note "The first bit in the bitmap is the lowest-order bit of the first byte."
 ///
 /// NOTE: I encountered what appears to be a logic error in the linux kernel exfat implementation where bits are incorrectly counted from MSB to LSB and not the other way around when locating free allocations.
 /// this does not affect the allocation bitmap write consistency but could possibly lead to unnecessary fragmentation
 ///
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
+
+use crate::info;
 
 use super::{
     bisync,
@@ -75,6 +78,11 @@ impl AllocationBitmap {
     ) -> Result<(), ExFatError<D>> {
         let mut by_sector_id = BTreeMap::<u32, Vec<usize>>::new();
         let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
+        crate::info!(
+            "mark_allocated {} cluster_ids: {:?}",
+            allocated,
+            cluster_ids
+        );
 
         for cluster_id in cluster_ids {
             let (sector_id, index) = Self::calc_allocation_position(first_sector_id, *cluster_id)?;
@@ -98,6 +106,13 @@ impl AllocationBitmap {
         let mut by_sector_id = BTreeMap::<u32, Vec<usize>>::new();
         let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
 
+        crate::info!(
+            "mark_allocated_contiguous {} first_cluster: {} num_clusters: {}",
+            allocated,
+            first_cluster,
+            num_clusters
+        );
+
         for cluster_id in first_cluster..first_cluster + num_clusters {
             let (sector_id, index) = Self::calc_allocation_position(first_sector_id, cluster_id)?;
             by_sector_id.entry(sector_id).or_default().push(index);
@@ -117,9 +132,17 @@ impl AllocationBitmap {
     ) -> Result<(), ExFatError<D>> {
         let mut block = [0u8; BLOCK_SIZE];
         for (sector_id, indices) in by_sector_id {
+            crate::info!("sector {} indices {:?}", sector_id, indices);
             io.read(*sector_id, &mut block)
                 .await
                 .map_err(ExFatError::Io)?;
+            crate::info!(
+                "sector {} indices {:?} block[..16]: {:?}",
+                sector_id,
+                indices,
+                &block[..16]
+            );
+
             for index in indices {
                 let byte = &mut block[index / 8];
                 let bit = index % 8;
@@ -127,7 +150,12 @@ impl AllocationBitmap {
 
                 // an attempt to change the allocation that will have no effect
                 if allocated && is_set || !allocated && !is_set {
-                    return Err(ExFatError::InvalidAllocation);
+                    return Err(ExFatError::InvalidAllocation {
+                        lba: *sector_id,
+                        index: *index,
+                        allocated: is_set,
+                        allocated_new: allocated,
+                    });
                 }
 
                 if allocated {
@@ -201,12 +229,20 @@ impl AllocationBitmap {
         num_clusters: u32,
         from_cluster: u32,
     ) -> Result<Allocation, ExFatError<D>> {
-        let sector_id = fs.get_heap_sector_id(from_cluster)?;
+        let sector_id = fs.get_heap_sector_id(self.first_cluster)?;
+
+        //let sector_id = fs.get_heap_sector_id(from_cluster)?;
         let sector_index = (from_cluster - 2) / BLOCK_SIZE as u32;
         let mut cluster_id = sector_index * BLOCK_SIZE as u32 + 2;
         let mut first_cluster = None;
         let mut count = 0;
         let mut block = [0u8; BLOCK_SIZE];
+
+        crate::info!(
+            "find_free_clusters_contiguous_from num_clusters {} from_cluster {}",
+            num_clusters,
+            from_cluster,
+        );
 
         for sector_offset in sector_index..self.num_sectors {
             io.read(sector_id + sector_offset, &mut block)
@@ -232,6 +268,7 @@ impl AllocationBitmap {
                                 }
 
                                 if count == num_clusters {
+                                    crate::info!("first_cluster {:?}", first_cluster);
                                     return Ok(Allocation::Contiguous {
                                         first_cluster: first_cluster.unwrap(),
                                         num_clusters,
@@ -325,6 +362,13 @@ impl AllocationBitmap {
         only_fat_chain: bool,
         current_cluster: Option<u32>,
     ) -> Result<Allocation, ExFatError<D>> {
+        crate::info!(
+            "find_free_clusters num_clusters {} only_fat_chain {} current_cluster {:?}",
+            num_clusters,
+            only_fat_chain,
+            current_cluster
+        );
+
         if only_fat_chain {
             self.find_free_clusters_non_contiguous(io, fs, num_clusters, current_cluster)
                 .await
@@ -348,6 +392,7 @@ impl AllocationBitmap {
             match allocation {
                 Ok(alocation) => Ok(alocation),
                 Err(ExFatError::DiskFull) => {
+                    info!("cannot find continuous allocation, attempting to use FAT");
                     // we were unable to find a coniguous allocation
                     self.find_free_clusters_non_contiguous(io, fs, num_clusters, current_cluster)
                         .await

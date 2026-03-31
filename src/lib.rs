@@ -35,6 +35,7 @@ pub mod asynchronous {
     mod fat;
     pub mod file;
     pub mod file_system;
+    #[cfg(feature = "embassy")]
     pub mod fs;
     pub mod io;
     mod upcase_table;
@@ -42,4 +43,37 @@ pub mod asynchronous {
 
     //#[cfg(test)]
     //mod mocks;
+}
+
+#[cfg(all(feature = "log", feature = "defmt"))]
+compile_error!("features `log` and `defmt` are mutually exclusive");
+
+#[cfg(feature = "defmt")]
+pub use defmt::{debug, error, info, trace, warn};
+
+#[cfg(all(feature = "log", not(feature = "defmt")))]
+pub use log::{debug, error, info, trace, warn};
+
+#[cfg(not(any(feature = "log", feature = "defmt")))]
+mod no_log {
+    #[macro_export]
+    macro_rules! error {
+        ($($tt:tt)*) => {};
+    }
+    #[macro_export]
+    macro_rules! warn {
+        ($($tt:tt)*) => {};
+    }
+    #[macro_export]
+    macro_rules! info {
+        ($($tt:tt)*) => {};
+    }
+    #[macro_export]
+    macro_rules! debug {
+        ($($tt:tt)*) => {};
+    }
+    #[macro_export]
+    macro_rules! trace {
+        ($($tt:tt)*) => {};
+    }
 }

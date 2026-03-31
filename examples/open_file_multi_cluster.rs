@@ -22,7 +22,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     color_backtrace::install();
 
     let io = InMemoryBlockDevice::new();
-    let mut fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io);
     let path = "/temp2/test7.txt";
 
     let options = OpenOptions::new().write(true).create(true).truncate(true);

@@ -59,7 +59,12 @@ pub enum ExFatError<D: BlockDevice> {
     SeekOutOfRange,
 
     #[error("attempt to change the allocation bitmap to a value with no effect")]
-    InvalidAllocation,
+    InvalidAllocation {
+        lba: u32,
+        index: usize,
+        allocated: bool,
+        allocated_new: bool,
+    },
 
     #[error("the combination of flags set when opening the file is not valid")]
     InvalidOptions,

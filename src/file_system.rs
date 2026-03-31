@@ -79,6 +79,7 @@ impl FileSystemDetails {
 #[derive(Debug)]
 pub struct FileSystem<D: BlockDevice> {
     pub(crate) dev: D,
+    pub(crate) is_mounted: bool,
     pub(crate) fs: FileSystemDetails,
     pub(crate) upcase_table: UpcaseTable,
     pub(crate) alloc_bitmap: AllocationBitmap,
@@ -91,7 +92,7 @@ pub(crate) struct FileSystemMetadata {
 }
 
 impl<D: BlockDevice> FileSystem<D> {
-    pub const fn empty(io: D) -> Self {
+    pub const fn new(io: D) -> Self {
         let fs = FileSystemDetails::empty();
         let upcase_table = UpcaseTable::empty();
         let alloc_bitmap = AllocationBitmap::empty();
@@ -101,20 +102,55 @@ impl<D: BlockDevice> FileSystem<D> {
             fs,
             upcase_table,
             alloc_bitmap,
+            is_mounted: false,
         }
     }
 
+    /// Calling this is optional as the file system will be automatically mounted upon first use if it is not already mounted
     /// Reads the boot sector using the block device and initializes the file system returning an instance of it
     #[bisync]
-    pub async fn new(mut io: D) -> Result<Self, ExFatError<D>> {
-        let metadata = read_file_system_metadata(&mut io).await?;
+    pub async fn mount(&mut self) -> Result<(), ExFatError<D>> {
+        if self.is_mounted {
+            return Ok(());
+        }
 
-        let fs = Self::new_inner(io, metadata);
-        Ok(fs)
+        let FileSystemMetadata {
+            details,
+            upcase_table,
+            alloc_bitmap,
+        } = read_file_system_metadata(&mut self.dev).await?;
+        self.fs = details;
+        self.upcase_table = upcase_table;
+        self.alloc_bitmap = alloc_bitmap;
+        self.is_mounted = true;
+        Ok(())
     }
 
     #[bisync]
     pub async fn open(&mut self, path: &str, options: OpenOptions) -> Result<File, ExFatError<D>> {
+        self.mount().await?;
+
+        let mut buf = [0u8; 512];
+        if let Ok(lba) = self
+            .fs
+            .get_heap_sector_id::<D>(self.alloc_bitmap.first_cluster)
+        {
+            self.dev.read(lba, &mut buf).await.unwrap();
+            crate::info!("alloc bitmap: {:?}", buf);
+        }
+
+        self.dev.read(self.fs.fat_offset, &mut buf).await.unwrap();
+        crate::info!("fat table: {:?}", buf);
+
+        let mut buf = [0u8; 512];
+        if let Ok(lba) = self
+            .fs
+            .get_heap_sector_id::<D>(self.fs.first_cluster_of_root_dir)
+        {
+            self.dev.read(lba, &mut buf).await.unwrap();
+            crate::info!("root dir: {:?}", buf);
+        }
+
         // attempt to get the file details
         let file_details = self
             .find_file_or_directory(path, Some(FileAttributes::Archive))
@@ -123,6 +159,9 @@ impl<D: BlockDevice> FileSystem<D> {
         // get file details or create if required
         let file_details = match file_details {
             Ok(mut file_details) => {
+                crate::info!("file system details: {:?}", self.fs);
+                crate::info!("file details: {:?}", file_details);
+
                 if options.create_new {
                     return Err(ExFatError::AlreadyExists);
                 }
@@ -143,7 +182,19 @@ impl<D: BlockDevice> FileSystem<D> {
             Err(e) => return Err(e),
         };
 
-        Ok(File::new(&file_details, &options))
+        let cluster_id = if options.append {
+            let cursor = file_details.data_length;
+            self.get_cluster_id_at(cursor, &file_details).await?
+        } else {
+            file_details.first_cluster
+        };
+
+        Ok(File::new(
+            &file_details,
+            cluster_id,
+            self.fs.cluster_length,
+            &options,
+        ))
     }
 
     /// Returns true if the file or directory exists
@@ -151,6 +202,8 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Symbolic link following is not supported
     #[bisync]
     pub async fn exists(&mut self, path: &str) -> Result<bool, ExFatError<D>> {
+        self.mount().await?;
+
         match self.find_file_or_directory(path, None).await {
             Ok(_file) => Ok(true),
             Err(ExFatError::FileNotFound) => Ok(false),
@@ -164,6 +217,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Supports nested paths
     #[bisync]
     pub async fn read(&mut self, path: &str) -> Result<Vec<u8>, ExFatError<D>> {
+        self.mount().await?;
         let options = OpenOptions::new().read(true);
         let mut file = self.open(path, options).await?;
         //let mut file = self.with_options().read(true).open(path).await?;
@@ -177,6 +231,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Supports nested paths
     #[bisync]
     pub async fn read_to_string(&mut self, path: &str) -> Result<String, ExFatError<D>> {
+        self.mount().await?;
         let options = OpenOptions::new().read(true);
         let mut file = self.open(path, options).await?;
         file.read_to_string(self).await
@@ -187,6 +242,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Supports nested paths
     #[bisync]
     pub async fn read_dir(&mut self, path: &str) -> Result<DirectoryIterator, ExFatError<D>> {
+        self.mount().await?;
         directory_list(self, path).await
     }
 
@@ -195,6 +251,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Returns an error if the file does not exist or something else failed
     #[bisync]
     pub async fn remove_file(&mut self, path: &str) -> Result<(), ExFatError<D>> {
+        self.mount().await?;
         let file_details = self
             .find_file_inner(path, Some(FileAttributes::Archive))
             .await?;
@@ -207,6 +264,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// The dir path can be nested
     #[bisync]
     pub async fn create_directory(&mut self, path: &str) -> Result<(), ExFatError<D>> {
+        self.mount().await?;
         // find directory or recursively create it if it does not already exist
         let _cluster_id = self.get_or_create_directory(path).await?;
         Ok(())
@@ -218,6 +276,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// File attributes will also be copied but timestamps will be new
     #[bisync]
     pub async fn copy(&mut self, from_path: &str, to_path: &str) -> Result<(), ExFatError<D>> {
+        self.mount().await?;
         if from_path == to_path {
             return Err(ExFatError::InvalidFileName {
                 reason: "cannot copy file to the same exact location",
@@ -237,6 +296,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// If the to_path contains directories that don't yet exist they will be created.
     #[bisync]
     pub async fn rename(&mut self, from_path: &str, to_path: &str) -> Result<(), ExFatError<D>> {
+        self.mount().await?;
         // in exFAT a directory cannot have a directory and file with the same name in it so no need to filter here
         let file_details = self.find_file_inner(from_path, None).await?;
 
@@ -274,6 +334,7 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Will return an error if the directory does not exist or is not empty
     #[bisync]
     pub async fn remove_dir(&mut self, path: &str) -> Result<(), ExFatError<D>> {
+        self.mount().await?;
         let file_details = self
             .find_file_inner(path, Some(FileAttributes::Directory))
             .await?;
@@ -292,6 +353,7 @@ impl<D: BlockDevice> FileSystem<D> {
         path: &str,
         contents: impl AsRef<[u8]>,
     ) -> Result<(), ExFatError<D>> {
+        self.mount().await?;
         // delete the file if it already exists
         match self
             .find_file_inner(path, Some(FileAttributes::Archive))
@@ -442,6 +504,8 @@ impl<D: BlockDevice> FileSystem<D> {
             }
         };
 
+        crate::info!("file system details: {:?}", self.fs);
+        crate::info!("file details: {:?}", file_details);
         Ok(file_details)
     }
 
@@ -602,18 +666,8 @@ impl<D: BlockDevice> FileSystem<D> {
         Ok(file_details)
     }
 
-    pub(crate) fn new_inner(dev: D, metadata: FileSystemMetadata) -> Self {
-        let FileSystemMetadata {
-            details,
-            upcase_table,
-            alloc_bitmap,
-        } = metadata;
-        Self {
-            dev,
-            fs: details,
-            upcase_table,
-            alloc_bitmap,
-        }
+    pub fn unmount(self) -> D {
+        self.dev
     }
 
     #[inline(always)]
@@ -731,6 +785,39 @@ impl<D: BlockDevice> FileSystem<D> {
         }
 
         Ok(clusters)
+    }
+
+    #[bisync]
+    async fn get_cluster_id_at(
+        &mut self,
+        cursor: u64,
+        file_details: &FileDetails,
+    ) -> Result<u32, ExFatError<D>> {
+        if cursor == 0 {
+            return Ok(file_details.first_cluster);
+        }
+
+        let num_clusters = (cursor / self.fs.cluster_length as u64) as u32;
+
+        if file_details
+            .flags
+            .contains(GeneralSecondaryFlags::NoFatChain)
+        {
+            let cluster_id = file_details.first_cluster + num_clusters;
+            Ok(cluster_id)
+        } else {
+            let mut cluster_id = file_details.first_cluster;
+            for _i in 0..num_clusters {
+                if let Some(x) =
+                    next_cluster_in_fat_chain(&mut self.dev, self.fs.fat_offset, cluster_id).await?
+                {
+                    cluster_id = x;
+                } else {
+                    return Err(ExFatError::EndOfFatChain);
+                }
+            }
+            Ok(cluster_id)
+        }
     }
 
     #[bisync]

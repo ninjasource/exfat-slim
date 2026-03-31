@@ -11,7 +11,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     info!("reading file");
 
     let io = InMemoryBlockDevice::new();
-    let mut fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io);
     let contents = fs.read_to_string("/temp2/hello2/shoe/test.txt").await?;
     info!("{contents}");
 

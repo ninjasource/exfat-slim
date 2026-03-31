@@ -8,6 +8,8 @@ use alloc::{
     vec,
     vec::Vec,
 };
+
+use crate::info;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::Channel,
@@ -17,10 +19,12 @@ use embassy_sync::{
 };
 
 use crate::asynchronous::{
-    boot_sector, directory_entry,
+    boot_sector,
+    directory::{DirectoryEntry, DirectoryIterator},
+    directory_entry::{self},
     error::ExFatError,
     file::{File, Metadata, OpenOptions},
-    file_system::{FileSystem, read_file_system_metadata},
+    file_system::FileSystem,
     io::BlockDevice,
 };
 
@@ -34,6 +38,9 @@ static REQ: Channel<CriticalSectionRawMutex, Req, 8> = Channel::new();
 pub enum Error {
     #[error("io error code {error_code}")]
     Io { error_code: u8 },
+
+    #[error("no sd card")]
+    NoCard,
 
     #[error("directory entry ({0:?})")]
     DirectoryEntry(#[from] directory_entry::Error),
@@ -87,7 +94,12 @@ pub enum Error {
     SeekOutOfRange,
 
     #[error("attempt to change the allocation bitmap to a value with no effect")]
-    InvalidAllocation,
+    InvalidAllocation {
+        allocated: bool,
+        allocated_new: bool,
+        index: usize,
+        lba: u32,
+    },
 
     #[error("the combination of flags set when opening the file is not valid")]
     InvalidOptions,
@@ -105,13 +117,19 @@ pub enum Error {
 impl<D> From<ExFatError<D>> for Error
 where
     D: BlockDevice,
-    D::Error: ErrorCode,
+    D::Error: BlockDeviceError,
 {
     fn from(value: ExFatError<D>) -> Self {
         match value {
-            ExFatError::Io(e) => Error::Io {
-                error_code: e.to_error_code(),
-            },
+            ExFatError::Io(e) => {
+                if e.no_card() {
+                    Error::NoCard
+                } else {
+                    Error::Io {
+                        error_code: e.to_error_code(),
+                    }
+                }
+            }
             ExFatError::AlreadyExists => Error::AlreadyExists,
             ExFatError::DirectoryEntry(e) => Error::DirectoryEntry(e),
             ExFatError::DirectoryNotEmpty => Error::DirectoryNotEmpty,
@@ -119,7 +137,17 @@ where
             ExFatError::DiskFull => Error::DiskFull,
             ExFatError::EndOfFatChain => Error::EndOfFatChain,
             ExFatError::FileNotFound => Error::FileNotFound,
-            ExFatError::InvalidAllocation => Error::InvalidAllocation,
+            ExFatError::InvalidAllocation {
+                allocated,
+                allocated_new,
+                index,
+                lba,
+            } => Error::InvalidAllocation {
+                allocated,
+                allocated_new,
+                index,
+                lba,
+            },
             ExFatError::InvalidClusterId(id) => Error::InvalidClusterId(id),
             ExFatError::InvalidFileName { reason } => Error::InvalidFileName { reason },
             ExFatError::InvalidFileSystem { reason } => Error::InvalidFileSystem { reason },
@@ -167,11 +195,34 @@ enum Op {
     CloseFile { handle: FileHandle },
     FlushFile { handle: FileHandle },
     Metadata { handle: FileHandle },
+    OpenDirectory { path: String },
+    DirectoryNextEntry { handle: DirectoryHandle },
 }
 
 struct Req {
     op: Op,
     reply: ReplyToken,
+}
+
+pub struct DirectoryHandle(u32);
+
+impl DirectoryHandle {
+    pub async fn next_entry(&self) -> Result<Option<DirectoryEntry>, Error> {
+        let token = ReplyPool::acquire().await;
+        let req = Req {
+            op: Op::DirectoryNextEntry {
+                handle: DirectoryHandle(self.0),
+            },
+            reply: token,
+        };
+        REQ.send(req).await;
+        let resp = ReplyPool::wait(token).await?;
+
+        match resp {
+            Resp::DirectoryEntry { data } => Ok(data),
+            _ => Err(Error::UnexpectedResponse),
+        }
+    }
 }
 
 pub struct FileHandle(u32);
@@ -388,6 +439,23 @@ pub async fn read(path: &str) -> Result<Vec<u8>, Error> {
     }
 }
 
+pub async fn read_dir(path: &str) -> Result<DirectoryHandle, Error> {
+    let token = ReplyPool::acquire().await;
+    let req = Req {
+        op: Op::OpenDirectory {
+            path: path.to_string(),
+        },
+        reply: token,
+    };
+    REQ.send(req).await;
+    let resp = ReplyPool::wait(token).await?;
+
+    match resp {
+        Resp::DirectoryOpen { handle } => Ok(handle),
+        _ => Err(Error::UnexpectedResponse),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ReplyToken {
     pub slot: u8,
@@ -438,14 +506,76 @@ enum Resp {
     ReadToString { data: String },
     Read { data: Vec<u8> },
     FileOpen { handle: FileHandle },
+    DirectoryOpen { handle: DirectoryHandle },
     Metadata { data: Metadata },
+    DirectoryEntry { data: Option<DirectoryEntry> },
+}
+
+/*
+struct Directories {
+    dirs: BTreeMap<u32, DirectoryEntryChain>,
+    next_handle: u32,
 }
 
 struct Files {
     files: BTreeMap<u32, File>,
     next_handle: u32,
 }
+*/
 
+struct Handles<T> {
+    handles: BTreeMap<u32, T>,
+    next_handle: u32,
+}
+
+impl<T> Handles<T> {
+    fn new() -> Self {
+        Self {
+            handles: BTreeMap::new(),
+            next_handle: 0,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.handles.clear();
+        // don't reset the handle back to 0 because there might be old handles still out there
+    }
+
+    pub fn add(&mut self, item: T) -> Result<u32, Error> {
+        let mut counter: u32 = 0;
+        loop {
+            let handle = self.next_handle.wrapping_add(1);
+            self.next_handle = handle;
+
+            match self.handles.entry(handle) {
+                Entry::Occupied(_) => {
+                    // file is still available here because it was not moved
+                }
+                Entry::Vacant(v) => {
+                    v.insert(item); // moved only if key was absent
+                    return Ok(handle);
+                }
+            }
+
+            counter += 1;
+            if counter == u32::MAX {
+                return Err(Error::ExhaustedFileHandles);
+            }
+        }
+    }
+
+    pub fn remove(&mut self, handle: u32) -> Result<T, Error> {
+        self.handles.remove(&handle).ok_or(Error::InvalidFileHandle)
+    }
+
+    pub fn get(&mut self, handle: u32) -> Result<&mut T, Error> {
+        self.handles
+            .get_mut(&handle)
+            .ok_or(Error::InvalidFileHandle)
+    }
+}
+
+/*
 impl Files {
     pub fn new() -> Self {
         Self {
@@ -454,10 +584,16 @@ impl Files {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.files.clear();
+        // don't reset the handle back to 0 because there might be old handles still out there
+    }
+
     pub fn add(&mut self, file: File) -> Result<FileHandle, Error> {
         let mut counter: u32 = 0;
         loop {
             let handle = self.next_handle.wrapping_add(1);
+            self.next_handle = handle;
 
             match self.files.entry(handle) {
                 Entry::Occupied(_) => {
@@ -486,7 +622,7 @@ impl Files {
             .ok_or(Error::InvalidFileHandle)
     }
 }
-
+*/
 struct ReplyPool;
 
 impl ReplyPool {
@@ -534,50 +670,106 @@ impl ReplyPool {
     }
 }
 
-pub trait ErrorCode {
+pub trait BlockDeviceError {
     fn to_error_code(&self) -> u8;
+    fn no_card(&self) -> bool;
 }
 
-pub async fn fs_actor_task<D>(mut device: D)
-where
-    D: BlockDevice,
-    D::Error: ErrorCode,
-{
-    let rx = REQ.receiver();
+struct FsManager<D: BlockDevice> {
+    dev: Option<D>,
+    file_system: Option<FileSystem<D>>,
+    files: Handles<File>,
+    directories: Handles<DirectoryIterator>,
+}
 
-    let metadata = loop {
-        // there may be no sd card inserted so every request should reattempt to read the file system
-        match read_file_system_metadata(&mut device).await {
-            Ok(metadata) => break metadata,
-            Err(e) => {
-                let req = rx.receive().await;
-                ReplyPool::complete(req.reply, Err(e.into()));
-            }
+impl<D: BlockDevice> FsManager<D> {
+    pub fn new(dev: D) -> Self {
+        Self {
+            dev: Some(dev),
+            file_system: None,
+            files: Handles::new(),
+            directories: Handles::new(),
         }
-    };
+    }
 
-    let mut file_system = FileSystem::new_inner(device, metadata);
+    pub async fn mount(
+        &mut self,
+    ) -> Result<
+        (
+            &mut FileSystem<D>,
+            &mut Handles<File>,
+            &mut Handles<DirectoryIterator>,
+        ),
+        ExFatError<D>,
+    > {
+        if let Some(dev) = self.dev.take() {
+            let mut file_system = FileSystem::new(dev);
+            info!("mounting file system");
+            match file_system.mount().await {
+                Ok(()) => {
+                    self.files.clear();
+                    self.file_system = Some(file_system);
+                    Ok((
+                        self.file_system.as_mut().unwrap(),
+                        &mut self.files,
+                        &mut self.directories,
+                    ))
+                }
+                Err(e) => {
+                    let dev = file_system.unmount();
+                    self.dev = Some(dev);
+                    return Err(e);
+                }
+            }
+        } else if let Some(file_system) = self.file_system.as_mut() {
+            return Ok((file_system, &mut self.files, &mut self.directories));
+        } else {
+            panic!("neither dev or file_system are set")
+        }
+    }
 
-    let mut files: Files = Files::new();
-
-    loop {
-        let Req { op, reply } = rx.receive().await;
-        let resp = handle_req(op, &mut file_system, &mut files).await;
-
-        // Complete the oneshot for this request.
-        ReplyPool::complete(reply, resp);
+    pub fn unmount(&mut self) {
+        if let Some(file_system) = self.file_system.take() {
+            let dev = file_system.unmount();
+            self.dev = Some(dev);
+        }
     }
 }
 
-async fn handle_req<D>(
-    op: Op,
-    file_system: &mut FileSystem<D>,
-    files: &mut Files,
-) -> Result<Resp, Error>
+pub async fn fs_actor_task<D>(device: D)
 where
     D: BlockDevice,
-    D::Error: ErrorCode,
+    D::Error: BlockDeviceError,
 {
+    let mut fs_manager = FsManager::new(device);
+    let rx = REQ.receiver();
+
+    loop {
+        let Req { op, reply } = rx.receive().await;
+
+        match handle_req(op, &mut fs_manager).await {
+            Ok(resp) => {
+                ReplyPool::complete(reply, Ok(resp));
+            }
+            Err(Error::NoCard) => {
+                fs_manager.unmount();
+                info!("no card, unmounted");
+                ReplyPool::complete(reply, Err(Error::NoCard))
+            }
+            Err(e) => {
+                ReplyPool::complete(reply, Err(e));
+            }
+        }
+    }
+}
+
+async fn handle_req<D>(op: Op, fs_manager: &mut FsManager<D>) -> Result<Resp, Error>
+where
+    D: BlockDevice,
+    D::Error: BlockDeviceError,
+{
+    let (file_system, files, dirs) = fs_manager.mount().await?;
+
     let resp = match op {
         Op::ReadToString { path } => {
             let data = file_system.read_to_string(&path).await?;
@@ -589,50 +781,60 @@ where
         }
         Op::OpenFile { path, options } => {
             let file = file_system.open(&path, options).await?;
-            let handle = files.add(file).unwrap();
+            let handle = FileHandle(files.add(file).unwrap());
             Resp::FileOpen { handle }
         }
         Op::ReadFileToString { handle } => {
-            let file = files.get(&handle)?;
+            let file = files.get(handle.0)?;
             let data = file.read_to_string(file_system).await?;
             Resp::ReadToString { data }
         }
         Op::ReadFileToEnd { handle } => {
-            let file = files.get(&handle)?;
+            let file = files.get(handle.0)?;
             let mut data = Vec::new();
             file.read_to_end(file_system, &mut data).await?;
             Resp::Read { data }
         }
         Op::SeekFile { handle, position } => {
-            let file = files.get(&handle)?;
+            let file = files.get(handle.0)?;
             file.seek(file_system, position).await?;
             Resp::Ok
         }
         Op::ReadFile { handle, len } => {
-            let file = files.get(&handle)?;
+            let file = files.get(handle.0)?;
             let mut data = vec![0u8; len];
             file.read(file_system, &mut data).await?;
             Resp::Read { data }
         }
         Op::WriteFile { handle, buffer } => {
-            let file = files.get(&handle)?;
+            let file = files.get(handle.0)?;
             file.write(file_system, &buffer).await?;
             Resp::Ok
         }
         Op::CloseFile { handle } => {
-            let file = files.remove(handle)?;
+            let file = files.remove(handle.0)?;
             file.close::<D>().await?;
             Resp::Ok
         }
         Op::FlushFile { handle } => {
-            let file = files.get(&handle)?;
+            let file = files.get(handle.0)?;
             file.flush::<D>().await?;
             Resp::Ok
         }
         Op::Metadata { handle } => {
-            let file = files.get(&handle)?;
+            let file = files.get(handle.0)?;
             let data = file.metadata();
             Resp::Metadata { data }
+        }
+        Op::OpenDirectory { path } => {
+            let dir = file_system.read_dir(&path).await?;
+            let handle = DirectoryHandle(dirs.add(dir).unwrap());
+            Resp::DirectoryOpen { handle }
+        }
+        Op::DirectoryNextEntry { handle } => {
+            let dir = dirs.get(handle.0)?;
+            let data = dir.next_entry(file_system).await?;
+            Resp::DirectoryEntry { data }
         }
     };
 

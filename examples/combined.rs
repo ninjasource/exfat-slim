@@ -12,7 +12,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     // read the boot sector of the file system
     info!("reading boot sector of file system");
     let io = InMemoryBlockDevice::new();
-    let mut fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io);
 
     let directory = "/bubble/gum";
     let path = format!("{directory}/blue.txt");

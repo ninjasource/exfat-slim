@@ -18,7 +18,7 @@ impl InMemoryBlockDevice {
 }
 
 impl BlockDevice for InMemoryBlockDevice {
-    type Error = ();
+    type Error = String;
 
     fn read(&mut self, sector_id: u32, block: &mut Block) -> Result<(), Self::Error> {
         let mut g = self.inner.lock().unwrap();
@@ -60,7 +60,7 @@ impl Inner {
         }
     }
 
-    pub fn read_sector(&mut self, sector_id: u32, block: &mut Block) -> Result<(), ()> {
+    pub fn read_sector(&mut self, sector_id: u32, block: &mut Block) -> Result<(), String> {
         let sector_id_with_offset = sector_id + self.sector_offset;
         match self.last_sector.as_ref() {
             Some(x) if *x == sector_id_with_offset => {
@@ -78,12 +78,23 @@ impl Inner {
         Ok(())
     }
 
-    pub fn write_sector(&mut self, sector_id: u32, block: &Block) -> Result<(), ()> {
+    pub fn write_sector(&mut self, sector_id: u32, block: &Block) -> Result<(), String> {
         let sector_id_with_offset = sector_id + self.sector_offset;
         print("WRITE", sector_id_with_offset, sector_id, false);
-        let pos = sector_id_with_offset as usize * BLOCK_SIZE;
-        self.image[pos..pos + BLOCK_SIZE].copy_from_slice(block);
-        self.last_sector = None;
-        Ok(())
+        let start = sector_id_with_offset as usize * BLOCK_SIZE;
+        let end = start + BLOCK_SIZE;
+
+        if self.image.len() < end {
+            self.image[start..start + BLOCK_SIZE].copy_from_slice(block);
+            self.last_sector = None;
+            Ok(())
+        } else {
+            let error = format!(
+                "attempt to write past end of image of len {}: {}",
+                self.image.len(),
+                end
+            );
+            Err(error)
+        }
     }
 }

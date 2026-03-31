@@ -165,7 +165,7 @@ pub(crate) struct FileNameDirEntry {
 impl FileNameDirEntry {
     pub(crate) fn serialize(&self) -> RawDirEntry {
         let mut raw = [0u8; RAW_ENTRY_LEN];
-        raw[0] = EntryType::FileAndDirectory.serialize();
+        raw[0] = EntryType::Filename.serialize();
         raw[1] = self.general_secondary_flags.bits();
 
         let (chunks, _remainder) = raw[2..32].as_chunks_mut::<2>();
@@ -321,6 +321,20 @@ impl From<&[u8; RAW_ENTRY_LEN]> for FileNameDirEntry {
     }
 }
 
+#[cfg(feature = "defmt")]
+impl defmt::Format for FileAttributes {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "FileAttributes({=u16:#010b})", self.bits());
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for GeneralSecondaryFlags {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "GeneralSecondaryFlags({=u8:#010b})", self.bits());
+    }
+}
+
 bitflags! {
     /// Represents a set of bitmap flags.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -365,6 +379,7 @@ bitflags! {
     }
 }
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Location {
     /// the absolute sector_id.
@@ -575,27 +590,29 @@ pub(crate) fn is_end_of_directory(directory_entry: &[u8; 32]) -> bool {
     directory_entry.iter().all(|&x| x == 0)
 }
 
-const fn checksum_next(checksum: u16, value: u8) -> u16 {
-    if checksum & 1 > 0 { 0x8000u16 } else { 0u16 }
-        .wrapping_add(checksum >> 1)
-        .wrapping_add(value as u16)
-}
-
 /// calculates the checksum for a file directory set
-/// we assume that this directly set has at least 3 entries
 fn calc_checksum(dir_entry_set: &[RawDirEntry]) -> u16 {
-    let file_dir = &dir_entry_set[0];
-    let mut checksum = 0u16;
-    for value in &file_dir[..2] {
-        checksum = checksum_next(checksum, *value)
+    if dir_entry_set.is_empty() {
+        return 0;
     }
-    // skip indexes 2 and 3 as that is the checksum itself
-    for value in &file_dir[4..] {
-        checksum = checksum_next(checksum, *value)
-    }
-    for dir_entry in &dir_entry_set[1..] {
-        for value in dir_entry {
-            checksum = checksum_next(checksum, *value)
+
+    let mut checksum: u16 = 0;
+
+    for (entry_index, entry) in dir_entry_set.iter().enumerate() {
+        for (byte_index, &b) in entry.iter().enumerate() {
+            // bytes at position 2 ansd 3 of the first directory entry set become zero for the calc
+            // as they are where the checksum is stored
+            //let val = if entry_index == 0 && (byte_index == 2 || byte_index == 3) {
+            //    0u8
+            //} else {
+            //    b
+            //};
+
+            if entry_index == 0 && (byte_index == 2 || byte_index == 3) {
+                continue;
+            }
+
+            checksum = checksum.rotate_right(1).wrapping_add(b as u16);
         }
     }
 
