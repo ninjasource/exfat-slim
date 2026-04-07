@@ -8,6 +8,7 @@ extern crate alloc;
 pub mod blocking {
     pub use bisync::synchronous::*;
 
+    mod allocation;
     mod allocation_bitmap;
     pub mod boot_sector;
     pub mod directory;
@@ -27,6 +28,7 @@ pub mod blocking {
 #[path = "."]
 pub mod asynchronous {
     pub use bisync::asynchronous::*;
+    mod allocation;
     mod allocation_bitmap;
     pub mod boot_sector;
     pub mod directory;
