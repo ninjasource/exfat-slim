@@ -710,54 +710,42 @@ impl File {
             .find_free_clusters(&mut fs.dev, &fs.fs, num_clusters, false, None)
             .await?;
 
+        let run = fs
+            .allocator
+            .find_free_clusters(&mut fs.dev, num_clusters)
+            .await?;
+
+        if run.cluster_count != num_clusters {
+            unimplemented!("writing to a file using the fat chain is not yet supported")
+        }
+
         // find directory or recursively create it if it does not already exist
         let directory_cluster_id = fs.get_or_create_directory(dir_path).await?;
 
-        match allocation {
-            Allocation::Contiguous {
-                first_cluster,
-                num_clusters,
-            } => {
-                let flags =
-                    GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain;
+        let flags = GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain;
 
-                fs.create_file_dir_entry_at(
-                    file_or_dir_name,
-                    directory_cluster_id,
-                    first_cluster,
-                    self.details.attributes,
-                    flags,
-                    self.details.valid_data_length,
-                    self.details.data_length,
-                )
-                .await?;
+        fs.create_file_dir_entry_at(
+            file_or_dir_name,
+            directory_cluster_id,
+            run.first_cluster,
+            self.details.attributes,
+            flags,
+            self.details.valid_data_length,
+            self.details.data_length,
+        )
+        .await?;
 
-                fs.alloc_bitmap
-                    .mark_allocated_contiguous(
-                        &mut fs.dev,
-                        &fs.fs,
-                        first_cluster,
-                        num_clusters,
-                        true,
-                    )
-                    .await?;
+        fs.allocator.mark_allocated(&mut fs.dev, &run, true).await?;
 
-                let mut sector_id = fs.fs.get_heap_sector_id(first_cluster)?;
-                let mut buf = [0u8; BLOCK_SIZE];
+        let mut sector_id = fs.fs.get_heap_sector_id(run.first_cluster)?;
+        let mut buf = [0u8; BLOCK_SIZE];
 
-                while let Some(_len) = self.read(fs, &mut buf).await? {
-                    fs.dev
-                        .write(sector_id, &buf)
-                        .await
-                        .map_err(ExFatError::Io)?;
-                    sector_id += 1;
-                }
-            }
-            Allocation::FatChain {
-                clusters: _clusters,
-            } => {
-                unimplemented!()
-            }
+        while let Some(_len) = self.read(fs, &mut buf).await? {
+            fs.dev
+                .write(sector_id, &buf)
+                .await
+                .map_err(ExFatError::Io)?;
+            sector_id += 1;
         }
 
         Ok(())

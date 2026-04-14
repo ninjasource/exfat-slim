@@ -3,6 +3,8 @@ use core::marker::PhantomData;
 use super::{
     bisync,
     error::ExFatError,
+    fat::Fat,
+    file::NO_CLUSTER_ID,
     io::{BLOCK_SIZE, BlockDevice},
     slot_cache::SlotCache,
 };
@@ -99,7 +101,49 @@ impl<D: BlockDevice> Allocator<D> {
     }
 
     #[bisync]
-    pub async fn free(&mut self, chain: &StoredChain) -> Result<(), ExFatError<D>> {
+    pub async fn free(
+        &mut self,
+        io: &mut D,
+        chain: &StoredChain,
+        fat: &mut Fat<D>,
+    ) -> Result<(), ExFatError<D>> {
+        match chain {
+            StoredChain::Empty => {
+                // nothing to do
+            }
+            StoredChain::Contiguous {
+                first,
+                cluster_count,
+            } => {
+                let run = AllocatedRun {
+                    first_cluster: *first,
+                    cluster_count: *cluster_count,
+                };
+                self.mark_allocated(io, &run, false).await?
+            }
+            StoredChain::Fat {
+                first,
+                last: _last,
+                cluster_count: _cluster_count,
+            } => {
+                let mut cluster_id = *first;
+
+                while let Some(next_cluster_id) =
+                    fat.next_cluster_in_fat_chain(cluster_id, io).await?
+                {
+                    let run = AllocatedRun {
+                        first_cluster: cluster_id,
+                        cluster_count: 1,
+                    };
+                    self.mark_allocated(io, &run, false).await?;
+                    fat.set(cluster_id, NO_CLUSTER_ID, io).await?;
+                    cluster_id = next_cluster_id;
+                }
+
+                // the last cluster
+                fat.set(cluster_id, NO_CLUSTER_ID, io).await?;
+            }
+        }
         Ok(())
     }
 

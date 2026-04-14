@@ -13,7 +13,7 @@
 /// NOTE: I encountered what appears to be a logic error in the linux kernel exfat implementation where bits are incorrectly counted from MSB to LSB and not the other way around when locating free allocations.
 /// this does not affect the allocation bitmap write consistency but could possibly lead to unnecessary fragmentation
 ///
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
+use alloc::vec::Vec;
 
 use crate::info;
 
@@ -68,111 +68,114 @@ impl AllocationBitmap {
         }
     }
 
-    #[bisync]
-    pub(crate) async fn mark_allocated<D: BlockDevice>(
-        &self,
-        io: &mut D,
-        fs: &FileSystemDetails,
-        cluster_ids: &[u32],
-        allocated: bool,
-    ) -> Result<(), ExFatError<D>> {
-        let mut by_sector_id = BTreeMap::<u32, Vec<usize>>::new();
-        let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
-        crate::info!(
-            "mark_allocated {} cluster_ids: {:?}",
-            allocated,
-            cluster_ids
-        );
+    /*
 
-        for cluster_id in cluster_ids {
-            let (sector_id, index) = Self::calc_allocation_position(first_sector_id, *cluster_id)?;
-            by_sector_id.entry(sector_id).or_default().push(index);
-        }
+                           #[bisync]
+                           pub(crate) async fn mark_allocated<D: BlockDevice>(
+                               &self,
+                               io: &mut D,
+                               fs: &FileSystemDetails,
+                               cluster_ids: &[u32],
+                               allocated: bool,
+                           ) -> Result<(), ExFatError<D>> {
+                               let mut by_sector_id = BTreeMap::<u32, Vec<usize>>::new();
+                               let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
+                               crate::info!(
+                                   "mark_allocated {} cluster_ids: {:?}",
+                                   allocated,
+                                   cluster_ids
+                               );
 
-        self.mark_allocated_by_sector(io, &by_sector_id, allocated)
-            .await?;
-        Ok(())
-    }
+                               for cluster_id in cluster_ids {
+                                   let (sector_id, index) = Self::calc_allocation_position(first_sector_id, *cluster_id)?;
+                                   by_sector_id.entry(sector_id).or_default().push(index);
+                               }
 
-    #[bisync]
-    pub(crate) async fn mark_allocated_contiguous<D: BlockDevice>(
-        &self,
-        io: &mut D,
-        fs: &FileSystemDetails,
-        first_cluster: u32,
-        num_clusters: u32,
-        allocated: bool,
-    ) -> Result<(), ExFatError<D>> {
-        let mut by_sector_id = BTreeMap::<u32, Vec<usize>>::new();
-        let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
+                               self.mark_allocated_by_sector(io, &by_sector_id, allocated)
+                                   .await?;
+                               Ok(())
+                           }
 
-        crate::info!(
-            "mark_allocated_contiguous {} first_cluster: {} num_clusters: {}",
-            allocated,
-            first_cluster,
-            num_clusters
-        );
 
-        for cluster_id in first_cluster..first_cluster + num_clusters {
-            let (sector_id, index) = Self::calc_allocation_position(first_sector_id, cluster_id)?;
-            by_sector_id.entry(sector_id).or_default().push(index);
-        }
+            #[bisync]
+            pub(crate) async fn mark_allocated_contiguous<D: BlockDevice>(
+                &self,
+                io: &mut D,
+                fs: &FileSystemDetails,
+                first_cluster: u32,
+                num_clusters: u32,
+                allocated: bool,
+            ) -> Result<(), ExFatError<D>> {
+                let mut by_sector_id = BTreeMap::<u32, Vec<usize>>::new();
+                let first_sector_id = fs.get_heap_sector_id(self.first_cluster)?;
 
-        self.mark_allocated_by_sector(io, &by_sector_id, allocated)
-            .await?;
-        Ok(())
-    }
+                crate::info!(
+                    "mark_allocated_contiguous {} first_cluster: {} num_clusters: {}",
+                    allocated,
+                    first_cluster,
+                    num_clusters
+                );
 
-    #[bisync]
-    pub(crate) async fn mark_allocated_by_sector<D: BlockDevice>(
-        &self,
-        io: &mut D,
-        by_sector_id: &BTreeMap<u32, Vec<usize>>,
-        allocated: bool,
-    ) -> Result<(), ExFatError<D>> {
-        let mut block = [0u8; BLOCK_SIZE];
-        for (sector_id, indices) in by_sector_id {
-            crate::info!("sector {} indices {:?}", sector_id, indices);
-            io.read(*sector_id, &mut block)
-                .await
-                .map_err(ExFatError::Io)?;
-            crate::info!(
-                "sector {} indices {:?} block[..16]: {:?}",
-                sector_id,
-                indices,
-                &block[..16]
-            );
-
-            for index in indices {
-                let byte = &mut block[index / 8];
-                let bit = index % 8;
-                let is_set = (*byte & (1 << bit)) != 0;
-
-                // an attempt to change the allocation that will have no effect
-                if allocated && is_set || !allocated && !is_set {
-                    return Err(ExFatError::InvalidAllocation {
-                        lba: *sector_id,
-                        index: *index,
-                        allocated: is_set,
-                        allocated_new: allocated,
-                    });
+                for cluster_id in first_cluster..first_cluster + num_clusters {
+                    let (sector_id, index) = Self::calc_allocation_position(first_sector_id, cluster_id)?;
+                    by_sector_id.entry(sector_id).or_default().push(index);
                 }
 
-                if allocated {
-                    // set the bit
-                    *byte |= 1 << bit;
-                } else {
-                    // unset the bit
-                    *byte &= !(1 << bit);
-                }
+                self.mark_allocated_by_sector(io, &by_sector_id, allocated)
+                    .await?;
+                Ok(())
             }
 
-            io.write(*sector_id, &block).await.map_err(ExFatError::Io)?;
+        #[bisync]
+        pub(crate) async fn mark_allocated_by_sector<D: BlockDevice>(
+            &self,
+            io: &mut D,
+            by_sector_id: &BTreeMap<u32, Vec<usize>>,
+            allocated: bool,
+        ) -> Result<(), ExFatError<D>> {
+            let mut block = [0u8; BLOCK_SIZE];
+            for (sector_id, indices) in by_sector_id {
+                crate::info!("sector {} indices {:?}", sector_id, indices);
+                io.read(*sector_id, &mut block)
+                    .await
+                    .map_err(ExFatError::Io)?;
+                crate::info!(
+                    "sector {} indices {:?} block[..16]: {:?}",
+                    sector_id,
+                    indices,
+                    &block[..16]
+                );
+
+                for index in indices {
+                    let byte = &mut block[index / 8];
+                    let bit = index % 8;
+                    let is_set = (*byte & (1 << bit)) != 0;
+
+                    // an attempt to change the allocation that will have no effect
+                    if allocated && is_set || !allocated && !is_set {
+                        return Err(ExFatError::InvalidAllocation {
+                            lba: *sector_id,
+                            index: *index,
+                            allocated: is_set,
+                            allocated_new: allocated,
+                        });
+                    }
+
+                    if allocated {
+                        // set the bit
+                        *byte |= 1 << bit;
+                    } else {
+                        // unset the bit
+                        *byte &= !(1 << bit);
+                    }
+                }
+
+                io.write(*sector_id, &block).await.map_err(ExFatError::Io)?;
+            }
+
+            Ok(())
         }
-
-        Ok(())
-    }
-
+    */
     /// locates the next free set of contiguous clusters.
     /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
     #[bisync]
