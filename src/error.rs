@@ -68,4 +68,7 @@ pub enum ExFatError<D: BlockDevice> {
 
     #[error("the combination of flags set when opening the file is not valid")]
     InvalidOptions,
+
+    #[error("unexpected error occured: {0}")]
+    Unexpected(&'static str),
 }

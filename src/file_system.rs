@@ -1,6 +1,9 @@
 use alloc::{string::String, vec::Vec};
 
+use crate::info;
+
 use super::{
+    allocation::{Allocator, StoredChain},
     allocation_bitmap::{Allocation, AllocationBitmap},
     bisync,
     boot_sector::BootSector,
@@ -12,8 +15,8 @@ use super::{
         update_checksum,
     },
     error::ExFatError,
-    fat::next_cluster_in_fat_chain,
-    file::{File, FileDetails, OpenOptions},
+    fat::Fat,
+    file::{File, FileDetails, NO_CLUSTER_ID, OpenOptions},
     io::{BLOCK_SIZE, BlockDevice},
     upcase_table::UpcaseTable,
     utils::{calc_dir_entry_set_len, encode_utf16_and_hash, split_path},
@@ -83,7 +86,25 @@ pub struct FileSystem<D: BlockDevice> {
     pub(crate) fs: FileSystemDetails,
     pub(crate) upcase_table: UpcaseTable,
     pub(crate) alloc_bitmap: AllocationBitmap,
+    pub(crate) allocator: Allocator<D>,
+    pub(crate) fat: Fat<D>,
 }
+
+/*
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug)]
+pub(crate) struct DataCache<D: BlockDevice> {
+    cache: SlotCache<D, 4>,
+}
+
+impl<D: BlockDevice> DataCache<D> {
+    #[bisync]
+    pub async fn write(&mut self, io: &mut D, buf: &[u8]) -> Result<(), ExFatError<D>> {
+        let slot = self.cache.read(sector_id, io).await?;
+        Ok(())
+    }
+}
+*/
 
 pub(crate) struct FileSystemMetadata {
     details: FileSystemDetails,
@@ -92,10 +113,12 @@ pub(crate) struct FileSystemMetadata {
 }
 
 impl<D: BlockDevice> FileSystem<D> {
-    pub const fn new(io: D) -> Self {
+    pub fn new(io: D) -> Self {
         let fs = FileSystemDetails::empty();
         let upcase_table = UpcaseTable::empty();
         let alloc_bitmap = AllocationBitmap::empty();
+        let fat = Fat::new();
+        let allocator = Allocator::new();
 
         Self {
             dev: io,
@@ -103,6 +126,8 @@ impl<D: BlockDevice> FileSystem<D> {
             upcase_table,
             alloc_bitmap,
             is_mounted: false,
+            fat,
+            allocator,
         }
     }
 
@@ -119,9 +144,19 @@ impl<D: BlockDevice> FileSystem<D> {
             upcase_table,
             alloc_bitmap,
         } = read_file_system_metadata(&mut self.dev).await?;
+        self.fat.fat_offset = Some(details.fat_offset);
         self.fs = details;
+        self.allocator.bitmap.first_sector =
+            self.fs.get_heap_sector_id(alloc_bitmap.first_cluster)?;
+        self.allocator.bitmap.num_sectors = alloc_bitmap.num_sectors;
+
         self.upcase_table = upcase_table;
         self.alloc_bitmap = alloc_bitmap;
+
+        info!(
+            "alloc_bitmap: {:?} allocator_bitmap: {:?}",
+            self.alloc_bitmap, self.allocator.bitmap
+        );
         self.is_mounted = true;
         Ok(())
     }
@@ -130,6 +165,7 @@ impl<D: BlockDevice> FileSystem<D> {
     pub async fn open(&mut self, path: &str, options: OpenOptions) -> Result<File, ExFatError<D>> {
         self.mount().await?;
 
+        /*
         let mut buf = [0u8; 512];
         if let Ok(lba) = self
             .fs
@@ -149,7 +185,7 @@ impl<D: BlockDevice> FileSystem<D> {
         {
             self.dev.read(lba, &mut buf).await.unwrap();
             crate::info!("root dir: {:?}", buf);
-        }
+        }*/
 
         // attempt to get the file details
         let file_details = self
@@ -189,11 +225,34 @@ impl<D: BlockDevice> FileSystem<D> {
             file_details.first_cluster
         };
 
+        let no_fat_chain = file_details
+            .flags
+            .contains(GeneralSecondaryFlags::NoFatChain);
+        let cluster_count = file_details
+            .data_length
+            .div_ceil(self.fs.cluster_length as u64) as u32;
+        let is_empty = cluster_id == 0 && cluster_count == 0;
+        let chain = if is_empty {
+            StoredChain::Empty
+        } else if no_fat_chain {
+            StoredChain::Contiguous {
+                first: file_details.first_cluster,
+                cluster_count,
+            }
+        } else {
+            StoredChain::Fat {
+                first: file_details.first_cluster,
+                last: cluster_id,
+                cluster_count,
+            }
+        };
+
         Ok(File::new(
             &file_details,
             cluster_id,
             self.fs.cluster_length,
             &options,
+            chain,
         ))
     }
 
@@ -210,6 +269,15 @@ impl<D: BlockDevice> FileSystem<D> {
             Err(ExFatError::DirectoryNotFound) => Ok(false),
             Err(e) => Err(e),
         }
+    }
+
+    #[bisync]
+    pub async fn flush_cache(&mut self) -> Result<(), ExFatError<D>> {
+        self.mount().await?;
+        self.allocator.flush(&mut self.dev).await?;
+        self.fat.flush(&mut self.dev).await?;
+
+        Ok(())
     }
 
     /// Reads the entire contents of the file into a byte vector
@@ -450,60 +518,79 @@ impl<D: BlockDevice> FileSystem<D> {
     #[bisync]
     pub(crate) async fn create_file(&mut self, path: &str) -> Result<FileDetails, ExFatError<D>> {
         let (dir_path, file_or_dir_name) = split_path(path);
+        /*
         let num_clusters = 1;
 
-        // find free space on the drive, preferring contiguous clusters
-        let allocation = self
-            .alloc_bitmap
-            .find_free_clusters(&mut self.dev, &self.fs, num_clusters, false, None)
-            .await?;
 
+                // find free space on the drive, preferring contiguous clusters
+                let allocation = self
+                    .alloc_bitmap
+                    .find_free_clusters(&mut self.dev, &self.fs, num_clusters, false, None)
+                    .await?;
+        */
         // find directory or recursively create it if it does not already exist
         let directory_cluster_id = self.get_or_create_directory(dir_path).await?;
 
-        let file_details = match allocation {
-            Allocation::Contiguous {
-                first_cluster,
-                num_clusters,
-            } => {
-                let flags =
-                    GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain;
-
-                let attributes = FileAttributes::Archive;
-
-                // create a zero length file
-                let file_details = self
-                    .create_file_dir_entry_at(
-                        file_or_dir_name,
-                        directory_cluster_id,
-                        first_cluster,
-                        attributes,
-                        flags,
-                        0,
-                        0,
-                    )
-                    .await?;
-
-                self.alloc_bitmap
-                    .mark_allocated_contiguous(
-                        &mut self.dev,
-                        &self.fs,
+        /*
+                let file_details = match allocation {
+                    Allocation::Contiguous {
                         first_cluster,
                         num_clusters,
-                        true,
-                    )
-                    .await?;
+                    } => {
+                        let flags =
+                            GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain;
 
-                file_details
-            }
-            Allocation::FatChain {
-                clusters: _clusters,
-            } => {
-                // TODO: fix this
-                unimplemented!()
-            }
-        };
+                        let attributes = FileAttributes::Archive;
 
+                        // create a zero length file
+                        let file_details = self
+                            .create_file_dir_entry_at(
+                                file_or_dir_name,
+                                directory_cluster_id,
+                                first_cluster,
+                                attributes,
+                                flags,
+                                0,
+                                0,
+                            )
+                            .await?;
+
+                        self.alloc_bitmap
+                            .mark_allocated_contiguous(
+                                &mut self.dev,
+                                &self.fs,
+                                first_cluster,
+                                num_clusters,
+                                true,
+                            )
+                            .await?;
+
+                        file_details
+                    }
+                    Allocation::FatChain {
+                        clusters: _clusters,
+                    } => {
+                        // TODO: fix this
+                        unimplemented!()
+                    }
+                };
+        */
+
+        let flags = GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain;
+
+        let attributes = FileAttributes::Archive;
+        let first_cluster = NO_CLUSTER_ID; // sentinel value for no allocation
+        let file_details = self
+            .create_file_dir_entry_at(
+                file_or_dir_name,
+                directory_cluster_id,
+                first_cluster,
+                attributes,
+                flags,
+                0,
+                0,
+            )
+            .await?;
         crate::info!("file system details: {:?}", self.fs);
         crate::info!("file details: {:?}", file_details);
         Ok(file_details)
@@ -776,8 +863,10 @@ impl<D: BlockDevice> FileSystem<D> {
         } else {
             // navigate fat chain
             clusters.push(cluster_id);
-            while let Some(x) =
-                next_cluster_in_fat_chain(&mut self.dev, self.fs.fat_offset, cluster_id).await?
+            while let Some(x) = self
+                .fat
+                .next_cluster_in_fat_chain(cluster_id, &mut self.dev)
+                .await?
             {
                 cluster_id = x;
                 clusters.push(cluster_id);
@@ -807,9 +896,11 @@ impl<D: BlockDevice> FileSystem<D> {
             Ok(cluster_id)
         } else {
             let mut cluster_id = file_details.first_cluster;
-            for _i in 0..num_clusters {
-                if let Some(x) =
-                    next_cluster_in_fat_chain(&mut self.dev, self.fs.fat_offset, cluster_id).await?
+            for _i in 0..num_clusters - 1 {
+                if let Some(x) = self
+                    .fat
+                    .next_cluster_in_fat_chain(cluster_id, &mut self.dev)
+                    .await?
                 {
                     cluster_id = x;
                 } else {
@@ -1009,6 +1100,7 @@ pub(crate) async fn read_file_system_metadata<D: BlockDevice>(
     // the boot sector is always at sector_id 0 and everything is relative from there
     // you need to offset the sector_id in your block device if there is a master boot record before this
     let boot_sector = read_boot_sector(io, 0).await?;
+
     let details = FileSystemDetails::new(&boot_sector);
 
     let cluster_id = details.first_cluster_of_root_dir;
@@ -1017,6 +1109,7 @@ pub(crate) async fn read_file_system_metadata<D: BlockDevice>(
     io.read(sector_id, &mut block)
         .await
         .map_err(ExFatError::Io)?;
+    info!("root dir sector: {:?}", &block);
 
     let mut allocation_bitmap_dir_entry: Option<AllocationBitmapDirEntry> = None;
     let mut volume_label: Option<VolumeLabelDirEntry> = None;

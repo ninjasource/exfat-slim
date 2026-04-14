@@ -84,15 +84,15 @@ impl Inner {
         let start = sector_id_with_offset as usize * BLOCK_SIZE;
         let end = start + BLOCK_SIZE;
 
-        if self.image.len() < end {
-            self.image[start..start + BLOCK_SIZE].copy_from_slice(block);
+        let max_len = self.image.len();
+        if end <= max_len {
+            self.image[start..end].copy_from_slice(block);
             self.last_sector = None;
             Ok(())
         } else {
             let error = format!(
                 "attempt to write past end of image of len {}: {}",
-                self.image.len(),
-                end
+                max_len, end
             );
             Err(error)
         }

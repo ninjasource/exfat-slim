@@ -18,6 +18,7 @@ pub mod blocking {
     pub mod file;
     pub mod file_system;
     pub mod io;
+    mod slot_cache;
     mod upcase_table;
     pub mod utils;
 
@@ -40,6 +41,7 @@ pub mod asynchronous {
     #[cfg(feature = "embassy")]
     pub mod fs;
     pub mod io;
+    mod slot_cache;
     mod upcase_table;
     pub mod utils;
 

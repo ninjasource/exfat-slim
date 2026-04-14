@@ -38,18 +38,20 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let options = OpenOptions::new().write(true).append(true);
     let mut file = fs.open(path, options).await?;
     file.write(&mut fs, b". How are things?").await?;
+    fs.flush_cache().await?;
 
     let contents = fs.read_to_string(path).await?;
     println!("{contents}");
 
     let mut expected = fs.read(path).await?;
+
     let mut dest = vec![0u8; 100000];
     fill_random_ascii(&mut dest);
 
     let options = OpenOptions::new().write(true).append(true);
     let mut file = fs.open(path, options).await?;
     file.write(&mut fs, &dest).await?;
-
+    fs.flush_cache().await?;
     expected.append(&mut dest);
 
     let actual = fs.read(path).await?;

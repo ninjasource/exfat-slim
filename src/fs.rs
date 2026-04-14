@@ -112,6 +112,9 @@ pub enum Error {
 
     #[error("invalid file handle")]
     InvalidFileHandle,
+
+    #[error("unexpected error occured: {0}")]
+    Unexpected(&'static str),
 }
 
 impl<D> From<ExFatError<D>> for Error
@@ -159,6 +162,7 @@ where
             ExFatError::SeekOutOfRange => Error::SeekOutOfRange,
             ExFatError::Utf8Error => Error::Utf8Error,
             ExFatError::WriteNotEnabled => Error::WriteNotEnabled,
+            ExFatError::Unexpected(reason) => Error::Unexpected(reason),
         }
     }
 }
@@ -384,7 +388,9 @@ impl Drop for FileHandle {
     // this will close the file but not wait for confirmation that the operation
     // was completed. If you want to be sure that the file was closed without error
     /// then call the close or flush functions explicitly
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        // TODO: implement this!!!
+    }
 }
 
 pub async fn open(path: &str, options: OpenOptions) -> Result<FileHandle, Error> {
@@ -813,12 +819,12 @@ where
         }
         Op::CloseFile { handle } => {
             let file = files.remove(handle.0)?;
-            file.close::<D>().await?;
+            file.close::<D>(file_system).await?;
             Resp::Ok
         }
         Op::FlushFile { handle } => {
             let file = files.get(handle.0)?;
-            file.flush::<D>().await?;
+            file.flush::<D>(file_system).await?;
             Resp::Ok
         }
         Op::Metadata { handle } => {

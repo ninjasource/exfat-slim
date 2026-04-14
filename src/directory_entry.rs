@@ -6,7 +6,6 @@ use super::{
     bisync,
     directory::DirectoryEntryFilter,
     error::ExFatError,
-    fat::next_cluster_in_fat_chain,
     file::FileDetails,
     file_system::{FileSystem, FileSystemDetails},
     io::{BLOCK_SIZE, BlockDevice},
@@ -555,8 +554,10 @@ impl DirectoryEntryChain {
 
         if self.cluster_offset > self.fs.sectors_per_cluster as usize {
             // we have reached the end of the cluster
-            let cluster_id =
-                next_cluster_in_fat_chain(&mut fs.dev, self.fs.fat_offset, self.cluster_id).await?;
+            let cluster_id = fs
+                .fat
+                .next_cluster_in_fat_chain(self.cluster_id, &mut fs.dev)
+                .await?;
             match cluster_id {
                 Some(cluster_id) => {
                     self.cluster_id = cluster_id;
