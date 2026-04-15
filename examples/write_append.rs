@@ -21,7 +21,7 @@ fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let mut dest = vec![0u8; 512];
     fill_random_ascii(&mut dest);
 
-    let count = 2 * 48 * 1000;
+    let count = 4000;
     for i in 0..count {
         file.write(&mut fs, &dest)?;
         if i % 32 == 0 {
@@ -32,7 +32,7 @@ fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let options = OpenOptions::new().write(true).append(true);
     let mut file = fs.open(path, options)?;
 
-    let count = 2 * 48 * 1000;
+    let count = 4000;
     for i in 0..count {
         file.write(&mut fs, &dest)?;
         if i % 32 == 0 {

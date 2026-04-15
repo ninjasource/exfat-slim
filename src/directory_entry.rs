@@ -601,14 +601,6 @@ fn calc_checksum(dir_entry_set: &[RawDirEntry]) -> u16 {
 
     for (entry_index, entry) in dir_entry_set.iter().enumerate() {
         for (byte_index, &b) in entry.iter().enumerate() {
-            // bytes at position 2 ansd 3 of the first directory entry set become zero for the calc
-            // as they are where the checksum is stored
-            //let val = if entry_index == 0 && (byte_index == 2 || byte_index == 3) {
-            //    0u8
-            //} else {
-            //    b
-            //};
-
             if entry_index == 0 && (byte_index == 2 || byte_index == 3) {
                 continue;
             }

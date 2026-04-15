@@ -1,7 +1,23 @@
+/// the allocation bitmap signals whether or not a cluster is in use.
+/// the AllocationBitmapDirEntry identifies where to locate the bitmap.
+/// for example, first_cluster 2 means that the allocation bitmap is the very first cluster in the cluster heap (cluster id 0 and 1 are not valid)
+/// each bit in the allocation bitmap points to a cluster (starting at cluster 2).
+/// therefore the following bits (as they are layed out in memory) map to the following clusters
+///         [byte 0                ][byte 1                ][byte 2                ][byte 3                ]
+/// bit      7  6  5  4  3  2  1  0  7  6  5  4  3  2  1  0  7  6  5  4  3  2  1  0  7  6  5  4  3  2  1  0
+/// cluster  9  8  7  6  5  4  3  2 17 16 15 14 13 12 11 10 25 24 23 22 21 20 19 18 33 32 31 30 29 28 27 26
+/// NOTE: the above layout is not obvious from the spec but it has been confirmed with how the windows implementation writes the bits.
+/// for example an allocation bitmap of this bit string "11111111 11111111 00000111" means that clusters 2 - 20 inclusive are allocated. That is 19 clusters in total.
+/// Quote from the microsoft spec section 7.1.5 Note "The first bit in the bitmap is the lowest-order bit of the first byte."
+///
+/// NOTE: I encountered what appears to be a logic error in the linux kernel exfat implementation where bits are incorrectly counted from MSB to LSB and not the other way around when locating free allocations.
+/// this does not affect the allocation bitmap write consistency but could possibly lead to unnecessary fragmentation
+///
 use core::marker::PhantomData;
 
 use super::{
     bisync,
+    directory_entry::AllocationBitmapDirEntry,
     error::ExFatError,
     fat::Fat,
     file::NO_CLUSTER_ID,
@@ -10,6 +26,26 @@ use super::{
 };
 
 const FIRST_CLUSTER_ID: u32 = 2;
+
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone)]
+pub(crate) struct AllocationBitmap {
+    /// start of the allocation bitmap table
+    pub first_cluster: u32,
+    /// size, in sectors, of the allocation bitmap
+    pub num_sectors: u32,
+}
+
+impl AllocationBitmap {
+    pub(crate) fn new(alloc_bitmap: &AllocationBitmapDirEntry) -> Self {
+        let num_sectors = alloc_bitmap.data_length.div_ceil(BLOCK_SIZE as u64) as u32;
+
+        Self {
+            first_cluster: alloc_bitmap.first_cluster,
+            num_sectors,
+        }
+    }
+}
 
 pub struct AllocatedRun {
     pub first_cluster: u32,
@@ -204,81 +240,6 @@ impl<D: BlockDevice> Allocator<D> {
         Ok(())
     }
 
-    /*
-        /// locates the next free set of contiguous clusters.
-        /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
-        #[bisync]
-        async fn find_free_clusters_contiguous_from_old(
-            &mut self,
-            fs: &mut FileSystem<D>,
-            from_cluster: u32,
-            num_clusters: u32,
-        ) -> Result<Option<AllocatedRun>, ExFatError<D>> {
-            let sector_index = (from_cluster - FIRST_CLUSTER_ID) / BLOCK_SIZE as u32;
-            let mut cluster_id = sector_index * BLOCK_SIZE as u32 + FIRST_CLUSTER_ID;
-            let mut first_cluster = None;
-            let mut count = 0;
-
-            crate::info!(
-                "find_free_clusters_contiguous_from num_clusters {} from_cluster {}",
-                num_clusters,
-                from_cluster,
-            );
-
-            for sector_offset in sector_index..self.bitmap.num_sectors {
-                let slot = self
-                    .cache
-                    .read(self.bitmap.first_sector + sector_offset, fs)
-                    .await?;
-                /*
-                fs.dev
-                    .read(sector_id + sector_offset, &mut block)
-                    .await
-                    .map_err(ExFatError::Io)?;
-                */
-                let (bytes, _remainder) = slot.block.as_chunks::<4>();
-                for chunk in bytes {
-                    if u32::from_le_bytes(*chunk) != u32::MAX {
-                        for byte in chunk {
-                            for bit in 0..u8::BITS {
-                                if *byte & 1 << bit == 0 {
-                                    if cluster_id < from_cluster {
-                                        continue;
-                                    }
-
-                                    if from_cluster == cluster_id {
-                                        first_cluster = Some(cluster_id);
-                                        count = 1;
-                                    } else if first_cluster.is_none() {
-                                        return Ok(None);
-                                    } else {
-                                        count += 1;
-                                    }
-
-                                    if count == num_clusters {
-                                        crate::info!("first_cluster {:?}", first_cluster);
-                                        return Ok(Some(AllocatedRun {
-                                            cluster_id,
-                                            count: num_clusters,
-                                        }));
-                                    }
-                                } else {
-                                    first_cluster = None;
-                                }
-
-                                cluster_id += 1;
-                            }
-                        }
-                    } else {
-                        cluster_id += u32::BITS;
-                        first_cluster = None;
-                    }
-                }
-            }
-
-            Ok(None)
-        }
-    */
     /// locates the next free set of contiguous clusters.
     /// if from_cluster is Some it will, like all clusters, only be included if it is NOT allocated.
     #[bisync]
@@ -412,60 +373,4 @@ impl<D: BlockDevice> Allocator<D> {
             None => Err(ExFatError::DiskFull),
         }
     }
-
-    /*
-    /// locates the next free set of contiguous clusters.
-    #[bisync]
-    pub(crate) async fn find_free_clusters_contiguous_old(
-        &mut self,
-        fs: &mut FileSystem<D>,
-        num_clusters: u32,
-    ) -> Result<Option<AllocatedRun>, ExFatError<D>> {
-        let mut cluster_id = self.next_search_cluster;
-        let sector_id = self.bitmap.first_sector;
-        let sector_index = (cluster_id - FIRST_CLUSTER_ID) / BLOCK_SIZE as u32;
-        let mut first_cluster = None;
-        let mut count = 0;
-
-        for sector_offset in sector_index..self.bitmap.num_sectors {
-            let slot = self.cache.read(sector_id + sector_offset, fs).await?;
-            let (bytes, _remainder) = slot.block.as_chunks::<4>();
-            for chunk in bytes {
-                if u32::from_le_bytes(*chunk) != u32::MAX {
-                    for byte in chunk {
-                        for bit in 0..u8::BITS {
-                            if *byte & 1 << bit == 0 {
-                                if first_cluster.is_none() {
-                                    first_cluster = Some(cluster_id);
-                                    count = 1
-                                } else {
-                                    count += 1;
-                                }
-
-                                if count == num_clusters {
-                                    let first = first_cluster.unwrap();
-                                    self.next_search_cluster = first + count;
-                                    return Ok(Some(AllocatedRun {
-                                        cluster_id,
-                                        count: num_clusters,
-                                    }));
-                                }
-                            } else {
-                                first_cluster = None;
-                            }
-
-                            cluster_id += 1;
-                        }
-                    }
-                } else {
-                    cluster_id += u32::BITS;
-                    first_cluster = None;
-                }
-            }
-        }
-
-        self.next_search_cluster = FIRST_CLUSTER_ID;
-        Ok(None)
-    }
-    */
 }

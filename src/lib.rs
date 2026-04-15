@@ -9,7 +9,6 @@ pub mod blocking {
     pub use bisync::synchronous::*;
 
     mod allocation;
-    mod allocation_bitmap;
     pub mod boot_sector;
     pub mod directory;
     mod directory_entry;
@@ -30,7 +29,6 @@ pub mod blocking {
 pub mod asynchronous {
     pub use bisync::asynchronous::*;
     mod allocation;
-    mod allocation_bitmap;
     pub mod boot_sector;
     pub mod directory;
     mod directory_entry;

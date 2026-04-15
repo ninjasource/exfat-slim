@@ -3,7 +3,6 @@ use core::str::from_utf8;
 
 use super::{
     allocation::{AllocatedRun, StoredChain},
-    allocation_bitmap::Allocation,
     bisync,
     directory_entry::{
         DirectoryEntryChain, FileAttributes, GeneralSecondaryFlags, Location, RAW_ENTRY_LEN,
@@ -91,18 +90,6 @@ impl OpenOptions {
         self.create_new = create_new;
         self
     }
-
-    /*
-    pub fn build(&self) -> OpenOptions {
-        OpenOptions {
-            read: self.read,
-            append: self.append,
-            create: self.create,
-            create_new: self.create_new,
-            truncate: self.truncate,
-            write: self.write,
-        }
-    }*/
 }
 
 #[derive(Debug, Clone)]
@@ -111,7 +98,6 @@ pub(crate) struct FileDetails {
     pub data_length: u64,
     pub valid_data_length: u64, // number of valid bytes in the file (reads past valid_data_length should return zeros)
     pub attributes: FileAttributes,
-    // #[allow(dead_code)]
     pub name: String, // TODO: look into removing this and only reading it if requested via an impl
     pub location: Location,
     pub flags: GeneralSecondaryFlags,
@@ -132,12 +118,6 @@ impl defmt::Format for FileDetails {
             self.flags,
             self.secondary_count,
         );
-    }
-}
-
-impl FileDetails {
-    pub fn get_num_clusters(&self, bytes_per_cluster: u32) -> usize {
-        self.data_length.div_ceil(bytes_per_cluster as u64) as usize
     }
 }
 
@@ -323,6 +303,7 @@ impl File {
         fs: &mut FileSystem<D>,
     ) -> Result<String, ExFatError<D>> {
         fs.mount().await?;
+
         // because multi byte characters may cross sector boundaries
         // I recon its safer to read the entire file into a buffer before decoding it
         let mut buf = Vec::new();
@@ -455,6 +436,7 @@ impl File {
 
         Ok(())
     }
+
     /// Writes all bytes from buf into the file from the file cursor position
     ///
     /// This function will automatically increase the length of the file if necessary
@@ -553,94 +535,6 @@ impl File {
         Ok(())
     }
 
-    /*
-        /// Writes all bytes from buf into the file from the file cursor position
-        ///
-        /// This function will automatically increase the length of the file if necessary
-        #[bisync]
-        pub async fn write1<D: BlockDevice>(
-            &mut self,
-            fs: &mut FileSystem<D>,
-            buf: &[u8],
-        ) -> Result<(), ExFatError<D>> {
-            if buf.len() == 0 {
-                return Ok(());
-            }
-
-            fs.mount().await?;
-            if !self.open_options.write {
-                return Err(ExFatError::WriteNotEnabled);
-            }
-
-            // keep track these file details to check if they have changed later
-            let flags = self.details.flags;
-            let valid_data_length = self.details.valid_data_length;
-            let data_length = self.details.data_length;
-
-            self.update_data_length(buf.len());
-            let has_fat_chain_original = !flags.contains(GeneralSecondaryFlags::NoFatChain);
-
-            let (cluster_ids, has_fat_chain) = self.get_or_allocate_clusters(fs, buf.len()).await?;
-
-            if !has_fat_chain_original && has_fat_chain {
-                // if file had no fat chain before we set one up for existing data
-                self.convert_file_to_fat_chain_if_required(fs).await?;
-            }
-
-            let mut cluster_ids = cluster_ids.into_iter();
-
-            // write the first sector (could be partially full)
-            let len = self.write_partial_sector(fs, buf, &mut cluster_ids).await?;
-
-            // if there are still more bytes to write
-            if len < buf.len() {
-                let start_index = len;
-                let (blocks, remainder) = buf[start_index..].as_chunks::<BLOCK_SIZE>();
-
-                // write full sectors
-                for block in blocks {
-                    let sector_id = self.get_current_sector_id(fs)?;
-                    fs.dev
-                        .write(sector_id, block)
-                        .await
-                        .map_err(ExFatError::Io)?;
-                    self.move_file_cursor_for_writes(fs, block.len(), &mut cluster_ids)?;
-                }
-
-                // write the last sector (could be partially full)
-                let _len = self
-                    .write_partial_sector(fs, remainder, &mut cluster_ids)
-                    .await?;
-            }
-
-            // check if we need to update the file directory entry
-            if valid_data_length != self.details.valid_data_length
-                || data_length != self.details.data_length
-                || flags != self.details.flags
-            {
-                // read dir entries for this file from disk
-                let mut dir_entries = self.get_file_dir_entry_set(fs).await?;
-
-                // the stream ext is always the second entry
-                let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
-                stream_ext.data_length = self.details.data_length;
-                stream_ext.valid_data_length = self.details.valid_data_length;
-                stream_ext.general_secondary_flags = self.details.flags;
-
-                // serialize the mutated stream ext back to the dir entry
-                dir_entries[1].copy_from_slice(&stream_ext.serialize());
-
-                // recalculate the file checksum and save back to appropriate dir entry
-                update_checksum(&mut dir_entries);
-
-                // write to disk - only the directory entries are written.
-                write_dir_entries_to_disk(&mut fs.dev, self.details.location, dir_entries).await?;
-            }
-
-            Ok(())
-        }
-    */
-
     fn set_current_cluster<D: BlockDevice>(&mut self, cluster_id: u32, fs: &FileSystem<D>) {
         self.current_cluster = cluster_id;
         self.remaining_bytes_in_cluster = fs.fs.cluster_length;
@@ -665,26 +559,30 @@ impl File {
 
         self.cursor = cursor;
         let num_clusters = (cursor / fs.fs.cluster_length as u64) as u32;
-
-        if self
-            .details
-            .flags
-            .contains(GeneralSecondaryFlags::NoFatChain)
-        {
-            // no fat chain so all clusters are consecutive for this file
-            self.set_current_cluster(self.details.first_cluster + num_clusters, fs);
-        } else {
-            self.set_current_cluster(self.details.first_cluster, fs);
-
-            for _ in 0..num_clusters {
-                match fs
-                    .fat
-                    .next_cluster_in_fat_chain(self.current_cluster, &mut fs.dev)
-                    .await?
-                {
-                    Some(cluster_id) => self.current_cluster = cluster_id,
-                    None => return Err(ExFatError::EndOfFatChain),
+        match self.chain {
+            StoredChain::Empty => self.current_cluster = self.details.first_cluster,
+            StoredChain::Contiguous {
+                first,
+                cluster_count: _cluster_count,
+            } => self.set_current_cluster(first + num_clusters, fs),
+            StoredChain::Fat {
+                first,
+                last: _last,
+                cluster_count: _cluster_count,
+            } => {
+                let mut cluster_id = first;
+                for _ in 0..num_clusters {
+                    match fs
+                        .fat
+                        .next_cluster_in_fat_chain(cluster_id, &mut fs.dev)
+                        .await?
+                    {
+                        Some(cluster_id_next) => cluster_id = cluster_id_next,
+                        None => return Err(ExFatError::EndOfFatChain),
+                    }
                 }
+
+                self.set_current_cluster(cluster_id, fs);
             }
         }
 
@@ -703,12 +601,6 @@ impl File {
     ) -> Result<(), ExFatError<D>> {
         let (dir_path, file_or_dir_name) = split_path(to_path);
         let num_clusters = self.num_clusters(fs);
-
-        // find free space on the drive, preferring contiguous clusters
-        let allocation = fs
-            .alloc_bitmap
-            .find_free_clusters(&mut fs.dev, &fs.fs, num_clusters, false, None)
-            .await?;
 
         let run = fs
             .allocator
@@ -750,142 +642,6 @@ impl File {
 
         Ok(())
     }
-
-    /*
-    /// This function gets clusters (after the current_cluster) that can be used to write data to and ensures that clusters are all allocated
-    /// If the cursor is at the end of the file (data_length) the function will allocate new clusters as required
-    /// If the cursor is somewhere in the middle of the file it will return already allocated clusters
-    /// If the custor is near the end of the file this function can return a combination of already
-    ///   allocated clusters followed by newly allocated ones
-    /// If the file flags are "no_fat_chain" and there are no more contiguous clusters
-    ///   it will switch to using a fat chain and update the fat acordingly
-    #[bisync]
-    async fn get_or_allocate_clusters<D: BlockDevice>(
-        &mut self,
-        fs: &mut FileSystem<D>,
-        num_bytes: usize,
-    ) -> Result<(Vec<u32>, bool), ExFatError<D>> {
-        if self.cursor > self.details.data_length {
-            return Err(ExFatError::SeekOutOfRange);
-        }
-
-        //  let cluster = self.cursor / fs.fs.cluster_length as u64;
-        //  let cluster_delta = (self.cursor + num_bytes as u64) / fs.fs.cluster_length as u64;
-
-        // fast path, exit early
-        //  if cluster == cluster_delta {
-        //  defmt::info!("fast path, exit early");
-        //      return Ok((Vec::new(), false));
-        // }
-
-        // we can fit num_bytes into the current cluster then return that cluster, no need to allocate more clusters
-        //    let remaining_bytes_in_cluster =
-        //        fs.fs.cluster_length - (self.cursor % fs.fs.cluster_length as u64) as u32;
-
-        let remaining_bytes_in_cluster = self.remaining_bytes_in_cluster;
-
-        // fast path, exit early
-        if num_bytes <= remaining_bytes_in_cluster as usize {
-            //  self.remaining_bytes_in_cluster -= num_bytes as u32;
-
-            return Ok((Vec::new(), false));
-        }
-
-        crate::info!("get_or_allocate_clusters slow path");
-        let mut allocated_cluster_ids = Vec::new();
-
-        let (allocated_bytes, unallocated_bytes) = {
-            let remaining =
-                self.details.data_length - self.cursor - remaining_bytes_in_cluster as u64;
-            let unallocated_bytes = remaining.min(num_bytes as u64) as usize;
-            let allocated_bytes = num_bytes - unallocated_bytes;
-            (allocated_bytes, unallocated_bytes)
-        };
-
-        crate::info!(
-            "allocated_bytes: {} unallocated_bytes: {} current_cluster: {}",
-            allocated_bytes,
-            unallocated_bytes,
-            self.current_cluster
-        );
-
-        // self.remaining_bytes_in_cluster -= allocated_bytes as u32;
-
-        let mut has_fat_chain = !self
-            .details
-            .flags
-            .contains(GeneralSecondaryFlags::NoFatChain);
-
-        // add already allocated clusters (don't include the current cluster hence not using div_ceil)
-        let num_allocated_clusters = allocated_bytes / (fs.fs.cluster_length as usize);
-
-        let mut cluster_id = self.current_cluster;
-        if has_fat_chain {
-            // follow the fat chain and build up
-            for _ in 0..num_allocated_clusters {
-                if let Some(next_id) =
-                    next_cluster_in_fat_chain(&mut fs.dev, fs.fs.fat_offset, cluster_id).await?
-                {
-                    cluster_id = next_id;
-                    allocated_cluster_ids.push(cluster_id);
-                } else {
-                    return Err(ExFatError::EndOfFatChain);
-                }
-            }
-        } else {
-            // clusters are contiguous
-            for _ in 0..num_allocated_clusters {
-                cluster_id += 1;
-                allocated_cluster_ids.push(cluster_id);
-            }
-        }
-
-        if unallocated_bytes == 0 {
-            return Ok((allocated_cluster_ids, has_fat_chain));
-        }
-
-        let num_unallocated_clusters =
-            unallocated_bytes.div_ceil(fs.fs.cluster_length as usize) as u32;
-
-        // returns all newly allocated clusters
-        let allocation = fs
-            .alloc_bitmap
-            .find_free_clusters(
-                &mut fs.dev,
-                &fs.fs,
-                num_unallocated_clusters,
-                has_fat_chain,
-                Some(self.current_cluster),
-            )
-            .await?;
-
-        let cluster_ids = match allocation {
-            Allocation::Contiguous {
-                first_cluster,
-                num_clusters,
-            } => {
-                let cluster_ids: Vec<u32> = (first_cluster..first_cluster + num_clusters).collect();
-                cluster_ids
-            }
-            Allocation::FatChain { clusters } => {
-                has_fat_chain = true;
-
-                // set fat chain for newly allocated clusters
-                let mut combined = vec![self.current_cluster];
-                combined.extend_from_slice(&clusters);
-                fat::update_fat_chain(&mut fs.dev, fs.fs.fat_offset, &combined).await?;
-                clusters
-            }
-        };
-
-        crate::info!("alloc about to call");
-        fs.alloc_bitmap
-            .mark_allocated(&mut fs.dev, &fs.fs, &cluster_ids, true)
-            .await?;
-
-        allocated_cluster_ids.extend_from_slice(&cluster_ids);
-        Ok((allocated_cluster_ids, has_fat_chain))
-    }*/
 
     fn update_data_length(&mut self, num_bytes: usize) {
         let valid_data_length =
@@ -934,34 +690,6 @@ impl File {
         Ok(())
     }
 
-    /*
-    /// helps to convert a file that had no_fat_chain to one with a fat chain
-    #[bisync]
-    async fn convert_file_to_fat_chain_if_required<D: BlockDevice>(
-        &mut self,
-        fs: &mut FileSystem<D>,
-    ) -> Result<(), ExFatError<D>> {
-        if self
-            .details
-            .flags
-            .contains(GeneralSecondaryFlags::NoFatChain)
-        {
-            // unset the no_fat_chain flag
-            self.details
-                .flags
-                .set(GeneralSecondaryFlags::NoFatChain, false);
-
-            // turn cluster_id range in to cluster_id collection
-            let cluster_ids: Vec<u32> =
-                (self.details.first_cluster..self.current_cluster).collect();
-
-            // update fat chain
-            fat::update_fat_chain(&mut fs.dev, fs.fs.fat_offset, &cluster_ids).await?;
-        }
-
-        Ok(())
-    }*/
-
     #[bisync]
     async fn write_partial_sector_new<D: BlockDevice>(
         &mut self,
@@ -998,44 +726,6 @@ impl File {
         Ok(0)
     }
 
-    /*
-    #[bisync]
-    async fn write_partial_sector<D: BlockDevice>(
-        &mut self,
-        fs: &mut FileSystem<D>,
-        buf: &[u8],
-        cluster_ids: &mut impl Iterator<Item = u32>,
-    ) -> Result<usize, ExFatError<D>> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-
-        let start_index = (self.cursor % BLOCK_SIZE as u64) as usize;
-        let end_index = BLOCK_SIZE.min(start_index + buf.len());
-        let sector_id = self.get_current_sector_id(fs)?;
-
-        // for the first block, if the write does not start on a block boundary
-        // we need to read the existing sector and add in the bit we want to write
-        // for max efficiency the user should write in block size chunks
-        if start_index > 0 || end_index < BLOCK_SIZE {
-            let mut block = [0u8; BLOCK_SIZE];
-            fs.dev
-                .read(sector_id, &mut block)
-                .await
-                .map_err(ExFatError::Io)?;
-            let len = end_index - start_index;
-            block[start_index..end_index].copy_from_slice(&buf[..len]);
-            fs.dev
-                .write(sector_id, &block)
-                .await
-                .map_err(ExFatError::Io)?;
-            self.move_file_cursor_for_writes(fs, len, cluster_ids)?;
-            return Ok(len);
-        }
-
-        Ok(0)
-    }*/
-
     #[bisync]
     async fn get_file_dir_entry_set<D: BlockDevice>(
         &mut self,
@@ -1069,38 +759,6 @@ impl File {
     fn eof(&self) -> bool {
         self.cursor == self.details.data_length
     }
-
-    /*
-    #[bisync]
-    async fn move_file_cursor_for_reads<D: BlockDevice>(
-        &mut self,
-        fs: &mut FileSystem<D>,
-        num_bytes: usize,
-    ) -> Result<(), ExFatError<D>> {
-        self.cursor += num_bytes as u64;
-
-        // assume that num_bytes is only ever up to the end of the current cluster
-        // here we detect if we got to the end of the cluster and hence if we need to jump to the next cluster or not
-        if num_bytes > 0 && self.cursor.is_multiple_of(fs.fs.cluster_length as u64) && !self.eof() {
-            if self
-                .details
-                .flags
-                .contains(GeneralSecondaryFlags::NoFatChain)
-            {
-                // no fat chain so all clusters are consecutive for this file
-                self.set_current_cluster(self.current_cluster + 1, fs);
-            } else if let Some(next_cluster_id) =
-                next_cluster_in_fat_chain(&mut fs.dev, fs.fs.fat_offset, self.current_cluster)
-                    .await?
-            {
-                self.set_current_cluster(next_cluster_id, fs);
-            } else {
-                return Err(ExFatError::EndOfFatChain);
-            }
-        }
-
-        Ok(())
-    }*/
 
     #[bisync]
     async fn move_file_cursor<D: BlockDevice>(
@@ -1146,37 +804,4 @@ impl File {
             }
         }
     }
-
-    /*
-    fn move_file_cursor_for_writes<D: BlockDevice>(
-        &mut self,
-        fs: &mut FileSystem<D>,
-        num_bytes: usize,
-        cluster_ids: &mut impl Iterator<Item = u32>,
-    ) -> Result<(), ExFatError<D>> {
-        //        crate::info!(
-        //            "move_file_cursor_for_writes: cursor {} num_bytes {} remaining_bytes_in_cluster {}",
-        //            self.cursor,
-        //            num_bytes,
-        //            self.remaining_bytes_in_cluster
-        //        );
-        self.cursor += num_bytes as u64;
-
-        if self.remaining_bytes_in_cluster >= num_bytes as u32 {
-            self.remaining_bytes_in_cluster -= num_bytes as u32;
-        } else {
-            let num_bytes = num_bytes as u32 - self.remaining_bytes_in_cluster;
-            self.remaining_bytes_in_cluster = 0;
-
-            if let Some(cluster_id) = cluster_ids.next() {
-                self.set_current_cluster(cluster_id, fs);
-                self.remaining_bytes_in_cluster -= num_bytes;
-            } else {
-                return Err(ExFatError::EndOfFatChain);
-            }
-        }
-
-
-        Ok(())
-    }*/
 }
