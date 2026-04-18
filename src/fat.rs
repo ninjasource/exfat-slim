@@ -3,6 +3,7 @@ use core::marker::PhantomData;
 use super::{
     bisync,
     error::ExFatError,
+    file::{Touched, TouchedKind, TouchedSector},
     io::{BLOCK_SIZE, BlockDevice},
     slot_cache::SlotCache,
 };
@@ -13,13 +14,13 @@ const ENTRY_SIZE: usize = size_of::<u32>();
 const NUM_ENTRIES: usize = BLOCK_SIZE / ENTRY_SIZE;
 
 #[derive(Debug)]
-pub struct Fat<D: BlockDevice> {
+pub struct Fat<D: BlockDevice, const N: usize> {
     pub fat_offset: Option<u32>,
-    cache: SlotCache<D, 4>,
+    cache: SlotCache<D, N>,
     _phantom: PhantomData<D>,
 }
 
-impl<D: BlockDevice> Fat<D> {
+impl<D: BlockDevice, const N: usize> Fat<D, N> {
     pub fn new() -> Self {
         Self {
             fat_offset: None,
@@ -34,16 +35,24 @@ impl<D: BlockDevice> Fat<D> {
         Ok(())
     }
 
+    #[bisync]
+    pub async fn flush_sector(&mut self, io: &mut D, sector: u32) -> Result<(), ExFatError<D>> {
+        self.cache.flush_sector(io, sector).await?;
+        Ok(())
+    }
+
     /// sets a fat record to build up the fat chain
     /// a cluster_id_to of 0 is used for unlinking
     #[bisync]
     pub(crate) async fn set(
         &mut self,
+        io: &mut D,
+        touched: &mut impl Touched,
         cluster_id: u32,
         cluster_id_to: u32,
-        io: &mut D,
     ) -> Result<(), ExFatError<D>> {
         let sector_id = self.get_sector_id(cluster_id)?;
+        touched.insert(TouchedSector::new(TouchedKind::Fat, sector_id));
         let slot = self.cache.read(sector_id, io).await?;
 
         let (chunks, _remainder) = slot.block.as_chunks_mut::<ENTRY_SIZE>();

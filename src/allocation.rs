@@ -20,7 +20,7 @@ use super::{
     directory_entry::AllocationBitmapDirEntry,
     error::ExFatError,
     fat::Fat,
-    file::NO_CLUSTER_ID,
+    file::{NO_CLUSTER_ID, Touched, TouchedKind, TouchedSector},
     io::{BLOCK_SIZE, BlockDevice},
     slot_cache::SlotCache,
 };
@@ -74,14 +74,14 @@ pub struct AllocationBitmapSlim {
 }
 
 #[derive(Debug)]
-pub struct Allocator<D: BlockDevice> {
+pub struct Allocator<D: BlockDevice, const N: usize> {
     pub bitmap: AllocationBitmapSlim,
-    cache: SlotCache<D, 4>,
+    cache: SlotCache<D, N>,
     next_search_cluster: u32,
     _phantom: PhantomData<D>,
 }
 
-impl<D: BlockDevice> Allocator<D> {
+impl<D: BlockDevice, const N: usize> Allocator<D, N> {
     pub fn new() -> Self {
         Self {
             bitmap: AllocationBitmapSlim::default(),
@@ -89,6 +89,12 @@ impl<D: BlockDevice> Allocator<D> {
             next_search_cluster: FIRST_CLUSTER_ID,
             _phantom: PhantomData::default(),
         }
+    }
+
+    #[bisync]
+    pub async fn flush_sector(&mut self, io: &mut D, sector: u32) -> Result<(), ExFatError<D>> {
+        self.cache.flush_sector(io, sector).await?;
+        Ok(())
     }
 
     #[bisync]
@@ -101,13 +107,14 @@ impl<D: BlockDevice> Allocator<D> {
     pub async fn allocate(
         &mut self,
         io: &mut D,
+        touched: &mut impl Touched,
         chain: &StoredChain,
         count: u32,
     ) -> Result<AllocatedRun, ExFatError<D>> {
         match chain {
             StoredChain::Empty => {
                 let run = self.find_free_clusters(io, count).await?;
-                self.mark_allocated(io, &run, true).await?;
+                self.mark_allocated(io, touched, &run, true).await?;
                 Ok(run)
             }
             StoredChain::Contiguous {
@@ -118,7 +125,7 @@ impl<D: BlockDevice> Allocator<D> {
                 let run = self
                     .find_free_clusters_from(io, from_cluster, count)
                     .await?;
-                self.mark_allocated(io, &run, true).await?;
+                self.mark_allocated(io, touched, &run, true).await?;
                 Ok(run)
             }
             StoredChain::Fat {
@@ -130,7 +137,7 @@ impl<D: BlockDevice> Allocator<D> {
                 let run = self
                     .find_free_clusters_from(io, from_cluster, count)
                     .await?;
-                self.mark_allocated(io, &run, true).await?;
+                self.mark_allocated(io, touched, &run, true).await?;
                 Ok(run)
             }
         }
@@ -140,8 +147,9 @@ impl<D: BlockDevice> Allocator<D> {
     pub async fn free(
         &mut self,
         io: &mut D,
+        touched: &mut impl Touched,
+        fat: &mut Fat<D, N>,
         chain: &StoredChain,
-        fat: &mut Fat<D>,
     ) -> Result<(), ExFatError<D>> {
         match chain {
             StoredChain::Empty => {
@@ -155,7 +163,7 @@ impl<D: BlockDevice> Allocator<D> {
                     first_cluster: *first,
                     cluster_count: *cluster_count,
                 };
-                self.mark_allocated(io, &run, false).await?
+                self.mark_allocated(io, touched, &run, false).await?
             }
             StoredChain::Fat {
                 first,
@@ -171,13 +179,13 @@ impl<D: BlockDevice> Allocator<D> {
                         first_cluster: cluster_id,
                         cluster_count: 1,
                     };
-                    self.mark_allocated(io, &run, false).await?;
-                    fat.set(cluster_id, NO_CLUSTER_ID, io).await?;
+                    self.mark_allocated(io, touched, &run, false).await?;
+                    fat.set(io, touched, cluster_id, NO_CLUSTER_ID).await?;
                     cluster_id = next_cluster_id;
                 }
 
                 // the last cluster
-                fat.set(cluster_id, NO_CLUSTER_ID, io).await?;
+                fat.set(io, touched, cluster_id, NO_CLUSTER_ID).await?;
             }
         }
         Ok(())
@@ -199,6 +207,7 @@ impl<D: BlockDevice> Allocator<D> {
     pub(crate) async fn mark_allocated(
         &mut self,
         io: &mut D,
+        touched: &mut impl Touched,
         run: &AllocatedRun,
         allocated: bool,
     ) -> Result<(), ExFatError<D>> {
@@ -210,7 +219,8 @@ impl<D: BlockDevice> Allocator<D> {
         let mut cluster_id = run.first_cluster;
 
         for sector_offset in sector_index..num_sectors {
-            let slot = self.cache.read(first_sector + sector_offset, io).await?;
+            let sector_id = first_sector + sector_offset;
+            let slot = self.cache.read(sector_id, io).await?;
 
             let first_cluster_of_slot = sector_index * BLOCK_SIZE as u32 + FIRST_CLUSTER_ID;
             let start = cluster_id - first_cluster_of_slot;
@@ -226,6 +236,8 @@ impl<D: BlockDevice> Allocator<D> {
                 }
             }
 
+            slot.is_dirty = true;
+            touched.insert(TouchedSector::new(TouchedKind::Bitmap, sector_id));
             let num_clusters_in_slot = end - start;
             remaining -= num_clusters_in_slot;
             cluster_id += num_clusters_in_slot;
@@ -233,8 +245,6 @@ impl<D: BlockDevice> Allocator<D> {
             if remaining == 0 {
                 break;
             }
-
-            //let start
         }
 
         Ok(())

@@ -1,11 +1,10 @@
 mod common;
 
-use crate::common::asynchronous::InMemoryBlockDevice;
-use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
+use crate::common::blocking::InMemoryBlockDevice;
+use exfat_slim::blocking::{error::ExFatError, file_system::FileSystem};
 use log::info;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
+fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     env_logger::init();
     color_backtrace::install();
 
@@ -13,13 +12,13 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let mut fs: FileSystem<InMemoryBlockDevice, _> = FileSystem::new(io);
     let path = "/temp2/hello2/shoe/test.txt";
 
-    let exists = fs.exists(path).await?;
+    let exists = fs.exists(path)?;
     info!("file exists: {exists}");
 
     info!("deleting file");
-    fs.remove_file(path).await?;
+    fs.remove_file(path)?;
 
-    let exists = fs.exists(path).await?;
+    let exists = fs.exists(path)?;
     info!("file exists: {exists}");
 
     Ok(())

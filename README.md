@@ -3,16 +3,25 @@ An exFAT file system library written in safe Rust for embedded environments.
 
 ## Introduction
 
-The exfat file system is an upgrade to the FAT32 file system (which limits to 4GB max files size and 2TB max volume size).
-In exFAT, the max volume size is 128 petabytes with max files sizes up to that.
+The exfat file system is an upgrade to the FAT32 file system. 
+The table below highlights some differences. 
+
+| | exFAT | FAT32 |
+|---|---|---|
+| Max file size | 128 PB | 4 GiB - 1 byte |
+| Max volume size | 128 PB | 2 TB |
+| Max filename length | 255 chars | 255 chars |
+| Filename encoding | UTF-16LE | Long filenames use 16-bit Unicode entries |
+| Max files in one folder | 2,796,202 | ~65,534 in Windows FAT32 implementation; fewer with long names |
+| Contiguous sector access `NoFatChain` | Yes for unfragmented files. Fat chain for fragmented files | Fat chain only
+
 The file system is optimized for flash storage and is particularly good for SD cards when it comes to wear levelling.
 This is a `[no_std]` implementation requiring the `alloc` crate.
 There is no unsafe Rust in the codebase (excl. dependencies)
 
 ## Why build this
 
-There are already multiple Rust implementations of the exFAT file system out there. 
-However, I wanted to hand write a version with no unsafe Rust and to experiment with various API ideas I have in the space.
+I wanted to build a `no_std` file system library with the same ergonomics of the Rust standard library. I also wanted to support both a blocking and async api.
 There is no LLM generated code in this repo for two reasons. 
 One is that I enjoy writing software (even the typing bit) and I wrote this code for the learning experience it gave me rather than getting things done.
 Secondly, I respect the people who have to read my code and I personally find it easier to read a codebase when I can trust that it is hallucination free. 
@@ -66,16 +75,14 @@ Open a file for writing, make some writes, change the file cursor, overwrite som
     println!("{contents}"); // hello World
 ```
 
-## Immediate mode
+## Caching
 
-For the sake of simplicity I chose to write all file metadata on every write operation. 
-Therefore there is no need to call flush or close on the file. 
-As a result of this it is advisable to write data in multiples of `BLOCK_SIZE` (512 bytes) and buffer data yourself to reduce SD card wear. 
-The file system therefore has a very small memory footprint.
-A plus side to this is that there should be enough time to put the file system in a consistent state if the user physically removes the SD card and there is an SD Detect pin available.
-There is a 10-20ms window of opportunity to write the last remaining blocks in the write queue. 
-The downside to this is that we increase wear on the SD card by writing directory entry metadata (like timestamps and data length) on every write operation.
-However, this can be mitigated by writing large buffers to disk in one go instead of chunking it up yourself and calling many write operations.
+There is a built in sector cache that allows the system to correctly manage the allocation bitmap and the fat table at a global level. 
+In addition to the data cache speeds up reads and writes, especially when the same sector keeps being accessed. 
+The caching level can be adjusted when creating an instance of the file system. 
+The default (N = 4) is reasonable for an embedded device, using 4 x 3 x 512 = 6144 bytes of ram.
+You need to close or flush a file to make it durable (persisted to media).
+
 Another point to make is that the volume dirty bit is never touched for write operations as it is not mandatory to do so in the spec.
 It is, however, exposed in the `utils` module if you chose to use it manually.
 Note that power loss during a large write operation could result in pre-allocated clusters being permanently lost (at least until a reformat of the disk) as well as data loss from data not written to disk.
@@ -116,16 +123,16 @@ Implemented so far:
     - Appends
     - Truncate
     - Seek
+- Use Actor pattern so that BlockDevice trait can take a shared reference to self
+- Support `close()` and `flush()` instead of immediate mode. Enable `close()` on Drop when using the actor pattern
+- Support block caching
 
 Work in progress:
 - Return zeros where user attempts to read past valid_data_length in file (see File::read function)
 - Truncate to specified length to preallocate a file
 - Better test coverage
 - Timestamps
-- Use Actor pattern so that BlockDevice trait can take a shared reference to self
-- Support `close()` and `flush()` instead of immediate mode. Enable `close()` on Drop (should be possible with Actor pattern)
 - Maintain list of locked open files
-- Experiment with buffer pools to limit memory allocation 
 - Add support for different block sizes (currently only 512 byte blocks supported)
 - Add Embassy example
 

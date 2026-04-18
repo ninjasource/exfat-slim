@@ -454,9 +454,9 @@ impl DirectoryEntryChain {
     }
 
     #[bisync]
-    pub(crate) async fn next_file_dir_entry<D: BlockDevice>(
+    pub(crate) async fn next_file_dir_entry<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<Option<(FileDirEntry, Location)>, ExFatError<D>> {
         while let Some((entry, location)) = self.next(fs).await? {
             let entry_type_val = entry[0];
@@ -478,9 +478,9 @@ impl DirectoryEntryChain {
     }
 
     #[bisync]
-    pub(crate) async fn next_file_entry<D: BlockDevice>(
+    pub(crate) async fn next_file_entry<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
         filter: &impl DirectoryEntryFilter,
     ) -> Result<Option<FileDetails>, ExFatError<D>> {
         'outer: loop {
@@ -542,9 +542,9 @@ impl DirectoryEntryChain {
     }
 
     #[bisync]
-    pub(crate) async fn next<D: BlockDevice>(
+    pub(crate) async fn next<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<Option<(&[u8; RAW_ENTRY_LEN], Location)>, ExFatError<D>> {
         if self.dir_entry_offset >= DIR_ENTRIES_PER_BLOCK {
             self.cluster_offset += 1;
@@ -571,10 +571,8 @@ impl DirectoryEntryChain {
 
         if self.fetch_required {
             let sector_id = self.get_current_sector_id()?;
-            fs.dev
-                .read(sector_id, &mut self.buf)
-                .await
-                .map_err(ExFatError::Io)?;
+            let slot = fs.data_blocks.read(sector_id, &mut fs.dev).await?;
+            self.buf.copy_from_slice(&slot.block);
             self.fetch_required = false;
         }
 

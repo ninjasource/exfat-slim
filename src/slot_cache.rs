@@ -68,6 +68,18 @@ impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
     }
 
     #[bisync]
+    pub async fn flush_sector(&mut self, io: &mut D, sector: u32) -> Result<(), ExFatError<D>> {
+        for slot in &mut self.cache {
+            if slot.sector_id == sector {
+                slot.flush(io).await?;
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[bisync]
     pub async fn read(&mut self, sector_id: u32, io: &mut D) -> Result<&mut Slot, ExFatError<D>> {
         if let Some(index) = self.cache_hit(sector_id) {
             return Ok(&mut self.cache[index]);
@@ -136,6 +148,7 @@ impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
         io.write(slot.sector_id, &slot.block)
             .await
             .map_err(ExFatError::Io)?;
+        slot.is_dirty = false;
         Ok(())
     }
 }

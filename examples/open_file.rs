@@ -17,6 +17,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let options = OpenOptions::new().write(true).create(true).truncate(true);
     let mut file = fs.open(path, options).await?;
     file.write(&mut fs, b"hello world").await?;
+    file.close(&mut fs).await?;
 
     // open file for read and read contents
     let options = OpenOptions::new().read(true);
@@ -42,6 +43,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let contents = file.read_to_string(&mut fs).await;
     assert!(matches!(contents, Err(ExFatError::ReadNotEnabled)));
     info!("confirmed behaviour:  cannot read because read not enabled");
+    file.close(&mut fs).await?;
 
     // open file for read to get its contents
     let options = OpenOptions::new().read(true);
@@ -59,6 +61,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     let options = OpenOptions::new().write(true).create(true);
     let mut file = fs.open(path, options).await?;
     file.write(&mut fs, b"12345").await?;
+    file.close(&mut fs).await?;
 
     // confirm expected changes
     let options = OpenOptions::new().read(true);
@@ -85,6 +88,7 @@ async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     file.seek(&mut fs, 0).await?;
     let contents = file.read_to_string(&mut fs).await?;
     info!("write then read: \"{contents}\"");
+    file.close(&mut fs).await?;
 
     Ok(())
 }

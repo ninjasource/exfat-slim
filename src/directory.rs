@@ -74,8 +74,8 @@ impl DirectoryEntryFilter for ExactNameFilter {
 }
 
 #[bisync]
-pub(crate) async fn get_leaf_file_entry<D: BlockDevice>(
-    fs: &mut FileSystem<D>,
+pub(crate) async fn get_leaf_file_entry<D: BlockDevice, const N: usize>(
+    fs: &mut FileSystem<D, N>,
     path: &str,
     file_attributes: Option<FileAttributes>,
 ) -> Result<Option<FileDetails>, ExFatError<D>> {
@@ -131,8 +131,8 @@ fn is_root_directory(path: &str) -> bool {
 }
 
 #[bisync]
-pub(crate) async fn directory_list<D: BlockDevice>(
-    fs: &mut FileSystem<D>,
+pub(crate) async fn directory_list<D: BlockDevice, const N: usize>(
+    fs: &mut FileSystem<D, N>,
     path: &str,
 ) -> Result<DirectoryIterator, ExFatError<D>> {
     let cluster_id = if is_root_directory(path) {
@@ -179,9 +179,9 @@ impl DirectoryEntry {
 
 impl DirectoryIterator {
     #[bisync]
-    pub async fn next_entry<D: BlockDevice>(
+    pub async fn next_entry<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<Option<DirectoryEntry>, ExFatError<D>> {
         let filter = AllPassFilter {};
         Ok(self

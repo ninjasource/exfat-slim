@@ -9,7 +9,7 @@ use super::{
         StreamExtensionDirEntry, update_checksum,
     },
     error::ExFatError,
-    file_system::{FileSystem, write_dir_entries_to_disk},
+    file_system::FileSystem,
     io::{BLOCK_SIZE, BlockDevice},
     utils::split_path,
 };
@@ -25,6 +25,7 @@ pub struct OpenOptions {
 }
 
 pub(crate) const NO_CLUSTER_ID: u32 = 0;
+pub(crate) const DEFAULT_TOUCHED_SECTORS: usize = 6;
 
 impl OpenOptions {
     pub const fn new() -> Self {
@@ -126,6 +127,109 @@ pub struct Metadata {
     pub(crate) details: FileDetails,
 }
 
+pub(crate) trait Touched {
+    fn insert(&mut self, touched: TouchedSector);
+
+    #[bisync]
+    async fn flush<D: BlockDevice, const N: usize>(
+        &mut self,
+        fs: &mut FileSystem<D, N>,
+    ) -> Result<(), ExFatError<D>>;
+}
+
+#[derive(Debug)]
+pub(crate) struct FileDirty<const N: usize = DEFAULT_TOUCHED_SECTORS> {
+    sectors: heapless::Vec<TouchedSector, N>,
+    overflowed: bool,
+    is_dirty: bool,
+}
+
+impl FileDirty {
+    pub fn new() -> Self {
+        Self {
+            sectors: heapless::Vec::new(),
+            overflowed: false,
+            is_dirty: false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum TouchedKind {
+    Data,
+    Fat,
+    Bitmap,
+    Dir,
+    None,
+}
+
+impl Default for TouchedKind {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TouchedSector {
+    kind: TouchedKind,
+    sector: u32,
+}
+
+impl TouchedSector {
+    pub fn new(kind: TouchedKind, sector: u32) -> Self {
+        Self { kind, sector }
+    }
+}
+
+impl<const NUM_SECTORS: usize> Touched for FileDirty<NUM_SECTORS> {
+    fn insert(&mut self, touched: TouchedSector) {
+        if self
+            .sectors
+            .iter()
+            .find(|x| x.sector == touched.sector)
+            .is_none()
+        {
+            if self.sectors.push(touched).is_err() {
+                self.overflowed = true;
+            }
+        }
+    }
+
+    #[bisync]
+    async fn flush<D: BlockDevice, const N: usize>(
+        &mut self,
+        fs: &mut FileSystem<D, N>,
+    ) -> Result<(), ExFatError<D>> {
+        if self.overflowed {
+            fs.fat.flush(&mut fs.dev).await?;
+            fs.allocator.flush(&mut fs.dev).await?;
+            fs.data_blocks.flush(&mut fs.dev).await?;
+        } else {
+            for item in &self.sectors {
+                match item.kind {
+                    TouchedKind::Bitmap => {
+                        fs.allocator.flush_sector(&mut fs.dev, item.sector).await?
+                    }
+                    TouchedKind::Fat => fs.fat.flush_sector(&mut fs.dev, item.sector).await?,
+                    TouchedKind::Data | TouchedKind::Dir => {
+                        fs.data_blocks
+                            .flush_sector(&mut fs.dev, item.sector)
+                            .await?
+                    }
+                    TouchedKind::None => {
+                        // ignore
+                    }
+                }
+            }
+        }
+
+        self.sectors.clear();
+        self.overflowed = false;
+        self.is_dirty = false;
+        Ok(())
+    }
+}
+
 // TODO: add created and modified timestamps here
 impl Metadata {
     /// Size of the file in bytes
@@ -156,6 +260,7 @@ pub struct File {
     cursor: u64,
     open_options: OpenOptions,
     chain: StoredChain,
+    touched: FileDirty<DEFAULT_TOUCHED_SECTORS>,
 }
 
 impl File {
@@ -184,6 +289,7 @@ impl File {
             cursor,
             open_options: open_options.clone(),
             chain,
+            touched: FileDirty::new(),
         }
     }
 
@@ -195,11 +301,46 @@ impl File {
     }
 
     #[bisync]
-    pub async fn flush<D: BlockDevice>(
+    pub async fn flush<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<(), ExFatError<D>> {
-        fs.flush_cache().await?;
+        // check if we need to update the file directory entry
+        if self.touched.is_dirty {
+            // read dir entries for this file from disk
+            let mut dir_entries = self.get_file_dir_entry_set(fs).await?;
+
+            // the stream ext is always the second entry
+            let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
+            stream_ext.first_cluster = match &self.chain {
+                StoredChain::Empty => NO_CLUSTER_ID,
+                StoredChain::Contiguous {
+                    first,
+                    cluster_count: _cluster_count,
+                } => *first,
+                StoredChain::Fat {
+                    first,
+                    last: _last,
+                    cluster_count: _cluster_count,
+                } => *first,
+            };
+            stream_ext.data_length = self.details.data_length;
+            stream_ext.valid_data_length = self.details.valid_data_length;
+            stream_ext.general_secondary_flags = self.details.flags;
+
+            // serialize the mutated stream ext back to the dir entry
+            dir_entries[1].copy_from_slice(&stream_ext.serialize());
+
+            // recalculate the file checksum and save back to appropriate dir entry
+            update_checksum(&mut dir_entries);
+
+            // write to disk - only the directory entries are written.
+            fs.write_dir_entries_to_disk(self.details.location, dir_entries, &mut self.touched)
+                .await?;
+        }
+
+        self.touched.flush(fs).await?;
+
         Ok(())
     }
 
@@ -216,9 +357,9 @@ impl File {
     ///
     /// Read begins at the cursor position and ends at the lesser of the buf or file length
     #[bisync]
-    pub async fn read<D: BlockDevice>(
+    pub async fn read<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
         buf: &mut [u8],
     ) -> Result<Option<usize>, ExFatError<D>> {
         fs.mount().await?;
@@ -247,12 +388,14 @@ impl File {
             .min(buf.len() as u64) as usize;
 
         // read a single sector and copy the bytes into the user supplied buffer
+        let slot = fs.data_blocks.read(sector_id, &mut fs.dev).await?;
+        /*
         let mut block = [0u8; BLOCK_SIZE];
         fs.dev
             .read(sector_id, &mut block)
             .await
-            .map_err(ExFatError::Io)?;
-        buf[..num_bytes].copy_from_slice(&block[sector_offset..sector_offset + num_bytes]);
+            .map_err(ExFatError::Io)?;*/
+        buf[..num_bytes].copy_from_slice(&slot.block[sector_offset..sector_offset + num_bytes]);
 
         // update file read cursor position
         self.move_file_cursor(num_bytes).await?;
@@ -271,9 +414,9 @@ impl File {
     /// Exfat has the concept of valid_data_length which is less than or equal to data_length.
     /// If a zero length Vec is passed it will be extended to data_length size and the bytes between valid_data_length and data_length will contain zeros.
     #[bisync]
-    pub async fn read_to_end<D: BlockDevice>(
+    pub async fn read_to_end<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
         buf: &mut Vec<u8>,
     ) -> Result<usize, ExFatError<D>> {
         fs.mount().await?;
@@ -298,9 +441,9 @@ impl File {
 
     /// Read all bytes from file and interprets them as a utf8 encoded string
     #[bisync]
-    pub async fn read_to_string<D: BlockDevice>(
+    pub async fn read_to_string<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<String, ExFatError<D>> {
         fs.mount().await?;
 
@@ -337,13 +480,13 @@ impl File {
     }
 
     #[bisync]
-    async fn update_chain<D: BlockDevice>(
+    async fn update_chain<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
         run: &AllocatedRun,
     ) -> Result<(), ExFatError<D>> {
         if self.should_convert_to_fat_chain(run) {
-            self.convert_file_to_fat_chain_if_required_new(fs).await?;
+            self.convert_file_to_fat_chain_if_required(fs).await?;
         }
 
         let has_fat_chain = !self
@@ -354,7 +497,9 @@ impl File {
         if has_fat_chain {
             let mut cluster_id = self.current_cluster;
             for cluster_next in run.first_cluster..run.first_cluster + run.cluster_count {
-                fs.fat.set(cluster_id, cluster_next, &mut fs.dev).await?;
+                fs.fat
+                    .set(&mut fs.dev, &mut self.touched, cluster_id, cluster_next)
+                    .await?;
                 cluster_id = cluster_next;
             }
         }
@@ -403,9 +548,9 @@ impl File {
     }
 
     #[bisync]
-    async fn allocate_clusters_for<D: BlockDevice>(
+    async fn allocate_clusters_for<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
         num_bytes: usize,
     ) -> Result<(), ExFatError<D>> {
         let mut cluster_count = num_bytes.div_ceil(fs.fs.cluster_length as usize) as u32;
@@ -413,7 +558,7 @@ impl File {
         loop {
             let run = fs
                 .allocator
-                .allocate(&mut fs.dev, &self.chain, cluster_count)
+                .allocate(&mut fs.dev, &mut self.touched, &self.chain, cluster_count)
                 .await?;
             self.update_chain(fs, &run).await?;
             cluster_count -= run.cluster_count;
@@ -425,9 +570,9 @@ impl File {
     }
 
     #[bisync]
-    async fn next_cluster_if_required<D: BlockDevice>(
+    async fn next_cluster_if_required<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<(), ExFatError<D>> {
         if self.remaining_bytes_in_cluster == 0 {
             self.current_cluster = self.next_cursor_id(fs).await?;
@@ -441,9 +586,9 @@ impl File {
     ///
     /// This function will automatically increase the length of the file if necessary
     #[bisync]
-    pub async fn write<D: BlockDevice>(
+    pub async fn write<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
         buf: &[u8],
     ) -> Result<(), ExFatError<D>> {
         if buf.len() == 0 {
@@ -455,9 +600,6 @@ impl File {
             return Err(ExFatError::WriteNotEnabled);
         }
 
-        // keep track these file details to check if they have changed later
-        let flags = self.details.flags;
-        let valid_data_length = self.details.valid_data_length;
         let data_length = self.details.data_length;
 
         // allocate new clusters if required
@@ -474,12 +616,20 @@ impl File {
 
         // write the first sector (could be partially full)
         self.next_cluster_if_required(fs).await?;
-        let len = self.write_partial_sector_new(fs, buf).await?;
+        let len = self.write_partial_sector(fs, buf).await?;
 
         // if there are still more bytes to write
         if len < buf.len() {
             let start_index = len;
             let (blocks, remainder) = buf[start_index..].as_chunks::<BLOCK_SIZE>();
+
+            if len > 0 {
+                // for the next few blocks we won't be using the data_block cache
+                // so let's flush what we have already written first.
+                // This is not entirely necessary but means that we won't have a hole in our
+                // data if the user forgets to flush the file
+                self.touched.flush(fs).await?;
+            }
 
             // write full sectors
             for block in blocks {
@@ -493,63 +643,26 @@ impl File {
             }
 
             // write the last sector (could be partially full)
-            let _len = self.write_partial_sector_new(fs, remainder).await?;
-        }
-
-        // check if we need to update the file directory entry
-        if valid_data_length != self.details.valid_data_length
-            || data_length != self.details.data_length
-            || flags != self.details.flags
-        {
-            // read dir entries for this file from disk
-            let mut dir_entries = self.get_file_dir_entry_set(fs).await?;
-
-            // the stream ext is always the second entry
-            let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
-            stream_ext.first_cluster = match &self.chain {
-                StoredChain::Empty => NO_CLUSTER_ID,
-                StoredChain::Contiguous {
-                    first,
-                    cluster_count: _cluster_count,
-                } => *first,
-                StoredChain::Fat {
-                    first,
-                    last: _last,
-                    cluster_count: _cluster_count,
-                } => *first,
-            };
-            stream_ext.data_length = self.details.data_length;
-            stream_ext.valid_data_length = self.details.valid_data_length;
-            stream_ext.general_secondary_flags = self.details.flags;
-
-            // serialize the mutated stream ext back to the dir entry
-            dir_entries[1].copy_from_slice(&stream_ext.serialize());
-
-            // recalculate the file checksum and save back to appropriate dir entry
-            update_checksum(&mut dir_entries);
-
-            // write to disk - only the directory entries are written.
-            write_dir_entries_to_disk(&mut fs.dev, self.details.location, dir_entries).await?;
+            let _len = self.write_partial_sector(fs, remainder).await?;
         }
 
         Ok(())
     }
 
-    fn set_current_cluster<D: BlockDevice>(&mut self, cluster_id: u32, fs: &FileSystem<D>) {
+    fn set_current_cluster<D: BlockDevice, const N: usize>(
+        &mut self,
+        cluster_id: u32,
+        fs: &FileSystem<D, N>,
+    ) {
         self.current_cluster = cluster_id;
         self.remaining_bytes_in_cluster = fs.fs.cluster_length;
-        crate::info!(
-            "set_current_cluster: cluster_id {} remaining_bytes_in_cluster {}",
-            cluster_id,
-            fs.fs.cluster_length
-        );
     }
 
     /// Seek to an offset, in bytes, in the file
     #[bisync]
-    pub async fn seek<D: BlockDevice>(
+    pub async fn seek<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
         cursor: u64,
     ) -> Result<(), ExFatError<D>> {
         fs.mount().await?;
@@ -594,9 +707,9 @@ impl File {
     /// If directories in the to_path do not exist they will be created
     /// File attributes will also be copied but timestamps will be new
     #[bisync]
-    pub(crate) async fn copy_to<D: BlockDevice>(
+    pub(crate) async fn copy_to<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
         to_path: &str,
     ) -> Result<(), ExFatError<D>> {
         let (dir_path, file_or_dir_name) = split_path(to_path);
@@ -612,7 +725,9 @@ impl File {
         }
 
         // find directory or recursively create it if it does not already exist
-        let directory_cluster_id = fs.get_or_create_directory(dir_path).await?;
+        let directory_cluster_id = fs
+            .get_or_create_directory(&mut self.touched, dir_path)
+            .await?;
 
         let flags = GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain;
 
@@ -627,7 +742,9 @@ impl File {
         )
         .await?;
 
-        fs.allocator.mark_allocated(&mut fs.dev, &run, true).await?;
+        fs.allocator
+            .mark_allocated(&mut fs.dev, &mut self.touched, &run, true)
+            .await?;
 
         let mut sector_id = fs.fs.get_heap_sector_id(run.first_cluster)?;
         let mut buf = [0u8; BLOCK_SIZE];
@@ -648,11 +765,12 @@ impl File {
             (self.cursor + num_bytes as u64).max(self.details.valid_data_length);
         self.details.data_length = valid_data_length.max(self.details.data_length);
         self.details.valid_data_length = valid_data_length;
+        self.touched.is_dirty = true;
     }
 
-    fn get_current_sector_id<D: BlockDevice>(
+    fn get_current_sector_id<D: BlockDevice, const N: usize>(
         &self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<u32, ExFatError<D>> {
         let cluster_offset_bytes = self.cursor % fs.fs.cluster_length as u64;
         let start_sector_id = fs.fs.get_heap_sector_id(self.current_cluster)?;
@@ -660,7 +778,7 @@ impl File {
         Ok(sector_id)
     }
 
-    fn num_clusters<D: BlockDevice>(&self, fs: &mut FileSystem<D>) -> u32 {
+    fn num_clusters<D: BlockDevice, const N: usize>(&self, fs: &mut FileSystem<D, N>) -> u32 {
         self.details
             .data_length
             .div_ceil(fs.fs.cluster_length as u64) as u32
@@ -668,9 +786,9 @@ impl File {
 
     /// helps to convert a file that had no_fat_chain to one with a fat chain
     #[bisync]
-    async fn convert_file_to_fat_chain_if_required_new<D: BlockDevice>(
+    async fn convert_file_to_fat_chain_if_required<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<(), ExFatError<D>> {
         if self
             .details
@@ -681,9 +799,12 @@ impl File {
             self.details
                 .flags
                 .set(GeneralSecondaryFlags::NoFatChain, false);
+            self.touched.is_dirty = true;
 
             for cluster_id in self.details.first_cluster..self.current_cluster {
-                fs.fat.set(cluster_id, cluster_id + 1, &mut fs.dev).await?;
+                fs.fat
+                    .set(&mut fs.dev, &mut self.touched, cluster_id, cluster_id + 1)
+                    .await?;
             }
         }
 
@@ -691,9 +812,9 @@ impl File {
     }
 
     #[bisync]
-    async fn write_partial_sector_new<D: BlockDevice>(
+    async fn write_partial_sector<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
         buf: &[u8],
     ) -> Result<usize, ExFatError<D>> {
         if buf.is_empty() {
@@ -708,17 +829,12 @@ impl File {
         // we need to read the existing sector and add in the bit we want to write
         // for max efficiency the user should write in block size chunks
         if start_index > 0 || end_index < BLOCK_SIZE {
-            let mut block = [0u8; BLOCK_SIZE];
-            fs.dev
-                .read(sector_id, &mut block)
-                .await
-                .map_err(ExFatError::Io)?;
+            let slot = fs.data_blocks.read(sector_id, &mut fs.dev).await?;
             let len = end_index - start_index;
-            block[start_index..end_index].copy_from_slice(&buf[..len]);
-            fs.dev
-                .write(sector_id, &block)
-                .await
-                .map_err(ExFatError::Io)?;
+            slot.block[start_index..end_index].copy_from_slice(&buf[..len]);
+            slot.is_dirty = true;
+            self.touched
+                .insert(TouchedSector::new(TouchedKind::Data, sector_id));
             self.move_file_cursor(len).await?;
             return Ok(len);
         }
@@ -727,9 +843,9 @@ impl File {
     }
 
     #[bisync]
-    async fn get_file_dir_entry_set<D: BlockDevice>(
+    async fn get_file_dir_entry_set<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError<D>> {
         let mut chain = DirectoryEntryChain::new_from_location(&self.details.location, &fs.fs);
 
@@ -751,7 +867,7 @@ impl File {
         Ok(dir_entries)
     }
 
-    fn get_cluster_offset<D: BlockDevice>(&self, fs: &mut FileSystem<D>) -> u32 {
+    fn get_cluster_offset<D: BlockDevice, const N: usize>(&self, fs: &mut FileSystem<D, N>) -> u32 {
         (self.cursor % fs.fs.cluster_length as u64) as u32
     }
 
@@ -771,9 +887,9 @@ impl File {
     }
 
     #[bisync]
-    async fn next_cursor_id<D: BlockDevice>(
+    async fn next_cursor_id<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<u32, ExFatError<D>> {
         match self.chain {
             StoredChain::Empty => Err(ExFatError::EndOfFatChain),
