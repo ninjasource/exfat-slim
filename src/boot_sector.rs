@@ -146,7 +146,7 @@ impl TryFrom<&[u8; BLOCK_SIZE]> for BootSector {
 bitflags! {
     /// Represents a set of volume flags.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct VolumeFlags: u16 {
+    pub(crate) struct VolumeFlags: u16 {
         /// The value `FirstFat`, at bit position `0`.
         /// Value 0 for ActiveFat and 1 for TexFAT
         const FirstFat = 0b0000_0001;

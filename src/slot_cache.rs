@@ -4,11 +4,11 @@ use core::marker::PhantomData;
 use super::{
     bisync,
     error::ExFatError,
-    io::{BLOCK_SIZE, BlockDevice},
+    io::{BLOCK_SIZE, Block, BlockDevice},
 };
 
 #[derive(Debug)]
-pub struct Slot {
+pub(crate) struct Slot {
     sector_id: u32,
     pub is_dirty: bool, // slot must be written before eviction
     is_used: bool,      // slot was accessed recently
@@ -43,7 +43,7 @@ impl Slot {
 
 // this cache uses the clock algorithm for least recently used slot replacement
 #[derive(Debug)]
-pub struct SlotCache<D: BlockDevice, const N: usize> {
+pub(crate) struct SlotCache<D: BlockDevice, const N: usize> {
     pub cache: [Slot; N],
     hand: usize,
     _phantom: PhantomData<D>,
@@ -94,6 +94,26 @@ impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
         slot.is_valid = true;
         slot.is_used = true;
         Ok(slot)
+    }
+
+    // write a full block
+    #[bisync]
+    pub async fn write(
+        &mut self,
+        io: &mut D,
+        sector_id: u32,
+        block: &Block,
+    ) -> Result<(), ExFatError<D>> {
+        if let Some(index) = self.cache_hit(sector_id) {
+            // we are not interested in the bytes of this slot
+            // and we don't want something to overwrite it later
+            let slot = &mut self.cache[index];
+            slot.block.copy_from_slice(block);
+            slot.is_dirty = false;
+        }
+
+        io.write(sector_id, block).await.map_err(ExFatError::Io)?;
+        Ok(())
     }
 
     fn cache_hit(&mut self, sector_id: u32) -> Option<usize> {

@@ -47,13 +47,13 @@ impl AllocationBitmap {
     }
 }
 
-pub struct AllocatedRun {
+pub(crate) struct AllocatedRun {
     pub first_cluster: u32,
     pub cluster_count: u32,
 }
 
 #[derive(Debug, Clone)]
-pub enum StoredChain {
+pub(crate) enum StoredChain {
     Empty,
     Contiguous {
         first: u32,
@@ -68,7 +68,7 @@ pub enum StoredChain {
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Default)]
-pub struct AllocationBitmapSlim {
+pub(crate) struct AllocationBitmapSlim {
     pub first_sector: u32,
     pub num_sectors: u32,
 }

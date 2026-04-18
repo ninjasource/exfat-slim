@@ -127,6 +127,7 @@ pub struct Metadata {
     pub(crate) details: FileDetails,
 }
 
+#[allow(async_fn_in_trait)]
 pub(crate) trait Touched {
     fn insert(&mut self, touched: TouchedSector);
 
@@ -301,9 +302,9 @@ impl File {
     }
 
     #[bisync]
-    pub async fn flush<D: BlockDevice, const N: usize>(
+    pub async fn flush<D: BlockDevice>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
+        fs: &mut FileSystem<D>,
     ) -> Result<(), ExFatError<D>> {
         // check if we need to update the file directory entry
         if self.touched.is_dirty {
@@ -469,7 +470,7 @@ impl File {
                     .flags
                     .contains(GeneralSecondaryFlags::NoFatChain);
 
-                no_fat_chain && (first + len + 1) != run.first_cluster
+                no_fat_chain && (first + len) != run.first_cluster
             }
             StoredChain::Fat {
                 first: _first,
@@ -635,10 +636,7 @@ impl File {
             for block in blocks {
                 self.next_cluster_if_required(fs).await?;
                 let sector_id = self.get_current_sector_id(fs)?;
-                fs.dev
-                    .write(sector_id, block)
-                    .await
-                    .map_err(ExFatError::Io)?;
+                fs.data_blocks.write(&mut fs.dev, sector_id, block).await?;
                 self.move_file_cursor(block.len()).await?;
             }
 

@@ -29,16 +29,6 @@ fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
     }
     file.close(&mut fs)?;
 
-    let options = OpenOptions::new().create(true).write(true).append(true);
-
-    let _file = fs.open(path, options)?;
-
-    /*
-        let options = OpenOptions::new().read(true);
-        let mut file = fs.open(path, options)?;
-        let s = file.read_to_string(&mut fs)?;
-        info!("{}", s.len());
-    */
     Ok(())
 }
 
