@@ -1,0 +1,9 @@
+{
+    "rust-analyzer.check.features": [
+        "embassy"
+    ],
+    "rust-analyzer.cargo.features": [
+        "embassy"
+    ],
+    "rust-analyzer.cargo.noDefaultFeatures": true,
+}

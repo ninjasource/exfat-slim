@@ -15,7 +15,8 @@ const NUM_ENTRIES: usize = BLOCK_SIZE / ENTRY_SIZE;
 
 #[derive(Debug)]
 pub struct Fat<D: BlockDevice, const N: usize> {
-    pub fat_offset: Option<u32>,
+    // a sector offset from the volume boot sector
+    pub start_of_fat_sector: Option<u32>,
     cache: SlotCache<D, N>,
     _phantom: PhantomData<D>,
 }
@@ -23,7 +24,7 @@ pub struct Fat<D: BlockDevice, const N: usize> {
 impl<D: BlockDevice, const N: usize> Fat<D, N> {
     pub fn new() -> Self {
         Self {
-            fat_offset: None,
+            start_of_fat_sector: None,
             cache: SlotCache::new(),
             _phantom: PhantomData::default(),
         }
@@ -51,6 +52,7 @@ impl<D: BlockDevice, const N: usize> Fat<D, N> {
         cluster_id: u32,
         cluster_id_to: u32,
     ) -> Result<(), ExFatError<D>> {
+        assert!(cluster_id >= MIN_CLUSER_ID);
         let sector_id = self.get_sector_id(cluster_id)?;
         touched.insert(TouchedSector::new(TouchedKind::Fat, sector_id));
         let slot = self.cache.read(sector_id, io).await?;
@@ -64,7 +66,7 @@ impl<D: BlockDevice, const N: usize> Fat<D, N> {
     }
 
     fn get_sector_id(&self, cluster_id: u32) -> Result<u32, ExFatError<D>> {
-        match self.fat_offset {
+        match self.start_of_fat_sector {
             Some(fat_offset) => Ok(fat_offset + cluster_id / NUM_ENTRIES as u32),
             None => Err(ExFatError::Unexpected(
                 "attemt to access fat when not initialized",
@@ -79,6 +81,7 @@ impl<D: BlockDevice, const N: usize> Fat<D, N> {
         cluster_id: u32,
         io: &mut D,
     ) -> Result<Option<u32>, ExFatError<D>> {
+        assert!(cluster_id >= MIN_CLUSER_ID);
         let sector_id = self.get_sector_id(cluster_id)?;
         let sector_offset = (cluster_id % NUM_ENTRIES as u32) as usize;
 

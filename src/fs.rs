@@ -302,6 +302,10 @@ impl FileHandle {
 
     pub async fn write(&self, buffer: impl Into<Cow<'_, [u8]>>) -> Result<(), Error> {
         let buffer: Cow<'_, [u8]> = buffer.into();
+        if buffer.is_empty() {
+            return Ok(());
+        }
+
         let token = ReplyPool::acquire().await;
         let req = Req {
             op: Op::WriteFile {
@@ -920,12 +924,12 @@ where
         }
         Op::CloseFile { handle } => {
             let file = files.remove(handle.0)?;
-            file.close::<D>(file_system).await?;
+            file.close(file_system).await?;
             Resp::Ok
         }
         Op::FlushFile { handle } => {
             let file = files.get(handle.0)?;
-            file.flush::<D>(file_system).await?;
+            file.flush(file_system).await?;
             Resp::Ok
         }
         Op::Metadata { handle } => {

@@ -2,25 +2,29 @@
 #![no_main]
 #![macro_use]
 #![allow(static_mut_refs)]
-#![allow(dead_code)]
+//#![allow(dead_code)]
 
 extern crate alloc;
 
-use alloc::vec;
 use chrono::Timelike;
 use defmt::{error, info, unwrap};
-use defmt_persist::{self as _, ConsumerAndMetadata};
-use embassy_demo::{ALLOCATOR, backup_ram::BACKUP, sdmmc_fs, time::rtc_unix_ms_now};
-use embassy_executor::{SpawnError, Spawner};
+use defmt_persist::{self as _, Consumer, ConsumerAndMetadata};
+use embassy_demo::{ALLOCATOR, backup_ram::BACKUP, rcc_setup, sdmmc_fs, time::rtc_unix_ms_now};
+use embassy_executor::Spawner;
+use embassy_futures::select::{Either, select};
 use embassy_stm32::{
-    Config, bind_interrupts,
+    bind_interrupts,
     gpio::{Input, Pull},
     peripherals::{self},
     rtc::{DateTime, DayOfWeek, Rtc, RtcConfig},
     sdmmc::{self, Sdmmc},
 };
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_time::{Duration, Timer};
-use exfat_slim::asynchronous::{file::OpenOptions, fs, io::BLOCK_SIZE};
+use exfat_slim::asynchronous::{
+    file::OpenOptions,
+    fs::{self, FileHandle},
+};
 
 bind_interrupts!(struct Irqs {
     SDMMC1 => sdmmc::InterruptHandler<peripherals::SDMMC1>;
@@ -38,7 +42,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[derive(Debug, defmt::Format)]
 enum Error {
     Fs(fs::Error),
-    Task(SpawnError),
 }
 
 impl From<fs::Error> for Error {
@@ -58,12 +61,17 @@ async fn logger_task(mut log_init: ConsumerAndMetadata<'static>, mut sd_detect: 
     loop {
         // the logger loop will exit if there is no sd card but at
         // some point the user can put a card in and the system will recover
-        logger_loop(&mut log_init, &mut sd_detect).await.ok();
+        match logger_loop(&mut log_init, &mut sd_detect).await {
+            Ok(()) => {}
+            Err(_e) => {} // error!("{:?}", _e),
+        }
+
         Timer::after_secs(1).await;
     }
 }
 
-const MAX_LOG_BYTES_PER_DAY: u64 = 1024 * 1024;
+const MAX_LOG_BYTES_PER_DAY: u64 = 1024 * 1024; // 1MB
+static FLUSH_LOGS: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
 
 async fn logger_loop(
     log: &mut ConsumerAndMetadata<'static>,
@@ -80,67 +88,37 @@ async fn logger_loop(
         .open("log.bin")
         .await?;
 
-    let meta = file.metdata().await?;
-    info!("file len {}", meta.len());
+    loop {
+        while !log.consumer.is_empty() {
+            write_to_file(&mut log.consumer, &file).await?;
+        }
 
-    let mut scratch = vec![0u8; BLOCK_SIZE];
-
-    if let Ok(metadata) = file.metdata().await {
-        let mut file_len = metadata.len();
-        loop {
-            log.consumer.wait_for_data().await;
-            let grant = log.consumer.read();
-            let (buf0, buf1) = grant.bufs();
-            let num_bytes = buf0.len() + buf1.len();
-
-            // we want this to be BLOCK_SIZE but it may be smaller if the file len is not alligned
-            // this can happen if logs are force purged
-            let to_write = BLOCK_SIZE - (file_len as usize % BLOCK_SIZE);
-
-            let bytes_written = if num_bytes >= to_write {
-                let mut daily_log_bytes = 0;
-                BACKUP.write(|x| {
-                    daily_log_bytes = x.daily_log_bytes;
-                    x.daily_log_bytes.wrapping_add(num_bytes as u64)
-                });
-
-                // limit to size of log growth per day
-                if daily_log_bytes < MAX_LOG_BYTES_PER_DAY {
-                    if buf0.len() >= to_write {
-                        // we can get everything from buf0
-                        file.write(&buf0[..to_write]).await?;
-                    } else {
-                        copy_to_scratch(&mut scratch, buf0, buf1, to_write);
-                        file.write(&scratch[..to_write]).await?;
-                    }
+        match select(log.consumer.wait_for_data(), FLUSH_LOGS.receive()).await {
+            Either::First(_) => {
+                if !log.consumer.is_empty() {
+                    write_to_file(&mut log.consumer, &file).await?;
                 }
-
-                file_len += to_write as u64;
-                to_write
-            } else {
-                // don't bother writing to disk because it does not fall on a block boundary
-                0
-            };
-
-            grant.release(bytes_written);
-
-            if bytes_written == 0 {
-                // if we don't release the bytes then the consumer.wait_for_data() will continue to fire
-                // I think that this is a bug because it should only fire if there is NEW data.
-                // The sleep below prevents executor starvation
-                // I have tried to handle SD card removal here but it just seems to lock the processor up
-                // for a few seconds every time it gets done
-                Timer::after_secs(1).await;
+            }
+            Either::Second(_) => {
+                file.flush().await?;
+                info!("log flushed");
             }
         }
     }
-
-    Ok(())
 }
 
-fn copy_to_scratch(scratch: &mut [u8], buf0: &[u8], buf1: &[u8], len: usize) {
-    scratch[..buf0.len()].copy_from_slice(buf0);
-    scratch[buf0.len()..len].copy_from_slice(&buf1[..len - buf0.len()]);
+async fn write_to_file(consumer: &mut Consumer<'_>, file: &FileHandle) -> Result<(), Error> {
+    let grant = consumer.read();
+    let (a, b) = grant.bufs();
+    let num_bytes = a.len() + b.len();
+
+    if !daily_limit_exceeded(num_bytes) {
+        file.write(a).await?;
+        file.write(b).await?;
+    }
+
+    grant.release_all();
+    Ok(())
 }
 
 const RTC_MAGIC_REG: usize = 0;
@@ -148,9 +126,7 @@ const RTC_MAGIC: u32 = 0x51A2_C3D4;
 
 #[embassy_executor::main]
 async fn main(mut spawner: Spawner) {
-    let config = Config::default();
-    let p = embassy_stm32::init(config);
-    //let p = rcc_setup::stm32u5g9zj_29mhz_init();
+    let p = rcc_setup::stm32u5g9zj_29mhz_init();
     unsafe { ALLOCATOR.init(&HEAP as *const u8 as usize, core::mem::size_of_val(&HEAP)) }
 
     let (rtc, _time_provider) = Rtc::new(p.RTC, RtcConfig::default());
@@ -169,8 +145,10 @@ async fn main(mut spawner: Spawner) {
         p.PC11,
         Default::default(),
     );
-
     spawner.spawn(unwrap!(file_system_task(sdmmc)));
+    spawner.spawn(unwrap!(daily_reset_task()));
+
+    Timer::after_millis(100).await;
 
     match do_stuff().await {
         Ok(()) => {}
@@ -180,21 +158,17 @@ async fn main(mut spawner: Spawner) {
     }
 }
 
+fn daily_limit_exceeded(num_bytes: usize) -> bool {
+    let mut daily_log_bytes = 0;
+    BACKUP.write(|x| {
+        daily_log_bytes = x.daily_log_bytes;
+        x.daily_log_bytes.wrapping_add(num_bytes as u64)
+    });
+
+    daily_log_bytes > MAX_LOG_BYTES_PER_DAY
+}
+
 async fn do_stuff() -> Result<(), Error> {
-    // TODO: figure out why this doesn't work
-    /*
-    info!("writing file");
-    fs::write("hello.txt", b"Hello, world!").await?;
-    let text = fs::read_to_string("hello.txt").await?;
-    info!("hello.txt: {}", text);
-    */
-
-    info!("files in root:");
-    let dir = fs::read_dir("").await?;
-    while let Some(entry) = dir.next_entry().await? {
-        info!("{}", entry.file_name());
-    }
-
     let file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -215,6 +189,7 @@ async fn do_stuff() -> Result<(), Error> {
     }
     file.close().await?;
     info!("file closed");
+    flush_logs().await;
 
     let mut i = 0;
     loop {
@@ -222,6 +197,10 @@ async fn do_stuff() -> Result<(), Error> {
         info!("blink {}", i);
         i += 1;
     }
+}
+
+async fn flush_logs() {
+    FLUSH_LOGS.send(()).await;
 }
 
 fn setup_logging(spawner: &mut Spawner, mut rtc: Rtc, sd_detect: Input<'static>) {
@@ -279,6 +258,7 @@ async fn daily_reset_task() -> ! {
                     daily_log_bytes, daily_reset_counter
                 );
 
+                flush_logs().await;
                 Timer::after_millis(100).await;
                 on_system_restart();
             }

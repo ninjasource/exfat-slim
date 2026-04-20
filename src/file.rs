@@ -142,7 +142,7 @@ pub(crate) trait Touched {
 pub(crate) struct FileDirty<const N: usize = DEFAULT_TOUCHED_SECTORS> {
     sectors: heapless::Vec<TouchedSector, N>,
     overflowed: bool,
-    is_dirty: bool,
+    is_dir_entry_dirty: bool,
 }
 
 impl FileDirty {
@@ -150,7 +150,7 @@ impl FileDirty {
         Self {
             sectors: heapless::Vec::new(),
             overflowed: false,
-            is_dirty: false,
+            is_dir_entry_dirty: false,
         }
     }
 }
@@ -226,7 +226,7 @@ impl<const NUM_SECTORS: usize> Touched for FileDirty<NUM_SECTORS> {
 
         self.sectors.clear();
         self.overflowed = false;
-        self.is_dirty = false;
+        self.is_dir_entry_dirty = true;
         Ok(())
     }
 }
@@ -302,12 +302,12 @@ impl File {
     }
 
     #[bisync]
-    pub async fn flush<D: BlockDevice>(
+    pub async fn flush<D: BlockDevice, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<(), ExFatError<D>> {
         // check if we need to update the file directory entry
-        if self.touched.is_dirty {
+        if self.touched.is_dir_entry_dirty {
             // read dir entries for this file from disk
             let mut dir_entries = self.get_file_dir_entry_set(fs).await?;
 
@@ -346,9 +346,9 @@ impl File {
     }
 
     #[bisync]
-    pub async fn close<D: BlockDevice>(
+    pub async fn close<D: BlockDevice, const N: usize>(
         mut self,
-        fs: &mut FileSystem<D>,
+        fs: &mut FileSystem<D, N>,
     ) -> Result<(), ExFatError<D>> {
         self.flush(fs).await?;
         Ok(())
@@ -390,12 +390,6 @@ impl File {
 
         // read a single sector and copy the bytes into the user supplied buffer
         let slot = fs.data_blocks.read(sector_id, &mut fs.dev).await?;
-        /*
-        let mut block = [0u8; BLOCK_SIZE];
-        fs.dev
-            .read(sector_id, &mut block)
-            .await
-            .map_err(ExFatError::Io)?;*/
         buf[..num_bytes].copy_from_slice(&slot.block[sector_offset..sector_offset + num_bytes]);
 
         // update file read cursor position
@@ -624,14 +618,6 @@ impl File {
             let start_index = len;
             let (blocks, remainder) = buf[start_index..].as_chunks::<BLOCK_SIZE>();
 
-            if len > 0 {
-                // for the next few blocks we won't be using the data_block cache
-                // so let's flush what we have already written first.
-                // This is not entirely necessary but means that we won't have a hole in our
-                // data if the user forgets to flush the file
-                self.touched.flush(fs).await?;
-            }
-
             // write full sectors
             for block in blocks {
                 self.next_cluster_if_required(fs).await?;
@@ -763,7 +749,7 @@ impl File {
             (self.cursor + num_bytes as u64).max(self.details.valid_data_length);
         self.details.data_length = valid_data_length.max(self.details.data_length);
         self.details.valid_data_length = valid_data_length;
-        self.touched.is_dirty = true;
+        self.touched.is_dir_entry_dirty = true;
     }
 
     fn get_current_sector_id<D: BlockDevice, const N: usize>(
@@ -797,7 +783,7 @@ impl File {
             self.details
                 .flags
                 .set(GeneralSecondaryFlags::NoFatChain, false);
-            self.touched.is_dirty = true;
+            self.touched.is_dir_entry_dirty = true;
 
             for cluster_id in self.details.first_cluster..self.current_cluster {
                 fs.fat

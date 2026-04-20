@@ -277,6 +277,7 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
                         for bit in 0..u8::BITS {
                             if *byte & 1 << bit == 0 {
                                 if cluster_id < from_cluster {
+                                    cluster_id += 1;
                                     continue;
                                 }
 
@@ -380,7 +381,7 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
         self.next_search_cluster = FIRST_CLUSTER_ID;
         match fallback {
             Some(run) => Ok(run),
-            None => Err(ExFatError::DiskFull),
+            None => Err(ExFatError::Unexpected("disk full")),
         }
     }
 }

@@ -3,6 +3,7 @@
 use embedded_alloc::Heap;
 pub mod backup_ram;
 pub mod memory;
+pub mod rcc_setup;
 pub mod sdmmc_fs;
 pub mod time;
 

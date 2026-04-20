@@ -133,7 +133,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
             upcase_table,
             alloc_bitmap,
         } = read_file_system_metadata(&mut self.dev).await?;
-        self.fat.fat_offset = Some(details.fat_offset);
+        self.fat.start_of_fat_sector = Some(details.fat_offset);
         self.fs = details;
         self.allocator.bitmap.first_sector =
             self.fs.get_heap_sector_id(alloc_bitmap.first_cluster)?;
@@ -367,19 +367,10 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         contents: impl AsRef<[u8]>,
     ) -> Result<(), ExFatError<D>> {
         self.mount().await?;
-        // delete the file if it already exists
-        match self
-            .find_file_inner(path, Some(FileAttributes::Archive))
-            .await
-        {
-            Ok(file_details) => self.delete_inner(&file_details).await?,
-            Err(ExFatError::FileNotFound) => {
-                // ignore
-            }
-            Err(e) => return Err(e),
-        }
-
-        self.write_inner(path, contents).await?;
+        let options = OpenOptions::new().create(true).truncate(true).write(true);
+        let mut file = self.open(path, options).await?;
+        file.write(self, contents.as_ref()).await?;
+        file.close(self).await?;
         Ok(())
     }
 
@@ -681,71 +672,6 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     #[inline(always)]
     fn mark_dir_entry_free(dir_entry: &mut [u8; RAW_ENTRY_LEN]) {
         dir_entry[0] = 0x01;
-    }
-
-    // assume that the file does not already exist
-    #[bisync]
-    async fn write_inner(
-        &mut self,
-        path: &str,
-        contents: impl AsRef<[u8]>,
-    ) -> Result<(), ExFatError<D>> {
-        let (dir_path, file_name) = split_path(path);
-
-        let mut touched = FileDirty::new();
-        // find directory or recursively create it if it does not already exist
-        let directory_cluster_id = self.get_or_create_directory(&mut touched, dir_path).await?;
-
-        let contents = contents.as_ref();
-        let num_clusters = (contents.len() as u64).div_ceil(self.fs.cluster_length as u64) as u32;
-
-        let run = self
-            .allocator
-            .find_free_clusters(&mut self.dev, num_clusters)
-            .await?;
-
-        if run.cluster_count != num_clusters {
-            unimplemented!("writing to a file using the fat chain is not yet supported")
-        }
-
-        self.allocator
-            .mark_allocated(&mut self.dev, &mut touched, &run, true)
-            .await?;
-
-        self.create_file_dir_entry_at(
-            file_name,
-            directory_cluster_id,
-            run.first_cluster,
-            FileAttributes::Archive,
-            GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain,
-            contents.len() as u64,
-            contents.len() as u64,
-        )
-        .await?;
-
-        // write all blocks one after the next
-        let mut sector_id = self.fs.get_heap_sector_id(run.first_cluster)?;
-        let (chunks, remainder) = contents.as_chunks::<BLOCK_SIZE>();
-
-        // write all block size chunks
-        for block in chunks {
-            self.data_blocks
-                .write(&mut self.dev, sector_id, block)
-                .await?;
-            sector_id += 1;
-        }
-
-        // fill the last block the remainder data followed by zeros
-        if !remainder.is_empty() {
-            let slot = self.data_blocks.read(sector_id, &mut self.dev).await?;
-            slot.block[..remainder.len()].copy_from_slice(remainder);
-            slot.is_dirty = true;
-            touched.insert(TouchedSector::new(TouchedKind::Data, sector_id));
-        }
-
-        touched.flush(self).await?;
-
-        Ok(())
     }
 
     #[bisync]
