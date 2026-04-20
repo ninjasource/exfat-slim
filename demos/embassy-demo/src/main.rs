@@ -1,8 +1,9 @@
+// This demonstrates an example use case saving logs to an SD card formatted to the exFAT file system
+
 #![no_std]
 #![no_main]
 #![macro_use]
 #![allow(static_mut_refs)]
-//#![allow(dead_code)]
 
 extern crate alloc;
 
@@ -146,8 +147,9 @@ async fn main(mut spawner: Spawner) {
         Default::default(),
     );
     spawner.spawn(unwrap!(file_system_task(sdmmc)));
-    spawner.spawn(unwrap!(daily_reset_task()));
 
+    // housekeeping
+    spawner.spawn(unwrap!(daily_reset_task()));
     Timer::after_millis(100).await;
 
     match do_stuff().await {

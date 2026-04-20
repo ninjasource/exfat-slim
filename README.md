@@ -13,7 +13,7 @@ The table below highlights some differences.
 | Max filename length | 255 chars | 255 chars |
 | Filename encoding | UTF-16LE | Long filenames use 16-bit Unicode entries |
 | Max files in one folder | 2,796,202 | ~65,534 in Windows FAT32 implementation; fewer with long names |
-| Contiguous sector access `NoFatChain` | Yes for unfragmented files. Fat chain for fragmented files | Fat chain only
+| Contiguous sector access `NoFatChain` | Yes for un-fragmented files. Fat chain for fragmented files | Fat chain only
 
 The file system is optimized for flash storage and is particularly good for SD cards when it comes to wear levelling.
 This is a `[no_std]` implementation requiring the `alloc` crate.
@@ -34,51 +34,56 @@ In the examples below I have created a simple in-memory block device for demonst
 
 Reading a file into a string:
 ```rust
-let io = InMemoryBlockDevice::new(); // your SD card driver
-let mut fs = FileSystem::new(io).await?;
-let contents: String = fs
-    .read_to_string("/temp2/hello2/shoe/test.txt")
-    .await?;
+    let io = InMemoryBlockDevice::new(); // your SD card driver
+    let mut fs = FileSystem::new(io);
+
+    let contents: String = fs.read_to_string("/temp2/hello2/shoe/test.txt").await?;
+    println!("{contents}");
 ```
 
 Listing all files and folders in the folder "/temp2/hello2"
 ```rust
-let io = InMemoryBlockDevice::new(); // your SD card driver
-let mut fs = FileSystem::new(io).await?;
+    let io = InMemoryBlockDevice::new();
+    let mut fs = FileSystem::new(io);
+    let path = "/temp2/hello2";
 
-let path = "/temp2/hello2";
-let mut dir = fs.read_dir(path).await?;
-while let Some(entry) = dir.next_entry(&mut fs).await? {
-    println!("{:?}", entry);
-}
+    let mut dir = fs.read_dir(path).await?;
+    while let Some(entry) = dir.next_entry(&mut fs).await? {
+        println!("name: {:?}", entry.file_name());
+    }
 ```
 
 Open a file for writing, make some writes, change the file cursor, overwrite some data, read the contents
 ```rust
     let io = InMemoryBlockDevice::new();
-    let mut fs = FileSystem::new(io).await?;
+    let mut fs = FileSystem::new(io);
     let path = "/temp2/test7.txt";
 
     // create empty read write file
-    let options = OpenBuilder::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .build()?;
+    let options = OpenOptions::new().write(true).create(true).truncate(true);
     let mut file = fs.open(path, options).await?;
-    file.write(b"hello").await?;
-    file.write(b" world").await?;
-    file.seek(6).await?;
-    file.write(b"W").await?;
+    file.write(&mut fs, b"hello").await?;
+    file.write(&mut fs, b" world").await?;
+    file.seek(&mut fs, 6).await?;
+    file.write(&mut fs, b"W").await?;
+    file.close(&mut fs).await?;
 
     let contents = fs.read_to_string(path).await?;
     println!("{contents}"); // hello World
 ```
 
+Inspired by the rust std library API and with the `embassy` feature enabled (after starting the file system task) you can do the following:
+
+```rust
+    fs::write("hello.txt", b"hello, world!").await?;
+```
+
+See `demos/embassy-demo` for more information.
+
 ## Caching
 
 There is a built in sector cache that allows the system to correctly manage the allocation bitmap and the fat table at a global level. 
-In addition to the data cache speeds up reads and writes, especially when the same sector keeps being accessed. 
+In addition, the data cache speeds up reads and writes, especially when the same sector keeps being accessed. 
 The caching level can be adjusted when creating an instance of the file system. 
 The default (N = 4) is reasonable for an embedded device, using 4 x 3 x 512 = 6144 bytes of ram.
 You need to close or flush a file to make it durable (persisted to media).
@@ -101,7 +106,9 @@ If you create a file in a nested directory the library will attempt to create al
 
 My primary use-case for this library is for an embedded device using the Embassy async framework. 
 Therefore it is async-first and I am initially only planning on implementing the bits I really need.
-This project is still undergoing significant churn and testing so just be aware of that
+However, the library support both `blocking` and `async` operation.
+This project is still undergoing significant churn and testing so just be aware of that. 
+A comprehensive test suite will come when the internal data structures are stable.
 
 Implemented so far:
 - Read a file
@@ -147,7 +154,7 @@ At some point I will open it up but please respect my need to keep this as a por
 ## Troubleshooting
 
 If you are reading an SD card directly using a microcontroller you will discover that sector 0 on the card is the MBR (master boot record) or GPT (GUID partition table) and NOT the boot sector of the exfat file system. 
-The MBR or GPT will point to the boot sector of the exfat file system. 
+The MBR or GPT will point to the boot sector of the exFAT file system. 
 However, when you use `dd` to clone an sd card you normally get the bytes of the mounted file system so sector 0 is, indeed, the boot sector of the exFAT file system in that case.
 The `sd.img.gz` is such a clone. 
 It is zipped because it contains mostly zeros. You can use a crate like `mbr-nostd` to read the MBR of an sd card from a microcontroller.

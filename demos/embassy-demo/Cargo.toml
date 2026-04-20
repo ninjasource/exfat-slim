@@ -7,7 +7,7 @@ license = "Apache-2.0"
 readme = "README.md"
 
 [dependencies]
-exfat-slim = { path = "../..", version = "0.3", default-features = false, features = [
+exfat-slim = { path = "../..", default-features = false, features = [
     "defmt",
     "embassy",
 ] }
