@@ -3,6 +3,8 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use alloc::{
+    // borrow::Cow,
+    borrow::Cow,
     collections::btree_map::{BTreeMap, Entry},
     string::{String, ToString},
     vec,
@@ -201,6 +203,13 @@ enum Op {
     Metadata { handle: FileHandle },
     OpenDirectory { path: String },
     DirectoryNextEntry { handle: DirectoryHandle },
+    Exists { path: String },
+    RemoveFile { path: String },
+    CreateDirectory { path: String },
+    Copy { from_path: String, to_path: String },
+    Rename { from_path: String, to_path: String },
+    RemoveDir { path: String },
+    Write { path: String, buffer: Vec<u8> },
 }
 
 struct Req {
@@ -291,12 +300,13 @@ impl FileHandle {
         }
     }
 
-    pub async fn write(&self, buf: &[u8]) -> Result<(), Error> {
+    pub async fn write(&self, buffer: impl Into<Cow<'_, [u8]>>) -> Result<(), Error> {
+        let buffer: Cow<'_, [u8]> = buffer.into();
         let token = ReplyPool::acquire().await;
         let req = Req {
             op: Op::WriteFile {
                 handle: FileHandle(self.0),
-                buffer: buf.to_vec(),
+                buffer: buffer.into(),
             },
             reply: token,
         };
@@ -385,11 +395,22 @@ impl FileHandle {
 }
 
 impl Drop for FileHandle {
-    // this will close the file but not wait for confirmation that the operation
-    // was completed. If you want to be sure that the file was closed without error
-    /// then call the close or flush functions explicitly
+    // this will make a best effort attempt to close the file
+    // but not wait for confirmation that the operation was completed.
+    // If you want to be sure that the file was closed without error
+    // then call the close or flush functions explicitly
     fn drop(&mut self) {
-        // TODO: implement this!!!
+        // TODO: get this to work
+
+        /*
+        let handle = FileHandle(self.0);
+        if let Some(reply) = ReplyPool::try_acquire() {
+            let req = Req {
+                op: Op::CloseFile { handle },
+                reply,
+            };
+            REQ.try_send(req).ok();
+        }*/
     }
 }
 
@@ -462,6 +483,130 @@ pub async fn read_dir(path: &str) -> Result<DirectoryHandle, Error> {
     }
 }
 
+pub async fn exists(path: &str) -> Result<bool, Error> {
+    let token = ReplyPool::acquire().await;
+    let req = Req {
+        op: Op::Exists {
+            path: path.to_string(),
+        },
+        reply: token,
+    };
+    REQ.send(req).await;
+    let resp = ReplyPool::wait(token).await?;
+
+    match resp {
+        Resp::Exists { exists } => Ok(exists),
+        _ => Err(Error::UnexpectedResponse),
+    }
+}
+
+pub async fn remove_file(path: &str) -> Result<(), Error> {
+    let token = ReplyPool::acquire().await;
+    let req = Req {
+        op: Op::RemoveFile {
+            path: path.to_string(),
+        },
+        reply: token,
+    };
+    REQ.send(req).await;
+    let resp = ReplyPool::wait(token).await?;
+
+    match resp {
+        Resp::Ok => Ok(()),
+        _ => Err(Error::UnexpectedResponse),
+    }
+}
+
+pub async fn create_directory(path: &str) -> Result<(), Error> {
+    let token = ReplyPool::acquire().await;
+    let req = Req {
+        op: Op::CreateDirectory {
+            path: path.to_string(),
+        },
+        reply: token,
+    };
+    REQ.send(req).await;
+    let resp = ReplyPool::wait(token).await?;
+
+    match resp {
+        Resp::Ok => Ok(()),
+        _ => Err(Error::UnexpectedResponse),
+    }
+}
+
+pub async fn copy(path_from: &str, path_to: &str) -> Result<(), Error> {
+    let token = ReplyPool::acquire().await;
+    let req = Req {
+        op: Op::Copy {
+            from_path: path_from.to_string(),
+            to_path: path_to.to_string(),
+        },
+        reply: token,
+    };
+    REQ.send(req).await;
+    let resp = ReplyPool::wait(token).await?;
+
+    match resp {
+        Resp::Ok => Ok(()),
+        _ => Err(Error::UnexpectedResponse),
+    }
+}
+
+pub async fn rename(path_from: &str, path_to: &str) -> Result<(), Error> {
+    let token = ReplyPool::acquire().await;
+    let req = Req {
+        op: Op::Rename {
+            from_path: path_from.to_string(),
+            to_path: path_to.to_string(),
+        },
+        reply: token,
+    };
+    REQ.send(req).await;
+    let resp = ReplyPool::wait(token).await?;
+
+    match resp {
+        Resp::Ok => Ok(()),
+        _ => Err(Error::UnexpectedResponse),
+    }
+}
+
+pub async fn remove_directory(path: &str) -> Result<(), Error> {
+    let token = ReplyPool::acquire().await;
+    let req = Req {
+        op: Op::RemoveDir {
+            path: path.to_string(),
+        },
+        reply: token,
+    };
+    REQ.send(req).await;
+    let resp = ReplyPool::wait(token).await?;
+
+    match resp {
+        Resp::Ok => Ok(()),
+        _ => Err(Error::UnexpectedResponse),
+    }
+}
+
+pub async fn write(path: &str, buffer: impl Into<Cow<'_, [u8]>>) -> Result<(), Error> {
+    let token = ReplyPool::acquire().await;
+    let buffer: Cow<'_, [u8]> = buffer.into();
+
+    let req = Req {
+        op: Op::Write {
+            path: path.to_string(),
+            buffer: buffer.into(),
+        },
+        reply: token,
+    };
+    REQ.send(req).await;
+    let resp = ReplyPool::wait(token).await?;
+
+    match resp {
+        Resp::Ok => Ok(()),
+        _ => Err(Error::UnexpectedResponse),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ReplyToken {
     pub slot: u8,
@@ -515,19 +660,8 @@ enum Resp {
     DirectoryOpen { handle: DirectoryHandle },
     Metadata { data: Metadata },
     DirectoryEntry { data: Option<DirectoryEntry> },
+    Exists { exists: bool },
 }
-
-/*
-struct Directories {
-    dirs: BTreeMap<u32, DirectoryEntryChain>,
-    next_handle: u32,
-}
-
-struct Files {
-    files: BTreeMap<u32, File>,
-    next_handle: u32,
-}
-*/
 
 struct Handles<T> {
     handles: BTreeMap<u32, T>,
@@ -581,54 +715,6 @@ impl<T> Handles<T> {
     }
 }
 
-/*
-impl Files {
-    pub fn new() -> Self {
-        Self {
-            files: BTreeMap::new(),
-            next_handle: 0,
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.files.clear();
-        // don't reset the handle back to 0 because there might be old handles still out there
-    }
-
-    pub fn add(&mut self, file: File) -> Result<FileHandle, Error> {
-        let mut counter: u32 = 0;
-        loop {
-            let handle = self.next_handle.wrapping_add(1);
-            self.next_handle = handle;
-
-            match self.files.entry(handle) {
-                Entry::Occupied(_) => {
-                    // file is still available here because it was not moved
-                }
-                Entry::Vacant(v) => {
-                    v.insert(file); // moved only if key was absent
-                    return Ok(FileHandle(handle));
-                }
-            }
-
-            counter += 1;
-            if counter == u32::MAX {
-                return Err(Error::ExhaustedFileHandles);
-            }
-        }
-    }
-
-    pub fn remove(&mut self, handle: FileHandle) -> Result<File, Error> {
-        self.files.remove(&handle.0).ok_or(Error::InvalidFileHandle)
-    }
-
-    pub fn get(&mut self, handle: &FileHandle) -> Result<&mut File, Error> {
-        self.files
-            .get_mut(&handle.0)
-            .ok_or(Error::InvalidFileHandle)
-    }
-}
-*/
 struct ReplyPool;
 
 impl ReplyPool {
@@ -645,6 +731,21 @@ impl ReplyPool {
 
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         ReplyToken { slot, seq }
+    }
+
+    /// Acquire a reply slot and create a token.
+    pub fn _try_acquire() -> Option<ReplyToken> {
+        // Ensure a slot is available.
+        FREE_SLOTS.try_acquire(1)?;
+
+        // Claim an actual slot id.
+        let slot = {
+            let mut bm = SLOT_BITMAP.try_lock().ok()?;
+            claim_slot_locked(&mut bm)
+        };
+
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        Some(ReplyToken { slot, seq })
     }
 
     /// Wait for completion of a specific token; releases the slot afterwards.
@@ -841,6 +942,34 @@ where
             let dir = dirs.get(handle.0)?;
             let data = dir.next_entry(file_system).await?;
             Resp::DirectoryEntry { data }
+        }
+        Op::Exists { path } => {
+            let exists = file_system.exists(&path).await?;
+            Resp::Exists { exists }
+        }
+        Op::RemoveFile { path } => {
+            file_system.remove_file(&path).await?;
+            Resp::Ok
+        }
+        Op::CreateDirectory { path } => {
+            file_system.create_directory(&path).await?;
+            Resp::Ok
+        }
+        Op::Copy { from_path, to_path } => {
+            file_system.copy(&from_path, &to_path).await?;
+            Resp::Ok
+        }
+        Op::Rename { from_path, to_path } => {
+            file_system.rename(&from_path, &to_path).await?;
+            Resp::Ok
+        }
+        Op::RemoveDir { path } => {
+            file_system.remove_dir(&path).await?;
+            Resp::Ok
+        }
+        Op::Write { path, buffer } => {
+            file_system.write(&path, &buffer).await?;
+            Resp::Ok
         }
     };
 

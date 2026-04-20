@@ -1,0 +1,48 @@
+[package]
+name = "embassy-demo"
+version = "0.1.0"
+edition = "2024"
+authors = ["David Haig"]
+license = "Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+exfat-slim = { path = "../..", version = "0.3", default-features = false, features = [
+    "defmt",
+    "embassy",
+] }
+mbr-nostd = "0.1"
+embedded-hal-async = { version = "1.0.0" }
+defmt-persist = "0.1.0"
+panic-probe = { version = "0.3", features = ["print-defmt"] }
+embassy-stm32 = { version = "0.6.0", features = [
+    "stm32u5g9zj",
+    "time-driver-any",
+    "exti",
+    "memory-x",
+    "unstable-pac",
+    "chrono",
+    "time",
+    "defmt",
+] }
+embassy-executor = { version = "0.10.0", features = [
+    "platform-cortex-m",
+    "executor-thread",
+    "executor-interrupt",
+    "defmt",
+] }
+embassy-sync = "0.8.0"
+embassy-time = { version = "0.5.1", features = ["defmt", "tick-hz-1_000_000"] }
+defmt = { version = "0.3", features = ["alloc"] }
+defmt-rtt = { version = "0.4" }
+chrono = { version = "0.4.38", default-features = false }
+cortex-m = { version = "0.7.7", features = [
+    "inline-asm",
+    "critical-section-single-core",
+] }
+cortex-m-rt = { version = "0.7.3" }
+embedded-alloc = { version = "0.5" }
+
+[profile.release]
+debug = true  # required for decent panic messages
+opt-level = 3

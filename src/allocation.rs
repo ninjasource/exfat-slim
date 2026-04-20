@@ -74,7 +74,7 @@ pub(crate) struct AllocationBitmapSlim {
 }
 
 #[derive(Debug)]
-pub struct Allocator<D: BlockDevice, const N: usize> {
+pub(crate) struct Allocator<D: BlockDevice, const N: usize> {
     pub bitmap: AllocationBitmapSlim,
     cache: SlotCache<D, N>,
     next_search_cluster: u32,

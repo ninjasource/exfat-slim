@@ -202,40 +202,6 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         ))
     }
 
-    #[bisync]
-    pub(crate) async fn get_stored_chain(
-        &mut self,
-        file_details: &FileDetails,
-    ) -> Result<StoredChain, ExFatError<D>> {
-        let no_fat_chain = file_details
-            .flags
-            .contains(GeneralSecondaryFlags::NoFatChain);
-        let cluster_count = file_details
-            .data_length
-            .div_ceil(self.fs.cluster_length as u64) as u32;
-        let is_empty = file_details.first_cluster == NO_CLUSTER_ID;
-
-        let chain = if is_empty {
-            StoredChain::Empty
-        } else if no_fat_chain {
-            StoredChain::Contiguous {
-                first: file_details.first_cluster,
-                cluster_count,
-            }
-        } else {
-            let last = self
-                .get_cluster_id_at(file_details.data_length, &file_details)
-                .await?;
-            StoredChain::Fat {
-                first: file_details.first_cluster,
-                last,
-                cluster_count,
-            }
-        };
-
-        Ok(chain)
-    }
-
     /// Returns true if the file or directory exists
     ///
     /// Symbolic link following is not supported
@@ -415,6 +381,40 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
 
         self.write_inner(path, contents).await?;
         Ok(())
+    }
+
+    #[bisync]
+    pub(crate) async fn get_stored_chain(
+        &mut self,
+        file_details: &FileDetails,
+    ) -> Result<StoredChain, ExFatError<D>> {
+        let no_fat_chain = file_details
+            .flags
+            .contains(GeneralSecondaryFlags::NoFatChain);
+        let cluster_count = file_details
+            .data_length
+            .div_ceil(self.fs.cluster_length as u64) as u32;
+        let is_empty = file_details.first_cluster == NO_CLUSTER_ID;
+
+        let chain = if is_empty {
+            StoredChain::Empty
+        } else if no_fat_chain {
+            StoredChain::Contiguous {
+                first: file_details.first_cluster,
+                cluster_count,
+            }
+        } else {
+            let last = self
+                .get_cluster_id_at(file_details.data_length, &file_details)
+                .await?;
+            StoredChain::Fat {
+                first: file_details.first_cluster,
+                last,
+                cluster_count,
+            }
+        };
+
+        Ok(chain)
     }
 
     #[bisync]
@@ -729,10 +729,9 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
 
         // write all block size chunks
         for block in chunks {
-            self.dev
-                .write(sector_id, block)
-                .await
-                .map_err(ExFatError::Io)?;
+            self.data_blocks
+                .write(&mut self.dev, sector_id, block)
+                .await?;
             sector_id += 1;
         }
 

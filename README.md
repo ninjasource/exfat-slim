@@ -124,8 +124,9 @@ Implemented so far:
     - Truncate
     - Seek
 - Use Actor pattern so that BlockDevice trait can take a shared reference to self
-- Support `close()` and `flush()` instead of immediate mode. Enable `close()` on Drop when using the actor pattern
-- Support block caching
+- Support `close()` and `flush()` 
+- Support block caching for allocation bitmap, fat chain and data blocks (directory entries and files)
+- Embassy example
 
 Work in progress:
 - Return zeros where user attempts to read past valid_data_length in file (see File::read function)
@@ -134,7 +135,7 @@ Work in progress:
 - Timestamps
 - Maintain list of locked open files
 - Add support for different block sizes (currently only 512 byte blocks supported)
-- Add Embassy example
+- Enable file `close()` on Drop when using the actor pattern
 
 ## Contribution
 
