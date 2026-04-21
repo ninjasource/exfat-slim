@@ -572,7 +572,7 @@ impl DirectoryEntryChain {
         if self.fetch_required {
             let sector_id = self.get_current_sector_id()?;
             let slot = fs.data_blocks.read(sector_id, &mut fs.dev).await?;
-            self.buf.copy_from_slice(&slot.block);
+            self.buf.copy_from_slice(slot.as_slice());
             self.fetch_required = false;
         }
 

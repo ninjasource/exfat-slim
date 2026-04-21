@@ -390,7 +390,8 @@ impl File {
 
         // read a single sector and copy the bytes into the user supplied buffer
         let slot = fs.data_blocks.read(sector_id, &mut fs.dev).await?;
-        buf[..num_bytes].copy_from_slice(&slot.block[sector_offset..sector_offset + num_bytes]);
+        buf[..num_bytes]
+            .copy_from_slice(&slot.as_slice()[sector_offset..sector_offset + num_bytes]);
 
         // update file read cursor position
         self.move_file_cursor(num_bytes).await?;
@@ -813,10 +814,9 @@ impl File {
         // we need to read the existing sector and add in the bit we want to write
         // for max efficiency the user should write in block size chunks
         if start_index > 0 || end_index < BLOCK_SIZE {
-            let slot = fs.data_blocks.read(sector_id, &mut fs.dev).await?;
+            let slot = fs.data_blocks.read_mut(sector_id, &mut fs.dev).await?;
             let len = end_index - start_index;
-            slot.block[start_index..end_index].copy_from_slice(&buf[..len]);
-            slot.is_dirty = true;
+            slot.as_mut_slice()[start_index..end_index].copy_from_slice(&buf[..len]);
             self.touched
                 .insert(TouchedSector::new(TouchedKind::Data, sector_id));
             self.move_file_cursor(len).await?;

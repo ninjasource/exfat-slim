@@ -55,12 +55,11 @@ impl<D: BlockDevice, const N: usize> Fat<D, N> {
         assert!(cluster_id >= MIN_CLUSER_ID);
         let sector_id = self.get_sector_id(cluster_id)?;
         touched.insert(TouchedSector::new(TouchedKind::Fat, sector_id));
-        let slot = self.cache.read(sector_id, io).await?;
+        let slot = self.cache.read_mut(sector_id, io).await?;
 
-        let (chunks, _remainder) = slot.block.as_chunks_mut::<ENTRY_SIZE>();
+        let (chunks, _remainder) = slot.as_mut_slice().as_chunks_mut::<ENTRY_SIZE>();
         let sector_offset = (cluster_id % NUM_ENTRIES as u32) as usize;
         chunks[sector_offset].copy_from_slice(&cluster_id_to.to_le_bytes());
-        slot.is_dirty = true;
 
         Ok(())
     }
@@ -86,7 +85,7 @@ impl<D: BlockDevice, const N: usize> Fat<D, N> {
         let sector_offset = (cluster_id % NUM_ENTRIES as u32) as usize;
 
         let slot = self.cache.read(sector_id, io).await?;
-        let (chunks, _remainder) = slot.block.as_chunks::<ENTRY_SIZE>();
+        let (chunks, _remainder) = slot.as_slice().as_chunks::<ENTRY_SIZE>();
         let next_cluster_id = u32::from_le_bytes(chunks[sector_offset]);
 
         if (MIN_CLUSER_ID..CLUSTER_LEN).contains(&next_cluster_id) {

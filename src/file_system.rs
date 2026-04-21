@@ -752,9 +752,8 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         let mut count = None;
         let mut from = dir_entry_offset;
         loop {
-            let slot = self.data_blocks.read(sector_id, &mut self.dev).await?;
-            slot.is_dirty = true;
-            let (dir_entries, _remainder) = slot.block.as_chunks_mut::<RAW_ENTRY_LEN>();
+            let slot = self.data_blocks.read_mut(sector_id, &mut self.dev).await?;
+            let (dir_entries, _remainder) = slot.as_mut_slice().as_chunks_mut::<RAW_ENTRY_LEN>();
 
             let count = count.get_or_insert_with(|| {
                 let file_dir_entry = FileDirEntry::from(&dir_entries[dir_entry_offset]);
@@ -829,9 +828,8 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         let mut offset = location.dir_entry_offset * RAW_ENTRY_LEN;
 
         for (index, dir_entry) in dir_entries.iter().enumerate() {
-            let slot = self.data_blocks.read(sector_id, &mut self.dev).await?;
-            slot.block[offset..offset + RAW_ENTRY_LEN].copy_from_slice(dir_entry);
-            slot.is_dirty = true;
+            let slot = self.data_blocks.read_mut(sector_id, &mut self.dev).await?;
+            slot.as_mut_slice()[offset..offset + RAW_ENTRY_LEN].copy_from_slice(dir_entry);
             offset += RAW_ENTRY_LEN;
 
             // move to the next sector if required

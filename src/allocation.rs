@@ -13,7 +13,7 @@
 /// NOTE: I encountered what appears to be a logic error in the linux kernel exfat implementation where bits are incorrectly counted from MSB to LSB and not the other way around when locating free allocations.
 /// this does not affect the allocation bitmap write consistency but could possibly lead to unnecessary fragmentation
 ///
-use core::marker::PhantomData;
+use core::{marker::PhantomData, ops::Range};
 
 use super::{
     bisync,
@@ -191,16 +191,22 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
         Ok(())
     }
 
-    fn bit_set<const S: usize>(block: &mut [u8; S], bit: usize) {
-        let byte = bit / 8;
-        let mask = 1u8 << (bit % 8);
-        block[byte] |= mask;
-    }
-
-    fn bit_clear<const S: usize>(block: &mut [u8; S], bit: usize) {
-        let byte = bit / 8;
-        let mask = 1u8 << (bit % 8);
-        block[byte] &= !mask;
+    fn set_bit_range(block: &mut [u8], range: Range<u32>, set: bool) {
+        if set {
+            for bit in range {
+                // set the bit
+                let byte = bit as usize / 8;
+                let mask = 1u8 << (bit % 8);
+                block[byte] |= mask;
+            }
+        } else {
+            for bit in range {
+                // clear the bit
+                let byte = bit as usize / 8;
+                let mask = 1u8 << (bit % 8);
+                block[byte] &= !mask;
+            }
+        }
     }
 
     #[bisync]
@@ -220,23 +226,12 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
 
         for sector_offset in sector_index..num_sectors {
             let sector_id = first_sector + sector_offset;
-            let slot = self.cache.read(sector_id, io).await?;
+            let slot = self.cache.read_mut(sector_id, io).await?;
 
             let first_cluster_of_slot = sector_index * BLOCK_SIZE as u32 + FIRST_CLUSTER_ID;
             let start = cluster_id - first_cluster_of_slot;
             let end = (BLOCK_SIZE as u32).min(start + remaining);
-
-            if allocated {
-                for bit in start..end {
-                    Self::bit_set(&mut slot.block, bit as usize);
-                }
-            } else {
-                for bit in start..end {
-                    Self::bit_clear(&mut slot.block, bit as usize);
-                }
-            }
-
-            slot.is_dirty = true;
+            Self::set_bit_range(slot.as_mut_slice(), start..end, allocated);
             touched.insert(TouchedSector::new(TouchedKind::Bitmap, sector_id));
             let num_clusters_in_slot = end - start;
             remaining -= num_clusters_in_slot;
@@ -270,7 +265,7 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
         for sector_offset in sector_index..num_sectors {
             let slot = self.cache.read(first_sector + sector_offset, io).await?;
 
-            let (bytes, _remainder) = slot.block.as_chunks::<4>();
+            let (bytes, _remainder) = slot.as_slice().as_chunks::<4>();
             for chunk in bytes {
                 if u32::from_le_bytes(*chunk) != u32::MAX {
                     for byte in chunk {
@@ -335,7 +330,7 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
 
         for sector_offset in sector_index..num_sectors {
             let slot = self.cache.read(sector_id + sector_offset, io).await?;
-            let (bytes, _remainder) = slot.block.as_chunks::<4>();
+            let (bytes, _remainder) = slot.as_slice().as_chunks::<4>();
             for chunk in bytes {
                 if u32::from_le_bytes(*chunk) != u32::MAX {
                     for byte in chunk {
