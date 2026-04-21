@@ -181,6 +181,7 @@ impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
 
             if slot.is_dirty {
                 Self::write_back(io, slot).await?;
+                slot.is_dirty = false;
             }
 
             return Ok(i);
