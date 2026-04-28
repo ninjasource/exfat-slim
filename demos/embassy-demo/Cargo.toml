@@ -43,6 +43,7 @@ cortex-m = { version = "0.7.7", features = [
 ] }
 cortex-m-rt = { version = "0.7.3" }
 embedded-alloc = { version = "0.5" }
+aligned = "0.4.2"
 
 [profile.release]
 debug = true  # required for decent panic messages

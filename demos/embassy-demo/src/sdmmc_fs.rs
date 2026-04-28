@@ -1,7 +1,8 @@
 extern crate alloc;
 
-use core::{fmt::Debug, ptr::addr_of_mut};
+use core::fmt::Debug;
 
+use aligned::{A4, Aligned};
 use defmt::info;
 use embassy_stm32::{
     sdmmc::{
@@ -11,43 +12,26 @@ use embassy_stm32::{
     time::mhz,
 };
 use exfat_slim::asynchronous::{
+    BlockDevice,
     fs::{self, BlockDeviceError},
-    io::{BLOCK_SIZE, Block, BlockDevice},
 };
 use mbr_nostd::{MasterBootRecord, PartitionTable};
 
-use crate::memory::{SD_CMD_BLOCK, SD_DATA_BLOCK};
+const BLOCK_SIZE: usize = 512;
 
-#[allow(static_mut_refs)]
 pub async fn file_system_task(mut sdmmc: Sdmmc<'static>) {
-    let cmd_block = unsafe {
-        let ptr = SD_CMD_BLOCK.as_mut_ptr();
-        addr_of_mut!((*ptr)).write(CmdBlock([0u32; 16]));
-        SD_CMD_BLOCK.assume_init_mut()
-    };
-
-    let data_block = unsafe {
-        let ptr = SD_DATA_BLOCK.as_mut_ptr();
-        addr_of_mut!((*ptr)).write(DataBlock([0u32; 128]));
-        SD_DATA_BLOCK.assume_init_mut()
-    };
-
     let storage = StorageDevice::new_uninit_sd_card(&mut sdmmc);
 
     let block_device = SdBlockDevice {
-        cmd_block,
-        data_block,
         storage,
         offset: 0,
         is_init: false,
     };
 
-    fs::fs_actor_task(block_device).await;
+    fs::fs_actor_task::<_, _, 4>(block_device).await;
 }
 
 struct SdBlockDevice<'a> {
-    cmd_block: &'static mut CmdBlock,
-    data_block: &'static mut DataBlock,
     storage: StorageDevice<'a, 'static, Card>,
     pub offset: u32,
     is_init: bool,
@@ -56,7 +40,8 @@ struct SdBlockDevice<'a> {
 impl<'a> SdBlockDevice<'a> {
     pub async fn init(&mut self) -> Result<(), Error> {
         if !self.is_init {
-            self.storage.reacquire(&mut self.cmd_block, mhz(25)).await?;
+            let mut cmd_block = CmdBlock::new();
+            self.storage.reacquire(&mut cmd_block, mhz(25)).await?;
             let card = self.storage.card();
             info!("SD Card: {} bytes", card.size());
             self.offset = self.read_mbr().await?;
@@ -68,22 +53,21 @@ impl<'a> SdBlockDevice<'a> {
 
     /// read the master boot record of the sd card to find the offset to the exfat boot sector
     async fn read_mbr(&mut self) -> Result<u32, Error> {
-        let mut block = [0u8; BLOCK_SIZE];
+        let mut data_block = DataBlock::new();
 
         self.storage
-            .read_block(0, &mut self.data_block)
+            .read_block(0, &mut data_block)
             .await
             .map_err(Error::Io)?;
-        block.copy_from_slice(self.data_block.as_slice());
 
-        let mbr = MasterBootRecord::from_bytes(&block).unwrap();
+        let mbr = MasterBootRecord::from_bytes(&*data_block).unwrap();
         let entries = mbr.partition_table_entries();
         let num_entries = entries.len();
         let entry = entries.get(0).unwrap();
         let offset = entry.logical_block_address;
 
         info!(
-            "reading MBR - offset: {} partition_type: {} sector_count: {}, num_entrties: {}",
+            "reading master boot record - offset: {} partition_type: {} sector_count: {}, num_entrties: {}",
             offset,
             entry.partition_type.to_mbr_tag_byte(),
             entry.sector_count,
@@ -142,17 +126,18 @@ impl From<sdmmc::Error> for Error {
     }
 }
 
-impl<'a> BlockDevice for SdBlockDevice<'a> {
+impl<'a> BlockDevice<BLOCK_SIZE> for SdBlockDevice<'a> {
     type Error = Error;
+    type Align = A4;
 
-    async fn read(&mut self, lba: u32, block: &mut Block) -> Result<(), Self::Error> {
+    async fn read(
+        &mut self,
+        lba: u32,
+        block: &mut [Aligned<Self::Align, [u8; BLOCK_SIZE]>],
+    ) -> Result<(), Self::Error> {
         self.init().await?;
         let block_idx = self.offset + lba;
-        match self
-            .storage
-            .read_block(block_idx, &mut self.data_block)
-            .await
-        {
+        match self.storage.read(block_idx, block).await {
             Ok(()) => {}
             Err(e) => {
                 if e == sdmmc::Error::NoCard || e == sdmmc::Error::Timeout {
@@ -162,17 +147,19 @@ impl<'a> BlockDevice for SdBlockDevice<'a> {
             }
         }
 
-        block.copy_from_slice(self.data_block.as_slice());
         Ok(())
     }
 
-    async fn write(&mut self, lba: u32, block: &Block) -> Result<(), Self::Error> {
+    async fn write(
+        &mut self,
+        lba: u32,
+        block: &[Aligned<Self::Align, [u8; BLOCK_SIZE]>],
+    ) -> Result<(), Self::Error> {
         self.init().await?;
         let block_idx = self.offset + lba;
         assert_ne!(block_idx, 0); // you really don't want to write to this block on your sd card
-        self.data_block.copy_from_slice(block.as_slice());
 
-        match self.storage.write_block(block_idx, &self.data_block).await {
+        match self.storage.write(block_idx, block).await {
             Ok(()) => {}
             Err(e) => {
                 if e == sdmmc::Error::NoCard || e == sdmmc::Error::Timeout {
@@ -185,7 +172,7 @@ impl<'a> BlockDevice for SdBlockDevice<'a> {
         Ok(())
     }
 
-    async fn flush(&mut self) -> Result<(), Self::Error> {
-        Ok(())
+    async fn size(&mut self) -> Result<u64, Self::Error> {
+        Ok(self.storage.size().await?)
     }
 }
