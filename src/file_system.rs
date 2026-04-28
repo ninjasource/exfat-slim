@@ -1,6 +1,8 @@
+use aligned::Aligned;
 use alloc::{string::String, vec::Vec};
 
 use super::{
+    BlockDevice,
     allocation::{AllocationBitmap, Allocator, StoredChain},
     bisync,
     boot_sector::BootSector,
@@ -17,7 +19,6 @@ use super::{
         File, FileDetails, FileDirty, NO_CLUSTER_ID, OpenOptions, Touched, TouchedKind,
         TouchedSector,
     },
-    io::{BLOCK_SIZE, BlockDevice},
     slot_cache::SlotCache,
     upcase_table::UpcaseTable,
     utils::{calc_dir_entry_set_len, encode_utf16_and_hash, split_path},
@@ -65,10 +66,13 @@ impl FileSystemDetails {
         }
     }
 
-    pub(crate) fn get_heap_sector_id<D: BlockDevice>(
+    pub(crate) fn get_heap_sector_id<D, const SIZE: usize>(
         &self,
         cluster_id: u32,
-    ) -> Result<u32, ExFatError<D>> {
+    ) -> Result<u32, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         if cluster_id < 2 {
             return Err(ExFatError::InvalidClusterId(cluster_id));
         }
@@ -79,33 +83,37 @@ impl FileSystemDetails {
     }
 }
 
-const DEFAULT_CACHE_LEN: usize = 4;
-
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug)]
-pub struct FileSystem<D: BlockDevice, const N: usize = DEFAULT_CACHE_LEN> {
+pub struct FileSystem<D, const SIZE: usize, const N: usize>
+where
+    D: BlockDevice<SIZE>,
+{
     pub(crate) dev: D,
     pub(crate) is_mounted: bool,
     pub(crate) fs: FileSystemDetails,
     pub(crate) upcase_table: UpcaseTable,
-    pub(crate) allocator: Allocator<D, N>,
-    pub(crate) fat: Fat<D, N>,
-    pub(crate) data_blocks: SlotCache<D, N>,
+    pub(crate) allocator: Allocator<D, SIZE, N>,
+    pub(crate) fat: Fat<D, SIZE, N>,
+    pub(crate) data_blocks: SlotCache<D, SIZE, N>,
 }
 
-pub(crate) struct FileSystemMetadata {
+pub(crate) struct FileSystemMetadata<const SIZE: usize> {
     details: FileSystemDetails,
     upcase_table: UpcaseTable,
-    alloc_bitmap: AllocationBitmap,
+    alloc_bitmap: AllocationBitmap<SIZE>,
 }
 
-impl<D: BlockDevice> FileSystem<D> {
+impl<D, const SIZE: usize, const N: usize> FileSystem<D, SIZE, N>
+where
+    D: BlockDevice<SIZE>,
+{
     pub fn new(io: D) -> Self {
         let fs = FileSystemDetails::empty();
         let upcase_table = UpcaseTable::empty();
         let fat = Fat::new();
         let allocator = Allocator::new();
-        let data_blocks: SlotCache<D, DEFAULT_CACHE_LEN> = SlotCache::new();
+        let data_blocks: SlotCache<D, SIZE, N> = SlotCache::new();
 
         Self {
             dev: io,
@@ -119,11 +127,14 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 }
 
-impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
+impl<D, const SIZE: usize, const N: usize> FileSystem<D, SIZE, N>
+where
+    D: BlockDevice<SIZE>,
+{
     /// Calling this is optional as the file system will be automatically mounted upon first use if it is not already mounted
     /// Reads the boot sector using the block device and initializes the file system returning an instance of it
     #[bisync]
-    pub async fn mount(&mut self) -> Result<(), ExFatError<D>> {
+    pub async fn mount(&mut self) -> Result<(), ExFatError<D, SIZE>> {
         if self.is_mounted {
             return Ok(());
         }
@@ -144,7 +155,11 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     }
 
     #[bisync]
-    pub async fn open(&mut self, path: &str, options: OpenOptions) -> Result<File, ExFatError<D>> {
+    pub async fn open(
+        &mut self,
+        path: &str,
+        options: OpenOptions,
+    ) -> Result<File, ExFatError<D, SIZE>> {
         self.mount().await?;
 
         // attempt to get the file details
@@ -206,7 +221,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     ///
     /// Symbolic link following is not supported
     #[bisync]
-    pub async fn exists(&mut self, path: &str) -> Result<bool, ExFatError<D>> {
+    pub async fn exists(&mut self, path: &str) -> Result<bool, ExFatError<D, SIZE>> {
         self.mount().await?;
 
         match self.find_file_or_directory(path, None).await {
@@ -221,7 +236,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     ///
     /// Supports nested paths
     #[bisync]
-    pub async fn read(&mut self, path: &str) -> Result<Vec<u8>, ExFatError<D>> {
+    pub async fn read(&mut self, path: &str) -> Result<Vec<u8>, ExFatError<D, SIZE>> {
         self.mount().await?;
         let options = OpenOptions::new().read(true);
         let mut file = self.open(path, options).await?;
@@ -235,7 +250,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     ///
     /// Supports nested paths
     #[bisync]
-    pub async fn read_to_string(&mut self, path: &str) -> Result<String, ExFatError<D>> {
+    pub async fn read_to_string(&mut self, path: &str) -> Result<String, ExFatError<D, SIZE>> {
         self.mount().await?;
         let options = OpenOptions::new().read(true);
         let mut file = self.open(path, options).await?;
@@ -246,7 +261,10 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     ///
     /// Supports nested paths
     #[bisync]
-    pub async fn read_dir(&mut self, path: &str) -> Result<DirectoryIterator, ExFatError<D>> {
+    pub async fn read_dir(
+        &mut self,
+        path: &str,
+    ) -> Result<DirectoryIterator<SIZE>, ExFatError<D, SIZE>> {
         self.mount().await?;
         directory_list(self, path).await
     }
@@ -255,7 +273,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     ///
     /// Returns an error if the file does not exist or something else failed
     #[bisync]
-    pub async fn remove_file(&mut self, path: &str) -> Result<(), ExFatError<D>> {
+    pub async fn remove_file(&mut self, path: &str) -> Result<(), ExFatError<D, SIZE>> {
         self.mount().await?;
         let file_details = self
             .find_file_inner(path, Some(FileAttributes::Archive))
@@ -268,7 +286,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     ///
     /// The dir path can be nested
     #[bisync]
-    pub async fn create_directory(&mut self, path: &str) -> Result<(), ExFatError<D>> {
+    pub async fn create_directory(&mut self, path: &str) -> Result<(), ExFatError<D, SIZE>> {
         self.mount().await?;
         let mut touched = FileDirty::new();
 
@@ -284,7 +302,11 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     /// If directories in the to_path do not exist they will be created
     /// File attributes will also be copied but timestamps will be new
     #[bisync]
-    pub async fn copy(&mut self, from_path: &str, to_path: &str) -> Result<(), ExFatError<D>> {
+    pub async fn copy(
+        &mut self,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<(), ExFatError<D, SIZE>> {
         self.mount().await?;
         if from_path == to_path {
             return Err(ExFatError::InvalidFileName {
@@ -304,7 +326,11 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     /// If the file or directory changes parent directories then this is considered to be a file move, otherwise a rename
     /// If the to_path contains directories that don't yet exist they will be created.
     #[bisync]
-    pub async fn rename(&mut self, from_path: &str, to_path: &str) -> Result<(), ExFatError<D>> {
+    pub async fn rename(
+        &mut self,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<(), ExFatError<D, SIZE>> {
         self.mount().await?;
         // in exFAT a directory cannot have a directory and file with the same name in it so no need to filter here
         let file_details = self.find_file_inner(from_path, None).await?;
@@ -346,7 +372,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     ///
     /// Will return an error if the directory does not exist or is not empty
     #[bisync]
-    pub async fn remove_dir(&mut self, path: &str) -> Result<(), ExFatError<D>> {
+    pub async fn remove_dir(&mut self, path: &str) -> Result<(), ExFatError<D, SIZE>> {
         self.mount().await?;
         let file_details = self
             .find_file_inner(path, Some(FileAttributes::Directory))
@@ -365,7 +391,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         &mut self,
         path: &str,
         contents: impl AsRef<[u8]>,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>> {
         self.mount().await?;
         let options = OpenOptions::new().create(true).truncate(true).write(true);
         let mut file = self.open(path, options).await?;
@@ -378,7 +404,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     pub(crate) async fn get_stored_chain(
         &mut self,
         file_details: &FileDetails,
-    ) -> Result<StoredChain, ExFatError<D>> {
+    ) -> Result<StoredChain, ExFatError<D, SIZE>> {
         let no_fat_chain = file_details
             .flags
             .contains(GeneralSecondaryFlags::NoFatChain);
@@ -413,7 +439,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         &mut self,
         path: &str,
         file_attributes: Option<FileAttributes>,
-    ) -> Result<FileDetails, ExFatError<D>> {
+    ) -> Result<FileDetails, ExFatError<D, SIZE>> {
         let file_details = self.find_file_inner(path, file_attributes).await?;
         Ok(file_details)
     }
@@ -424,7 +450,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         &mut self,
         path: &str,
         file_attributes: Option<FileAttributes>,
-    ) -> Result<FileDetails, ExFatError<D>> {
+    ) -> Result<FileDetails, ExFatError<D, SIZE>> {
         match get_leaf_file_entry(self, path, file_attributes).await? {
             Some(file_details) => Ok(file_details),
             None => Err(ExFatError::FileNotFound),
@@ -438,7 +464,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         &mut self,
         file_details: &mut FileDetails,
         length: u64,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>> {
         // TODO: support length greater than 0 for preallocated files
         if length > 0 {
             unimplemented!("length greater than 0 not yet supported")
@@ -489,7 +515,10 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     }
 
     #[bisync]
-    pub(crate) async fn create_file(&mut self, path: &str) -> Result<FileDetails, ExFatError<D>> {
+    pub(crate) async fn create_file(
+        &mut self,
+        path: &str,
+    ) -> Result<FileDetails, ExFatError<D, SIZE>> {
         let (dir_path, file_or_dir_name) = split_path(path);
         let mut touched = FileDirty::new();
 
@@ -521,7 +550,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         &mut self,
         touched: &mut impl Touched,
         path: &str,
-    ) -> Result<u32, ExFatError<D>> {
+    ) -> Result<u32, ExFatError<D, SIZE>> {
         let mut names = path_to_iter(path).peekable();
         let mut cluster_id = self.fs.first_cluster_of_root_dir;
 
@@ -587,7 +616,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         stream_ext_flags: GeneralSecondaryFlags,
         valid_data_length: u64,
         data_length: u64,
-    ) -> Result<FileDetails, ExFatError<D>> {
+    ) -> Result<FileDetails, ExFatError<D, SIZE>> {
         let (utf16_name, name_hash) = encode_utf16_and_hash(name, &self.upcase_table);
         let dir_entry_set_len = calc_dir_entry_set_len(&utf16_name);
         let location = self
@@ -679,7 +708,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         &mut self,
         cursor: u64,
         file_details: &FileDetails,
-    ) -> Result<u32, ExFatError<D>> {
+    ) -> Result<u32, ExFatError<D, SIZE>> {
         if cursor == 0 {
             return Ok(file_details.first_cluster);
         }
@@ -713,7 +742,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     async fn confirm_has_no_children(
         &mut self,
         file_details: &FileDetails,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>> {
         if file_details.attributes.contains(FileAttributes::Directory) {
             let mut reader = DirectoryEntryChain::new(file_details.first_cluster, &self.fs);
 
@@ -736,7 +765,10 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
     // the only difference between deleting a file and a directory is that we must
     // first check tha the directory is empty.
     #[bisync]
-    async fn delete_inner(&mut self, file_details: &FileDetails) -> Result<(), ExFatError<D>> {
+    async fn delete_inner(
+        &mut self,
+        file_details: &FileDetails,
+    ) -> Result<(), ExFatError<D, SIZE>> {
         self.confirm_has_no_children(file_details).await?;
         let mut touched = FileDirty::new();
 
@@ -784,7 +816,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         &mut self,
         cluster_id: u32,
         dir_entry_set_len: usize,
-    ) -> Result<Location, ExFatError<D>> {
+    ) -> Result<Location, ExFatError<D, SIZE>> {
         let mut entries = DirectoryEntryChain::new(cluster_id, &self.fs);
         let mut counter = 0;
         let mut start = None;
@@ -822,7 +854,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
         location: Location,
         dir_entries: Vec<RawDirEntry>,
         touched: &mut impl Touched,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>> {
         let mut sector_id = location.sector_id;
         touched.insert(TouchedSector::new(TouchedKind::Dir, sector_id));
         let mut offset = location.dir_entry_offset * RAW_ENTRY_LEN;
@@ -833,7 +865,7 @@ impl<D: BlockDevice, const N: usize> FileSystem<D, N> {
             offset += RAW_ENTRY_LEN;
 
             // move to the next sector if required
-            if offset >= BLOCK_SIZE {
+            if offset >= SIZE {
                 // if this is the last entry
                 if index == dir_entries.len() - 1 {
                     break;
@@ -858,23 +890,29 @@ fn path_to_iter(path: &str) -> impl Iterator<Item = &str> {
 }
 
 #[bisync]
-async fn read_boot_sector<D: BlockDevice>(
+async fn read_boot_sector<D, const SIZE: usize>(
     io: &mut D,
     sector_id: u32,
-) -> Result<BootSector, ExFatError<D>> {
-    let mut block = [0u8; BLOCK_SIZE];
-    io.read(sector_id, &mut block)
+) -> Result<BootSector, ExFatError<D, SIZE>>
+where
+    D: BlockDevice<SIZE>,
+{
+    let mut data = [Aligned([0u8; SIZE])];
+    io.read(sector_id, &mut data)
         .await
         .map_err(ExFatError::Io)?;
-    let boot_sector: BootSector = (&block).try_into()?;
+    let boot_sector: BootSector = (&data[0]).try_into()?;
     // TODO: run checks
     Ok(boot_sector)
 }
 
 #[bisync]
-pub(crate) async fn read_file_system_metadata<D: BlockDevice>(
+pub(crate) async fn read_file_system_metadata<D, const SIZE: usize>(
     io: &mut D,
-) -> Result<FileSystemMetadata, ExFatError<D>> {
+) -> Result<FileSystemMetadata<SIZE>, ExFatError<D, SIZE>>
+where
+    D: BlockDevice<SIZE>,
+{
     // the boot sector is always at sector_id 0 and everything is relative from there
     // you need to offset the sector_id in your block device if there is a master boot record before this
     let boot_sector = read_boot_sector(io, 0).await?;
@@ -883,8 +921,8 @@ pub(crate) async fn read_file_system_metadata<D: BlockDevice>(
 
     let cluster_id = details.first_cluster_of_root_dir;
     let sector_id = details.get_heap_sector_id(cluster_id)?;
-    let mut block = [0u8; BLOCK_SIZE];
-    io.read(sector_id, &mut block)
+    let mut data = [Aligned([0u8; SIZE])];
+    io.read(sector_id, &mut data)
         .await
         .map_err(ExFatError::Io)?;
 
@@ -892,7 +930,7 @@ pub(crate) async fn read_file_system_metadata<D: BlockDevice>(
     let mut volume_label: Option<VolumeLabelDirEntry> = None;
     let mut upcase_table_dir_entry: Option<UpcaseTableDirEntry> = None;
 
-    let (chunks, _remainder) = block.as_chunks::<RAW_ENTRY_LEN>();
+    let (chunks, _remainder) = data[0].as_chunks::<RAW_ENTRY_LEN>();
 
     for chunk in chunks {
         let entry_type_val = chunk[0];

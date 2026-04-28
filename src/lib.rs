@@ -8,6 +8,9 @@ extern crate alloc;
 pub mod blocking {
     pub use bisync::synchronous::*;
 
+    mod block_device;
+    pub use block_device::BlockDevice;
+
     mod allocation;
     pub mod boot_sector;
     pub mod directory;
@@ -16,7 +19,6 @@ pub mod blocking {
     mod fat;
     pub mod file;
     pub mod file_system;
-    pub mod io;
     mod slot_cache;
     mod upcase_table;
     pub mod utils;
@@ -38,10 +40,11 @@ pub mod asynchronous {
     pub mod file_system;
     #[cfg(feature = "embassy")]
     pub mod fs;
-    pub mod io;
     mod slot_cache;
     mod upcase_table;
     pub mod utils;
+
+    pub use block_device_driver::BlockDevice;
 
     //#[cfg(test)]
     //mod mocks;

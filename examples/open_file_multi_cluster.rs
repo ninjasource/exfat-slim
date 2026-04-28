@@ -10,19 +10,19 @@
 mod common;
 use std::str::from_utf8;
 
-use crate::common::asynchronous::InMemoryBlockDevice;
+use crate::common::{BLOCK_SIZE, N, asynchronous::InMemoryBlockDevice};
 use exfat_slim::asynchronous::file::OpenOptions;
 use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
+async fn main() -> Result<(), ExFatError<InMemoryBlockDevice, BLOCK_SIZE>> {
     env_logger::init();
     color_backtrace::install();
 
     let io = InMemoryBlockDevice::new();
-    let mut fs = FileSystem::new(io);
+    let mut fs: FileSystem<_, _, N> = FileSystem::new(io);
     let path = "/temp2/test7.txt";
 
     let options = OpenOptions::new().write(true).create(true).truncate(true);

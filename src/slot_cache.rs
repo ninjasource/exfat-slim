@@ -1,46 +1,58 @@
-use core::array;
 use core::marker::PhantomData;
+use core::{array, fmt::Debug};
 
-use super::{
-    bisync,
-    error::ExFatError,
-    io::{BLOCK_SIZE, Block, BlockDevice},
-};
+use aligned::Aligned;
+use block_device_driver::{blocks_to_slice, blocks_to_slice_mut};
+
+use super::{BlockDevice, bisync, error::ExFatError};
 
 #[derive(Debug)]
-pub(crate) struct Slot {
+pub(crate) struct Slot<D, const SIZE: usize>
+where
+    D: BlockDevice<SIZE>,
+{
     sector_id: u32,
     is_dirty: bool, // slot must be written before eviction
     is_used: bool,  // slot was accessed recently
     is_valid: bool, // slot contains a cached sector
-    block: [u8; BLOCK_SIZE],
+    blocks: [Aligned<D::Align, [u8; SIZE]>; 1],
 }
 
-impl Slot {
+impl<D, const SIZE: usize> Slot<D, SIZE>
+where
+    D: BlockDevice<SIZE>,
+{
     pub const fn new() -> Self {
         Self {
             sector_id: 0,
             is_dirty: false,
             is_used: false,
             is_valid: false,
-            block: [0u8; BLOCK_SIZE],
+            blocks: [Aligned([0u8; SIZE])],
         }
     }
 
-    pub fn as_mut_slice(&mut self) -> &mut [u8; BLOCK_SIZE] {
-        self.is_dirty = true;
-        &mut self.block
+    pub fn as_blocks_for_read(&mut self) -> &mut [Aligned<D::Align, [u8; SIZE]>] {
+        &mut self.blocks
     }
 
-    pub fn as_slice(&self) -> &[u8; BLOCK_SIZE] {
-        &self.block
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.is_dirty = true;
+        blocks_to_slice_mut(&mut self.blocks)
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        blocks_to_slice(&self.blocks)
     }
 
     #[bisync]
-    pub async fn flush<D: BlockDevice>(&mut self, io: &mut D) -> Result<(), ExFatError<D>> {
+    pub async fn flush(&mut self, io: &mut D) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         if self.is_dirty {
             assert_ne!(self.sector_id, 0);
-            io.write(self.sector_id, &self.block)
+            io.write(self.sector_id, &self.blocks)
                 .await
                 .map_err(ExFatError::Io)?;
             self.is_dirty = false;
@@ -51,14 +63,31 @@ impl Slot {
 }
 
 // this cache uses the clock algorithm for least recently used slot replacement
-#[derive(Debug)]
-pub(crate) struct SlotCache<D: BlockDevice, const N: usize> {
-    cache: [Slot; N],
+pub(crate) struct SlotCache<D, const SIZE: usize, const N: usize>
+where
+    D: BlockDevice<SIZE>,
+{
+    cache: [Slot<D, SIZE>; N],
     hand: usize,
     _phantom: PhantomData<D>,
 }
 
-impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
+impl<D, const SIZE: usize, const N: usize> Debug for SlotCache<D, SIZE, N>
+where
+    D: BlockDevice<SIZE>,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SlotCache")
+            .field("hand", &self.hand)
+            .field("_phantom", &self._phantom)
+            .finish()
+    }
+}
+
+impl<D, const SIZE: usize, const N: usize> SlotCache<D, SIZE, N>
+where
+    D: BlockDevice<SIZE>,
+{
     pub fn new() -> Self {
         Self {
             cache: array::from_fn(|_| Slot::new()),
@@ -68,7 +97,7 @@ impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
     }
 
     #[bisync]
-    pub async fn flush(&mut self, io: &mut D) -> Result<(), ExFatError<D>> {
+    pub async fn flush(&mut self, io: &mut D) -> Result<(), ExFatError<D, SIZE>> {
         for slot in &mut self.cache {
             slot.flush(io).await?;
         }
@@ -77,7 +106,11 @@ impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
     }
 
     #[bisync]
-    pub async fn flush_sector(&mut self, io: &mut D, sector: u32) -> Result<(), ExFatError<D>> {
+    pub async fn flush_sector(
+        &mut self,
+        io: &mut D,
+        sector: u32,
+    ) -> Result<(), ExFatError<D, SIZE>> {
         for slot in &mut self.cache {
             if slot.sector_id == sector {
                 slot.flush(io).await?;
@@ -93,27 +126,35 @@ impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
         &mut self,
         sector_id: u32,
         io: &mut D,
-    ) -> Result<&mut Slot, ExFatError<D>> {
+    ) -> Result<&mut Slot<D, SIZE>, ExFatError<D, SIZE>> {
         self.read_inner(sector_id, io).await
     }
 
     #[bisync]
-    pub async fn read(&mut self, sector_id: u32, io: &mut D) -> Result<&Slot, ExFatError<D>> {
+    pub async fn read(
+        &mut self,
+        sector_id: u32,
+        io: &mut D,
+    ) -> Result<&Slot<D, SIZE>, ExFatError<D, SIZE>> {
         let slot = self.read_inner(sector_id, io).await?;
         Ok(slot)
     }
 
     #[bisync]
-    async fn read_inner(&mut self, sector_id: u32, io: &mut D) -> Result<&mut Slot, ExFatError<D>> {
+    async fn read_inner(
+        &mut self,
+        sector_id: u32,
+        io: &mut D,
+    ) -> Result<&mut Slot<D, SIZE>, ExFatError<D, SIZE>> {
         if let Some(index) = self.cache_hit(sector_id) {
             return Ok(&mut self.cache[index]);
         }
 
         let index = self.choose_victim(io).await?;
+
+        let data = self.cache[index].as_blocks_for_read();
+        io.read(sector_id, data).await.map_err(ExFatError::Io)?;
         let slot = &mut self.cache[index];
-        io.read(sector_id, &mut slot.block)
-            .await
-            .map_err(ExFatError::Io)?;
         slot.sector_id = sector_id;
         slot.is_valid = true;
         slot.is_used = true;
@@ -126,17 +167,19 @@ impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
         &mut self,
         io: &mut D,
         sector_id: u32,
-        block: &Block,
-    ) -> Result<(), ExFatError<D>> {
+        block: &Aligned<D::Align, [u8; SIZE]>,
+    ) -> Result<(), ExFatError<D, SIZE>> {
         if let Some(index) = self.cache_hit(sector_id) {
             // we are not interested in the bytes of this slot
             // and we don't want something to overwrite it later
             let slot = &mut self.cache[index];
-            slot.block.copy_from_slice(block);
+            slot.blocks[0].copy_from_slice(block.as_slice());
             slot.is_dirty = false;
         }
 
-        io.write(sector_id, block).await.map_err(ExFatError::Io)?;
+        io.write(sector_id, &[*block])
+            .await
+            .map_err(ExFatError::Io)?;
         Ok(())
     }
 
@@ -159,7 +202,7 @@ impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
     }
 
     #[bisync]
-    async fn choose_victim(&mut self, io: &mut D) -> Result<usize, ExFatError<D>> {
+    async fn choose_victim(&mut self, io: &mut D) -> Result<usize, ExFatError<D, SIZE>> {
         loop {
             let i = self.hand;
             self.hand += 1;
@@ -189,8 +232,8 @@ impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
     }
 
     #[bisync]
-    async fn write_back(io: &mut D, slot: &mut Slot) -> Result<(), ExFatError<D>> {
-        io.write(slot.sector_id, &slot.block)
+    async fn write_back(io: &mut D, slot: &mut Slot<D, SIZE>) -> Result<(), ExFatError<D, SIZE>> {
+        io.write(slot.sector_id, &slot.blocks)
             .await
             .map_err(ExFatError::Io)?;
         slot.is_dirty = false;
@@ -201,37 +244,47 @@ impl<D: BlockDevice, const N: usize> SlotCache<D, N> {
 #[allow(unused)]
 #[cfg(test)]
 mod tests {
+    use super::super::only_sync;
+    use super::*;
+    use aligned::Aligned;
     use alloc::{vec, vec::Vec};
 
     const SECTOR_OFFSET: usize = 100;
+    const BLOCK_SIZE: usize = 512;
+
     #[derive(Debug)]
     struct DummyBlockDevice {
         blocks: Vec<[u8; BLOCK_SIZE]>,
     }
 
-    impl BlockDevice for DummyBlockDevice {
+    #[only_sync]
+    impl BlockDevice<BLOCK_SIZE> for DummyBlockDevice {
         type Error = ();
+        type Align = aligned::A4;
 
-        #[bisync]
-        async fn read(&mut self, lba: u32, block: &mut Block) -> Result<(), Self::Error> {
-            block.copy_from_slice(&self.blocks[lba as usize - SECTOR_OFFSET]);
+        fn read(
+            &mut self,
+            block_address: u32,
+            data: &mut [Aligned<Self::Align, [u8; BLOCK_SIZE]>],
+        ) -> Result<(), Self::Error> {
+            data[0].copy_from_slice(&self.blocks[block_address as usize - SECTOR_OFFSET]);
             Ok(())
         }
 
-        #[bisync]
-        async fn write(&mut self, lba: u32, block: &Block) -> Result<(), Self::Error> {
-            self.blocks[lba as usize - SECTOR_OFFSET].copy_from_slice(block);
+        fn write(
+            &mut self,
+            block_address: u32,
+            data: &[Aligned<Self::Align, [u8; BLOCK_SIZE]>],
+        ) -> Result<(), Self::Error> {
+            self.blocks[block_address as usize - SECTOR_OFFSET]
+                .copy_from_slice(&data[0].as_slice());
             Ok(())
         }
 
-        #[bisync]
-        async fn flush(&mut self) -> Result<(), Self::Error> {
+        fn size(&mut self) -> Result<u64, Self::Error> {
             todo!()
         }
     }
-
-    use super::super::only_sync;
-    use super::*;
 
     #[only_sync]
     #[test]
@@ -244,7 +297,7 @@ mod tests {
                 [0; BLOCK_SIZE],
             ],
         };
-        let mut cache = SlotCache::<DummyBlockDevice, 4>::new();
+        let mut cache = SlotCache::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
 
         let slot = cache.read_mut(100, &mut io).unwrap();
         slot.as_mut_slice()[..4].copy_from_slice(&[1, 2, 3, 4]);
@@ -271,7 +324,7 @@ mod tests {
                 [0; BLOCK_SIZE],
             ],
         };
-        let mut cache = SlotCache::<DummyBlockDevice, 4>::new();
+        let mut cache = SlotCache::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
 
         let slot0 = cache.read_mut(100, &mut io).unwrap();
         slot0.as_mut_slice()[..4].copy_from_slice(&[1, 2, 3, 4]);

@@ -16,12 +16,11 @@
 use core::{marker::PhantomData, ops::Range};
 
 use super::{
-    bisync,
+    BlockDevice, bisync,
     directory_entry::AllocationBitmapDirEntry,
     error::ExFatError,
     fat::Fat,
     file::{NO_CLUSTER_ID, Touched, TouchedKind, TouchedSector},
-    io::{BLOCK_SIZE, BlockDevice},
     slot_cache::SlotCache,
 };
 
@@ -29,16 +28,16 @@ const FIRST_CLUSTER_ID: u32 = 2;
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone)]
-pub(crate) struct AllocationBitmap {
+pub(crate) struct AllocationBitmap<const SIZE: usize> {
     /// start of the allocation bitmap table
     pub first_cluster: u32,
     /// size, in sectors, of the allocation bitmap
     pub num_sectors: u32,
 }
 
-impl AllocationBitmap {
+impl<const SIZE: usize> AllocationBitmap<SIZE> {
     pub(crate) fn new(alloc_bitmap: &AllocationBitmapDirEntry) -> Self {
-        let num_sectors = alloc_bitmap.data_length.div_ceil(BLOCK_SIZE as u64) as u32;
+        let num_sectors = alloc_bitmap.data_length.div_ceil(SIZE as u64) as u32;
 
         Self {
             first_cluster: alloc_bitmap.first_cluster,
@@ -74,14 +73,20 @@ pub(crate) struct AllocationBitmapSlim {
 }
 
 #[derive(Debug)]
-pub(crate) struct Allocator<D: BlockDevice, const N: usize> {
+pub(crate) struct Allocator<D, const SIZE: usize, const N: usize>
+where
+    D: BlockDevice<SIZE>,
+{
     pub bitmap: AllocationBitmapSlim,
-    cache: SlotCache<D, N>,
+    cache: SlotCache<D, SIZE, N>,
     next_search_cluster: u32,
     _phantom: PhantomData<D>,
 }
 
-impl<D: BlockDevice, const N: usize> Allocator<D, N> {
+impl<D, const SIZE: usize, const N: usize> Allocator<D, SIZE, N>
+where
+    D: BlockDevice<SIZE>,
+{
     pub fn new() -> Self {
         Self {
             bitmap: AllocationBitmapSlim::default(),
@@ -92,13 +97,17 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
     }
 
     #[bisync]
-    pub async fn flush_sector(&mut self, io: &mut D, sector: u32) -> Result<(), ExFatError<D>> {
+    pub async fn flush_sector(
+        &mut self,
+        io: &mut D,
+        sector: u32,
+    ) -> Result<(), ExFatError<D, SIZE>> {
         self.cache.flush_sector(io, sector).await?;
         Ok(())
     }
 
     #[bisync]
-    pub async fn flush(&mut self, io: &mut D) -> Result<(), ExFatError<D>> {
+    pub async fn flush(&mut self, io: &mut D) -> Result<(), ExFatError<D, SIZE>> {
         self.cache.flush(io).await?;
         Ok(())
     }
@@ -110,7 +119,7 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
         touched: &mut impl Touched,
         chain: &StoredChain,
         count: u32,
-    ) -> Result<AllocatedRun, ExFatError<D>> {
+    ) -> Result<AllocatedRun, ExFatError<D, SIZE>> {
         match chain {
             StoredChain::Empty => {
                 let run = self.find_free_clusters(io, count).await?;
@@ -148,9 +157,9 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
         &mut self,
         io: &mut D,
         touched: &mut impl Touched,
-        fat: &mut Fat<D, N>,
+        fat: &mut Fat<D, SIZE, N>,
         chain: &StoredChain,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>> {
         match chain {
             StoredChain::Empty => {
                 // nothing to do
@@ -216,11 +225,11 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
         touched: &mut impl Touched,
         run: &AllocatedRun,
         allocated: bool,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>> {
         let first_sector = self.bitmap.first_sector;
         let num_sectors = self.bitmap.num_sectors;
 
-        let sector_index = (run.first_cluster - FIRST_CLUSTER_ID) / BLOCK_SIZE as u32;
+        let sector_index = (run.first_cluster - FIRST_CLUSTER_ID) / SIZE as u32;
         let mut remaining = run.cluster_count;
         let mut cluster_id = run.first_cluster;
 
@@ -228,9 +237,9 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
             let sector_id = first_sector + sector_offset;
             let slot = self.cache.read_mut(sector_id, io).await?;
 
-            let first_cluster_of_slot = sector_index * BLOCK_SIZE as u32 + FIRST_CLUSTER_ID;
+            let first_cluster_of_slot = sector_index * SIZE as u32 + FIRST_CLUSTER_ID;
             let start = cluster_id - first_cluster_of_slot;
-            let end = (BLOCK_SIZE as u32).min(start + remaining);
+            let end = (SIZE as u32).min(start + remaining);
             Self::set_bit_range(slot.as_mut_slice(), start..end, allocated);
             touched.insert(TouchedSector::new(TouchedKind::Bitmap, sector_id));
             let num_clusters_in_slot = end - start;
@@ -253,12 +262,12 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
         io: &mut D,
         from_cluster: u32,
         num_clusters: u32,
-    ) -> Result<AllocatedRun, ExFatError<D>> {
+    ) -> Result<AllocatedRun, ExFatError<D, SIZE>> {
         let first_sector = self.bitmap.first_sector;
         let num_sectors = self.bitmap.num_sectors;
 
-        let sector_index = (from_cluster - FIRST_CLUSTER_ID) / BLOCK_SIZE as u32;
-        let mut cluster_id = sector_index * BLOCK_SIZE as u32 + FIRST_CLUSTER_ID;
+        let sector_index = (from_cluster - FIRST_CLUSTER_ID) / SIZE as u32;
+        let mut cluster_id = sector_index * SIZE as u32 + FIRST_CLUSTER_ID;
         let mut first_cluster = None;
         let mut count = 0;
 
@@ -318,11 +327,11 @@ impl<D: BlockDevice, const N: usize> Allocator<D, N> {
         &mut self,
         io: &mut D,
         num_clusters: u32,
-    ) -> Result<AllocatedRun, ExFatError<D>> {
+    ) -> Result<AllocatedRun, ExFatError<D, SIZE>> {
         let mut cluster_id = self.next_search_cluster;
         let sector_id = self.bitmap.first_sector;
         let num_sectors = self.bitmap.num_sectors;
-        let sector_index = (cluster_id - FIRST_CLUSTER_ID) / BLOCK_SIZE as u32;
+        let sector_index = (cluster_id - FIRST_CLUSTER_ID) / SIZE as u32;
         let mut first_cluster = None;
         let mut count = 0;
 

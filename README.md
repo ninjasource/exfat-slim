@@ -141,7 +141,6 @@ Work in progress:
 - Better test coverage
 - Timestamps
 - Maintain list of locked open files
-- Add support for different block sizes (currently only 512 byte blocks supported)
 - Enable file `close()` on Drop when using the actor pattern
 
 ## Contribution
@@ -159,6 +158,8 @@ However, when you use `dd` to clone an sd card you normally get the bytes of the
 The `sd.img.gz` is such a clone. 
 It is zipped because it contains mostly zeros. You can use a crate like `mbr-nostd` to read the MBR of an sd card from a microcontroller.
 
-## Assumptions and Limitations
+## Run all examples
 
-Assume a block size of 512 bytes. Even though exFAT supports block sizes from 512 to 4096 bytes this library was primarily written with SD cards in mind and they use 512 byte blocks for now.
+```bash
+ sh ./run_all_examples.sh
+```

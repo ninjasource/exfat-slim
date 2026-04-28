@@ -1,11 +1,8 @@
+use aligned::Aligned;
 use alloc::{string::String, vec, vec::Vec};
 
 use super::{
-    bisync,
-    boot_sector::VolumeFlags,
-    error::ExFatError,
-    io::{BLOCK_SIZE, BlockDevice},
-    upcase_table::UpcaseTable,
+    BlockDevice, bisync, boot_sector::VolumeFlags, error::ExFatError, upcase_table::UpcaseTable,
 };
 
 pub(crate) fn _chunk_at<const N: usize, T>(slice: &[T], index: usize) -> Option<&[T; N]> {
@@ -74,7 +71,12 @@ pub(crate) fn calc_hash_u16(utf16_file_name: &[u16]) -> u16 {
     hash
 }
 
-pub(crate) fn _decode_utf16<D: BlockDevice>(buf: Vec<u16>) -> Result<String, ExFatError<D>> {
+pub(crate) fn _decode_utf16<D, const SIZE: usize>(
+    buf: Vec<u16>,
+) -> Result<String, ExFatError<D, SIZE>>
+where
+    D: BlockDevice<SIZE>,
+{
     let decoded = core::char::decode_utf16(buf)
         .map(|r| {
             // TODO reject illegal character like quotes (see spec)
@@ -82,7 +84,7 @@ pub(crate) fn _decode_utf16<D: BlockDevice>(buf: Vec<u16>) -> Result<String, ExF
                 reason: "invalid u16 char detected",
             })
         })
-        .collect::<Result<String, ExFatError<D>>>()?;
+        .collect::<Result<String, ExFatError<D, SIZE>>>()?;
     Ok(decoded)
 }
 
@@ -93,23 +95,31 @@ pub(crate) fn split_path(path: &str) -> (&str, &str) {
 }
 
 #[bisync]
-pub async fn set_volume_dirty<D: BlockDevice>(
+pub async fn set_volume_dirty<D, const SIZE: usize>(
     io: &mut D,
     is_dirty: bool,
-) -> Result<(), ExFatError<D>> {
+) -> Result<(), ExFatError<D, SIZE>>
+where
+    D: BlockDevice<SIZE>,
+{
     let sector_id = 0; // boot sector
-    let mut block = [0u8; BLOCK_SIZE];
+    let mut block = [Aligned([0u8; SIZE])];
     io.read(sector_id, &mut block)
         .await
         .map_err(ExFatError::Io)?;
-    let mut volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(&block));
+    let mut volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(&block[0]));
     volume_flags.set(VolumeFlags::VolumeDirty, is_dirty);
-    block[106..108].copy_from_slice(&volume_flags.bits().to_le_bytes());
+    block[0][106..108].copy_from_slice(&volume_flags.bits().to_le_bytes());
     io.write(sector_id, &block).await.map_err(ExFatError::Io)?;
     Ok(())
 }
 
-pub(crate) fn decode_utf16<D: BlockDevice>(buf: Vec<u16>) -> Result<String, ExFatError<D>> {
+pub(crate) fn decode_utf16<D, const SIZE: usize>(
+    buf: Vec<u16>,
+) -> Result<String, ExFatError<D, SIZE>>
+where
+    D: BlockDevice<SIZE>,
+{
     let decoded = core::char::decode_utf16(buf)
         .map(|r| {
             // TODO reject illegal characters like quotes (see spec)
@@ -117,6 +127,6 @@ pub(crate) fn decode_utf16<D: BlockDevice>(buf: Vec<u16>) -> Result<String, ExFa
                 reason: "invalid u16 char detected",
             })
         })
-        .collect::<Result<String, ExFatError<D>>>()?;
+        .collect::<Result<String, ExFatError<D, SIZE>>>()?;
     Ok(decoded)
 }

@@ -1,27 +1,31 @@
 use core::marker::PhantomData;
 
 use super::{
-    bisync,
+    BlockDevice, bisync,
     error::ExFatError,
     file::{Touched, TouchedKind, TouchedSector},
-    io::{BLOCK_SIZE, BlockDevice},
     slot_cache::SlotCache,
 };
 
 const MIN_CLUSER_ID: u32 = 2;
 const CLUSTER_LEN: u32 = 0xFFFFFFF6;
 const ENTRY_SIZE: usize = size_of::<u32>();
-const NUM_ENTRIES: usize = BLOCK_SIZE / ENTRY_SIZE;
 
 #[derive(Debug)]
-pub struct Fat<D: BlockDevice, const N: usize> {
+pub struct Fat<D, const SIZE: usize, const N: usize>
+where
+    D: BlockDevice<SIZE>,
+{
     // a sector offset from the volume boot sector
     pub start_of_fat_sector: Option<u32>,
-    cache: SlotCache<D, N>,
+    cache: SlotCache<D, SIZE, N>,
     _phantom: PhantomData<D>,
 }
 
-impl<D: BlockDevice, const N: usize> Fat<D, N> {
+impl<D, const SIZE: usize, const N: usize> Fat<D, SIZE, N>
+where
+    D: BlockDevice<SIZE>,
+{
     pub fn new() -> Self {
         Self {
             start_of_fat_sector: None,
@@ -31,13 +35,17 @@ impl<D: BlockDevice, const N: usize> Fat<D, N> {
     }
 
     #[bisync]
-    pub async fn flush(&mut self, io: &mut D) -> Result<(), ExFatError<D>> {
+    pub async fn flush(&mut self, io: &mut D) -> Result<(), ExFatError<D, SIZE>> {
         self.cache.flush(io).await?;
         Ok(())
     }
 
     #[bisync]
-    pub async fn flush_sector(&mut self, io: &mut D, sector: u32) -> Result<(), ExFatError<D>> {
+    pub async fn flush_sector(
+        &mut self,
+        io: &mut D,
+        sector: u32,
+    ) -> Result<(), ExFatError<D, SIZE>> {
         self.cache.flush_sector(io, sector).await?;
         Ok(())
     }
@@ -51,22 +59,26 @@ impl<D: BlockDevice, const N: usize> Fat<D, N> {
         touched: &mut impl Touched,
         cluster_id: u32,
         cluster_id_to: u32,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>> {
         assert!(cluster_id >= MIN_CLUSER_ID);
         let sector_id = self.get_sector_id(cluster_id)?;
         touched.insert(TouchedSector::new(TouchedKind::Fat, sector_id));
         let slot = self.cache.read_mut(sector_id, io).await?;
 
         let (chunks, _remainder) = slot.as_mut_slice().as_chunks_mut::<ENTRY_SIZE>();
-        let sector_offset = (cluster_id % NUM_ENTRIES as u32) as usize;
+        let sector_offset = (cluster_id % Self::num_entries()) as usize;
         chunks[sector_offset].copy_from_slice(&cluster_id_to.to_le_bytes());
 
         Ok(())
     }
 
-    fn get_sector_id(&self, cluster_id: u32) -> Result<u32, ExFatError<D>> {
+    const fn num_entries() -> u32 {
+        (SIZE / ENTRY_SIZE) as u32
+    }
+
+    fn get_sector_id(&self, cluster_id: u32) -> Result<u32, ExFatError<D, SIZE>> {
         match self.start_of_fat_sector {
-            Some(fat_offset) => Ok(fat_offset + cluster_id / NUM_ENTRIES as u32),
+            Some(fat_offset) => Ok(fat_offset + cluster_id / Self::num_entries()),
             None => Err(ExFatError::Unexpected(
                 "attemt to access fat when not initialized",
             )),
@@ -79,10 +91,10 @@ impl<D: BlockDevice, const N: usize> Fat<D, N> {
         &mut self,
         cluster_id: u32,
         io: &mut D,
-    ) -> Result<Option<u32>, ExFatError<D>> {
+    ) -> Result<Option<u32>, ExFatError<D, SIZE>> {
         assert!(cluster_id >= MIN_CLUSER_ID);
         let sector_id = self.get_sector_id(cluster_id)?;
-        let sector_offset = (cluster_id % NUM_ENTRIES as u32) as usize;
+        let sector_offset = (cluster_id % Self::num_entries()) as usize;
 
         let slot = self.cache.read(sector_id, io).await?;
         let (chunks, _remainder) = slot.as_slice().as_chunks::<ENTRY_SIZE>();

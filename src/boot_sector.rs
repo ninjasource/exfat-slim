@@ -1,12 +1,10 @@
 use core::str::from_utf8;
 
+use aligned::{Aligned, Alignment};
 use bitflags::bitflags;
 use thiserror::Error;
 
-use super::{
-    io::{BLOCK_SIZE, Block},
-    utils::{read_u16_le, read_u32_le, read_u64_le},
-};
+use super::utils::{read_u16_le, read_u32_le, read_u64_le};
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Error, Debug, Clone, Copy)]
@@ -76,7 +74,7 @@ pub(crate) struct BootSector {
 }
 
 impl BootSector {
-    pub(crate) fn check_is_valid(value: &Block) -> Result<(), Error> {
+    pub(crate) fn check_is_valid(value: &[u8]) -> Result<(), Error> {
         // jump boot
         // check that this is not MBR or GPT which is usually the first sector of an SD card
         if value[0] != 0xeb && value[1] != 0x76 && value[2] != 0x90 {
@@ -102,11 +100,11 @@ impl BootSector {
     }
 }
 
-impl TryFrom<&[u8; BLOCK_SIZE]> for BootSector {
+impl<A: Alignment, const SIZE: usize> TryFrom<&Aligned<A, [u8; SIZE]>> for BootSector {
     type Error = Error;
 
-    fn try_from(value: &[u8; BLOCK_SIZE]) -> Result<Self, Self::Error> {
-        Self::check_is_valid(value)?;
+    fn try_from(value: &Aligned<A, [u8; SIZE]>) -> Result<Self, Self::Error> {
+        Self::check_is_valid(value.as_slice())?;
         let partition_offset = read_u64_le::<64, _>(value);
         let volume_length = read_u64_le::<72, _>(value);
         let fat_offset = read_u32_le::<80, _>(value);

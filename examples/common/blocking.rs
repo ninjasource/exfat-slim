@@ -1,9 +1,15 @@
+use crate::common::BLOCK_SIZE;
+
 use super::{EXAMPLE_EXFAT_IMAGE, print};
-use exfat_slim::blocking::io::{BLOCK_SIZE, Block, BlockDevice};
+use aligned::{A4, Aligned};
+use block_device_driver::{blocks_to_slice, blocks_to_slice_mut};
+use exfat_slim::blocking::BlockDevice;
 use flate2::read::GzDecoder;
-use std::fs;
-use std::io::Read;
-use std::sync::{Arc, Mutex};
+use std::{
+    fs,
+    io::Read,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Clone, Debug)]
 pub struct InMemoryBlockDevice {
@@ -17,22 +23,30 @@ impl InMemoryBlockDevice {
     }
 }
 
-impl BlockDevice for InMemoryBlockDevice {
+impl BlockDevice<BLOCK_SIZE> for InMemoryBlockDevice {
     type Error = String;
+    type Align = A4;
 
-    fn read(&mut self, sector_id: u32, block: &mut Block) -> Result<(), Self::Error> {
+    fn read(
+        &mut self,
+        sector_id: u32,
+        block: &mut [Aligned<Self::Align, [u8; BLOCK_SIZE]>],
+    ) -> Result<(), Self::Error> {
         let mut g = self.inner.lock().unwrap();
         g.read_sector(sector_id, block)
     }
 
-    fn write(&mut self, sector_id: u32, block: &Block) -> Result<(), Self::Error> {
+    fn write(
+        &mut self,
+        sector_id: u32,
+        block: &[Aligned<Self::Align, [u8; BLOCK_SIZE]>],
+    ) -> Result<(), Self::Error> {
         let mut g = self.inner.lock().unwrap();
         g.write_sector(sector_id, block)
     }
 
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        // nop
-        Ok(())
+    fn size(&mut self) -> Result<u64, Self::Error> {
+        todo!()
     }
 }
 
@@ -60,7 +74,11 @@ impl Inner {
         }
     }
 
-    pub fn read_sector(&mut self, sector_id: u32, block: &mut Block) -> Result<(), String> {
+    pub fn read_sector(
+        &mut self,
+        sector_id: u32,
+        block: &mut [Aligned<A4, [u8; BLOCK_SIZE]>],
+    ) -> Result<(), String> {
         let sector_id_with_offset = sector_id + self.sector_offset;
         match self.last_sector.as_ref() {
             Some(x) if *x == sector_id_with_offset => {
@@ -73,12 +91,18 @@ impl Inner {
         }
 
         let pos = sector_id_with_offset as usize * BLOCK_SIZE;
-        block.copy_from_slice(&self.image[pos..pos + BLOCK_SIZE]);
+
+        let slice = blocks_to_slice_mut(block);
+        slice.copy_from_slice(&self.image[pos..pos + BLOCK_SIZE]);
 
         Ok(())
     }
 
-    pub fn write_sector(&mut self, sector_id: u32, block: &Block) -> Result<(), String> {
+    pub fn write_sector(
+        &mut self,
+        sector_id: u32,
+        block: &[Aligned<A4, [u8; BLOCK_SIZE]>],
+    ) -> Result<(), String> {
         let sector_id_with_offset = sector_id + self.sector_offset;
         print("WRITE", sector_id_with_offset, sector_id, false);
         let start = sector_id_with_offset as usize * BLOCK_SIZE;
@@ -86,7 +110,8 @@ impl Inner {
 
         let max_len = self.image.len();
         if end <= max_len {
-            self.image[start..end].copy_from_slice(block);
+            let slice = blocks_to_slice(block);
+            self.image[start..end].copy_from_slice(slice);
             self.last_sector = None;
             Ok(())
         } else {

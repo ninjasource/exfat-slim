@@ -1,9 +1,9 @@
 use super::{EXAMPLE_EXFAT_IMAGE, print};
-use exfat_slim::asynchronous::io::{BLOCK_SIZE, Block, BlockDevice};
+use crate::BLOCK_SIZE;
+use aligned::{A4, Aligned};
+use block_device_driver::BlockDevice;
 use flate2::read::GzDecoder;
-use std::fs;
-use std::io::Read;
-use std::sync::Arc;
+use std::{fs, io::Read, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug)]
@@ -18,22 +18,30 @@ impl InMemoryBlockDevice {
     }
 }
 
-impl BlockDevice for InMemoryBlockDevice {
+impl BlockDevice<BLOCK_SIZE> for InMemoryBlockDevice {
     type Error = ();
+    type Align = A4;
 
-    async fn read(&mut self, sector_id: u32, block: &mut Block) -> Result<(), Self::Error> {
+    async fn read(
+        &mut self,
+        block_address: u32,
+        data: &mut [aligned::Aligned<Self::Align, [u8; BLOCK_SIZE]>],
+    ) -> Result<(), Self::Error> {
         let mut g = self.inner.lock().await;
-        g.read_sector(sector_id, block)
+        g.read_sector(block_address, &mut data[0])
     }
 
-    async fn write(&mut self, sector_id: u32, block: &Block) -> Result<(), Self::Error> {
+    async fn write(
+        &mut self,
+        block_address: u32,
+        data: &[aligned::Aligned<Self::Align, [u8; BLOCK_SIZE]>],
+    ) -> Result<(), Self::Error> {
         let mut g = self.inner.lock().await;
-        g.write_sector(sector_id, block)
+        g.write_sector(block_address, &data[0])
     }
 
-    async fn flush(&mut self) -> Result<(), Self::Error> {
-        // nop because we don't use a back buffer
-        Ok(())
+    async fn size(&mut self) -> Result<u64, Self::Error> {
+        todo!()
     }
 }
 
@@ -61,7 +69,11 @@ impl Inner {
         }
     }
 
-    fn read_sector(&mut self, sector_id: u32, block: &mut Block) -> Result<(), ()> {
+    fn read_sector(
+        &mut self,
+        sector_id: u32,
+        block: &mut Aligned<A4, [u8; BLOCK_SIZE]>,
+    ) -> Result<(), ()> {
         let sector_id_with_offset = sector_id + self.sector_offset;
         match self.last_sector.as_ref() {
             Some(x) if *x == sector_id_with_offset => {
@@ -78,11 +90,15 @@ impl Inner {
         Ok(())
     }
 
-    fn write_sector(&mut self, sector_id: u32, block: &Block) -> Result<(), ()> {
+    fn write_sector(
+        &mut self,
+        sector_id: u32,
+        block: &Aligned<A4, [u8; BLOCK_SIZE]>,
+    ) -> Result<(), ()> {
         let sector_id_with_offset = sector_id + self.sector_offset;
         print("WRITE", sector_id_with_offset, sector_id, false);
         let pos = sector_id_with_offset as usize * BLOCK_SIZE;
-        self.image[pos..pos + BLOCK_SIZE].copy_from_slice(block);
+        self.image[pos..pos + BLOCK_SIZE].copy_from_slice(block.as_slice());
         self.last_sector = None;
         Ok(())
     }

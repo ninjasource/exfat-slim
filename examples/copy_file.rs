@@ -1,15 +1,15 @@
 mod common;
-use crate::common::asynchronous::InMemoryBlockDevice;
+use crate::common::{BLOCK_SIZE, N, asynchronous::InMemoryBlockDevice};
 use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
 use log::info;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
+async fn main() -> Result<(), ExFatError<InMemoryBlockDevice, BLOCK_SIZE>> {
     env_logger::init();
     color_backtrace::install();
 
     let io = InMemoryBlockDevice::new();
-    let mut fs = FileSystem::new(io);
+    let mut fs: FileSystem<_, _, N> = FileSystem::new(io);
 
     // copy file
     fs.copy("/temp2/test6.txt", "/temp1/test6.txt").await?;

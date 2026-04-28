@@ -21,13 +21,12 @@ use embassy_sync::{
 };
 
 use crate::asynchronous::{
-    boot_sector,
+    BlockDevice, boot_sector,
     directory::{DirectoryEntry, DirectoryIterator},
     directory_entry::{self},
     error::ExFatError,
     file::{File, Metadata, OpenOptions},
     file_system::FileSystem,
-    io::BlockDevice,
 };
 
 static REQ: Channel<CriticalSectionRawMutex, Req, 8> = Channel::new();
@@ -119,12 +118,12 @@ pub enum Error {
     Unexpected(&'static str),
 }
 
-impl<D> From<ExFatError<D>> for Error
+impl<D, const SIZE: usize> From<ExFatError<D, SIZE>> for Error
 where
-    D: BlockDevice,
+    D: BlockDevice<SIZE>,
     D::Error: BlockDeviceError,
 {
-    fn from(value: ExFatError<D>) -> Self {
+    fn from(value: ExFatError<D, SIZE>) -> Self {
         match value {
             ExFatError::Io(e) => {
                 if e.no_card() {
@@ -786,14 +785,20 @@ pub trait BlockDeviceError {
     fn no_card(&self) -> bool;
 }
 
-struct FsManager<D: BlockDevice> {
+struct FsManager<D, const SIZE: usize, const N: usize>
+where
+    D: BlockDevice<SIZE>,
+{
     dev: Option<D>,
-    file_system: Option<FileSystem<D>>,
+    file_system: Option<FileSystem<D, SIZE, N>>,
     files: Handles<File>,
-    directories: Handles<DirectoryIterator>,
+    directories: Handles<DirectoryIterator<SIZE>>,
 }
 
-impl<D: BlockDevice> FsManager<D> {
+impl<D, const SIZE: usize, const N: usize> FsManager<D, SIZE, N>
+where
+    D: BlockDevice<SIZE>,
+{
     pub fn new(dev: D) -> Self {
         Self {
             dev: Some(dev),
@@ -807,11 +812,11 @@ impl<D: BlockDevice> FsManager<D> {
         &mut self,
     ) -> Result<
         (
-            &mut FileSystem<D>,
+            &mut FileSystem<D, SIZE, N>,
             &mut Handles<File>,
-            &mut Handles<DirectoryIterator>,
+            &mut Handles<DirectoryIterator<SIZE>>,
         ),
-        ExFatError<D>,
+        ExFatError<D, SIZE>,
     > {
         if let Some(dev) = self.dev.take() {
             let mut file_system = FileSystem::new(dev);
@@ -847,12 +852,12 @@ impl<D: BlockDevice> FsManager<D> {
     }
 }
 
-pub async fn fs_actor_task<D>(device: D)
+pub async fn fs_actor_task<D, const SIZE: usize, const N: usize>(device: D)
 where
-    D: BlockDevice,
+    D: BlockDevice<SIZE>,
     D::Error: BlockDeviceError,
 {
-    let mut fs_manager = FsManager::new(device);
+    let mut fs_manager: FsManager<D, SIZE, N> = FsManager::new(device);
     let rx = REQ.receiver();
 
     loop {
@@ -874,9 +879,12 @@ where
     }
 }
 
-async fn handle_req<D>(op: Op, fs_manager: &mut FsManager<D>) -> Result<Resp, Error>
+async fn handle_req<D, const SIZE: usize, const N: usize>(
+    op: Op,
+    fs_manager: &mut FsManager<D, SIZE, N>,
+) -> Result<Resp, Error>
 where
-    D: BlockDevice,
+    D: BlockDevice<SIZE>,
     D::Error: BlockDeviceError,
 {
     let (file_system, files, dirs) = fs_manager.mount().await?;

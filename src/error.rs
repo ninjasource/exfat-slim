@@ -1,9 +1,12 @@
-use super::{boot_sector, directory_entry, io::BlockDevice};
+use super::{BlockDevice, boot_sector, directory_entry};
 
 #[non_exhaustive]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(thiserror::Error, Debug)]
-pub enum ExFatError<D: BlockDevice> {
+pub enum ExFatError<D, const SIZE: usize>
+where
+    D: BlockDevice<SIZE>,
+{
     #[error("io")]
     Io(D::Error),
 

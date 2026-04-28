@@ -1,16 +1,16 @@
 mod common;
-use crate::common::asynchronous::InMemoryBlockDevice;
+use crate::common::{BLOCK_SIZE, N, asynchronous::InMemoryBlockDevice};
 use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
 use log::info;
 
 /// a rename can also be considered to be a move if it changes directories
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), ExFatError<InMemoryBlockDevice>> {
+async fn main() -> Result<(), ExFatError<InMemoryBlockDevice, BLOCK_SIZE>> {
     env_logger::init();
     color_backtrace::install();
 
     let io = InMemoryBlockDevice::new();
-    let mut fs = FileSystem::new(io);
+    let mut fs: FileSystem<_, _, N> = FileSystem::new(io);
 
     // rename file
     fs.rename("/temp2/test6.txt", "/temp2/test6x.txt").await?;

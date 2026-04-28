@@ -3,18 +3,17 @@ use bitflags::bitflags;
 use thiserror::Error;
 
 use super::{
-    bisync,
+    BlockDevice, bisync,
     directory::DirectoryEntryFilter,
     error::ExFatError,
     file::FileDetails,
     file_system::{FileSystem, FileSystemDetails},
-    io::{BLOCK_SIZE, BlockDevice},
     utils::decode_utf16,
     utils::{read_u16_le, read_u32_le, read_u64_le},
 };
 
 pub const RAW_ENTRY_LEN: usize = 32;
-pub const DIR_ENTRIES_PER_BLOCK: usize = BLOCK_SIZE / RAW_ENTRY_LEN;
+//pub const DIR_ENTRIES_PER_BLOCK: usize = BLOCK_SIZE / RAW_ENTRY_LEN;
 
 pub type RawDirEntry = [u8; RAW_ENTRY_LEN];
 
@@ -413,18 +412,18 @@ fn decode_utf16_le<const N: usize>(bytes: &[u8]) -> Result<heapless::String<N>, 
     Ok(decoded)
 }
 
-pub(crate) struct DirectoryEntryChain {
+pub(crate) struct DirectoryEntryChain<const SIZE: usize> {
     cluster_id: u32,
     fs: FileSystemDetails,
     // offset, in number of sectors, from start of cluster
     cluster_offset: usize,
     // offset, in number of RAW_ENTRY_LEN chunks, from start of sector
     dir_entry_offset: usize,
-    buf: [u8; BLOCK_SIZE],
+    buf: [u8; SIZE],
     fetch_required: bool,
 }
 
-impl DirectoryEntryChain {
+impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
     pub(crate) fn new_from_location(location: &Location, fs: &FileSystemDetails) -> Self {
         // This is so gross, make it better
         let sector_id_from_start = location.sector_id - fs.cluster_heap_offset;
@@ -433,7 +432,7 @@ impl DirectoryEntryChain {
         let dir_entry_offset = location.dir_entry_offset;
 
         Self {
-            buf: [0; BLOCK_SIZE],
+            buf: [0; SIZE],
             fs: fs.clone(),
             cluster_id,
             cluster_offset,
@@ -444,7 +443,7 @@ impl DirectoryEntryChain {
 
     pub(crate) fn new(cluster_id: u32, fs: &FileSystemDetails) -> Self {
         Self {
-            buf: [0; BLOCK_SIZE],
+            buf: [0; SIZE],
             fs: fs.clone(),
             cluster_id,
             cluster_offset: 0,
@@ -454,10 +453,13 @@ impl DirectoryEntryChain {
     }
 
     #[bisync]
-    pub(crate) async fn next_file_dir_entry<D: BlockDevice, const N: usize>(
+    pub(crate) async fn next_file_dir_entry<D, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<Option<(FileDirEntry, Location)>, ExFatError<D>> {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<Option<(FileDirEntry, Location)>, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         while let Some((entry, location)) = self.next(fs).await? {
             let entry_type_val = entry[0];
             match EntryType::from(entry_type_val) {
@@ -478,11 +480,14 @@ impl DirectoryEntryChain {
     }
 
     #[bisync]
-    pub(crate) async fn next_file_entry<D: BlockDevice, const N: usize>(
+    pub(crate) async fn next_file_entry<D, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
+        fs: &mut FileSystem<D, SIZE, N>,
         filter: &impl DirectoryEntryFilter,
-    ) -> Result<Option<FileDetails>, ExFatError<D>> {
+    ) -> Result<Option<FileDetails>, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         'outer: loop {
             if let Some((file_dir_entry, location)) = self.next_file_dir_entry(fs).await? {
                 if let Some((stream_entry, _location)) = self.next(fs).await? {
@@ -535,18 +540,28 @@ impl DirectoryEntryChain {
         }
     }
 
-    fn get_current_sector_id<D: BlockDevice>(&self) -> Result<u32, ExFatError<D>> {
-        let mut sector_id = self.fs.get_heap_sector_id::<D>(self.cluster_id)?;
+    fn get_current_sector_id<D>(&self) -> Result<u32, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
+        let mut sector_id = self.fs.get_heap_sector_id(self.cluster_id)?;
         sector_id += self.cluster_offset as u32;
         Ok(sector_id)
     }
 
+    const fn dir_entries_per_block() -> usize {
+        SIZE / RAW_ENTRY_LEN
+    }
+
     #[bisync]
-    pub(crate) async fn next<D: BlockDevice, const N: usize>(
+    pub(crate) async fn next<D, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<Option<(&[u8; RAW_ENTRY_LEN], Location)>, ExFatError<D>> {
-        if self.dir_entry_offset >= DIR_ENTRIES_PER_BLOCK {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<Option<(&[u8; RAW_ENTRY_LEN], Location)>, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
+        if self.dir_entry_offset >= Self::dir_entries_per_block() {
             self.cluster_offset += 1;
             self.dir_entry_offset = 0;
             self.fetch_required = true;

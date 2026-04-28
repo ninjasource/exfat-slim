@@ -1,12 +1,11 @@
 use alloc::{string::String, vec::Vec};
 
 use super::{
-    bisync,
+    BlockDevice, bisync,
     directory_entry::{DirectoryEntryChain, FileAttributes},
     error::ExFatError,
     file::{FileDetails, Metadata},
     file_system::FileSystem,
-    io::BlockDevice,
     upcase_table::UpcaseTable,
     utils::encode_utf16_upcase_and_hash,
 };
@@ -74,11 +73,14 @@ impl DirectoryEntryFilter for ExactNameFilter {
 }
 
 #[bisync]
-pub(crate) async fn get_leaf_file_entry<D: BlockDevice, const N: usize>(
-    fs: &mut FileSystem<D, N>,
+pub(crate) async fn get_leaf_file_entry<D, const SIZE: usize, const N: usize>(
+    fs: &mut FileSystem<D, SIZE, N>,
     path: &str,
     file_attributes: Option<FileAttributes>,
-) -> Result<Option<FileDetails>, ExFatError<D>> {
+) -> Result<Option<FileDetails>, ExFatError<D, SIZE>>
+where
+    D: BlockDevice<SIZE>,
+{
     let mut splits = path
         .split(['/', '\\'])
         .filter(|part| !part.is_empty())
@@ -131,10 +133,13 @@ fn is_root_directory(path: &str) -> bool {
 }
 
 #[bisync]
-pub(crate) async fn directory_list<D: BlockDevice, const N: usize>(
-    fs: &mut FileSystem<D, N>,
+pub(crate) async fn directory_list<D, const SIZE: usize, const N: usize>(
+    fs: &mut FileSystem<D, SIZE, N>,
     path: &str,
-) -> Result<DirectoryIterator, ExFatError<D>> {
+) -> Result<DirectoryIterator<SIZE>, ExFatError<D, SIZE>>
+where
+    D: BlockDevice<SIZE>,
+{
     let cluster_id = if is_root_directory(path) {
         fs.fs.first_cluster_of_root_dir
     } else {
@@ -154,8 +159,8 @@ pub(crate) async fn directory_list<D: BlockDevice, const N: usize>(
     Ok(DirectoryIterator { entries })
 }
 
-pub struct DirectoryIterator {
-    entries: DirectoryEntryChain,
+pub struct DirectoryIterator<const SIZE: usize> {
+    entries: DirectoryEntryChain<SIZE>,
 }
 
 #[derive(Debug)]
@@ -177,12 +182,15 @@ impl DirectoryEntry {
     }
 }
 
-impl DirectoryIterator {
+impl<const SIZE: usize> DirectoryIterator<SIZE> {
     #[bisync]
-    pub async fn next_entry<D: BlockDevice, const N: usize>(
+    pub async fn next_entry<D, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<Option<DirectoryEntry>, ExFatError<D>> {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<Option<DirectoryEntry>, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         let filter = AllPassFilter {};
         Ok(self
             .entries

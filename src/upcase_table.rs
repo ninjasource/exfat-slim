@@ -1,9 +1,8 @@
+use aligned::Aligned;
+
 use super::{
-    bisync,
-    directory_entry::UpcaseTableDirEntry,
-    error::ExFatError,
+    BlockDevice, bisync, directory_entry::UpcaseTableDirEntry, error::ExFatError,
     file_system::FileSystemDetails,
-    io::{BLOCK_SIZE, BlockDevice},
 };
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -34,18 +33,21 @@ impl UpcaseTable {
     }
 
     #[bisync]
-    pub(crate) async fn load<D: BlockDevice>(
+    pub(crate) async fn load<D, const SIZE: usize>(
         &mut self,
         dir_entry: &UpcaseTableDirEntry,
         fs: &FileSystemDetails,
         io: &mut D,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         let sector_id = fs.get_heap_sector_id(dir_entry.first_cluster)?;
-        let mut block = [0u8; BLOCK_SIZE];
+        let mut block = [Aligned([0u8; SIZE])];
         io.read(sector_id, &mut block)
             .await
             .map_err(ExFatError::Io)?;
-        let (chars, _remainder) = block.as_chunks::<2>();
+        let (chars, _remainder) = block[0].as_chunks::<2>();
         for (to, from) in self.mapping.iter_mut().zip(chars) {
             *to = u16::from_le_bytes(*from);
         }

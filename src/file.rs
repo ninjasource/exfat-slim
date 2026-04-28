@@ -1,7 +1,9 @@
+use aligned::Aligned;
 use alloc::{string::String, vec::Vec};
 use core::str::from_utf8;
 
 use super::{
+    BlockDevice,
     allocation::{AllocatedRun, StoredChain},
     bisync,
     directory_entry::{
@@ -10,7 +12,6 @@ use super::{
     },
     error::ExFatError,
     file_system::FileSystem,
-    io::{BLOCK_SIZE, BlockDevice},
     utils::split_path,
 };
 
@@ -132,10 +133,12 @@ pub(crate) trait Touched {
     fn insert(&mut self, touched: TouchedSector);
 
     #[bisync]
-    async fn flush<D: BlockDevice, const N: usize>(
+    async fn flush<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<(), ExFatError<D>>;
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>;
 }
 
 #[derive(Debug)]
@@ -197,10 +200,13 @@ impl<const NUM_SECTORS: usize> Touched for FileDirty<NUM_SECTORS> {
     }
 
     #[bisync]
-    async fn flush<D: BlockDevice, const N: usize>(
+    async fn flush<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<(), ExFatError<D>> {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         if self.overflowed {
             fs.fat.flush(&mut fs.dev).await?;
             fs.allocator.flush(&mut fs.dev).await?;
@@ -302,10 +308,13 @@ impl File {
     }
 
     #[bisync]
-    pub async fn flush<D: BlockDevice, const N: usize>(
+    pub async fn flush<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<(), ExFatError<D>> {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         // check if we need to update the file directory entry
         if self.touched.is_dir_entry_dirty {
             // read dir entries for this file from disk
@@ -346,10 +355,13 @@ impl File {
     }
 
     #[bisync]
-    pub async fn close<D: BlockDevice, const N: usize>(
+    pub async fn close<D, const SIZE: usize, const N: usize>(
         mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<(), ExFatError<D>> {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         self.flush(fs).await?;
         Ok(())
     }
@@ -358,11 +370,14 @@ impl File {
     ///
     /// Read begins at the cursor position and ends at the lesser of the buf or file length
     #[bisync]
-    pub async fn read<D: BlockDevice, const N: usize>(
+    pub async fn read<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
+        fs: &mut FileSystem<D, SIZE, N>,
         buf: &mut [u8],
-    ) -> Result<Option<usize>, ExFatError<D>> {
+    ) -> Result<Option<usize>, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         fs.mount().await?;
         if !self.open_options.read {
             return Err(ExFatError::ReadNotEnabled);
@@ -379,9 +394,9 @@ impl File {
         let cluster_id = self.current_cluster;
         let cluster_offset = self.get_cluster_offset(fs);
         let start_sector_id = fs.fs.get_heap_sector_id(cluster_id)?;
-        let sector_id = start_sector_id + cluster_offset / BLOCK_SIZE as u32;
-        let sector_offset = cluster_offset as usize % BLOCK_SIZE;
-        let remainder_in_sector = BLOCK_SIZE - sector_offset;
+        let sector_id = start_sector_id + cluster_offset / SIZE as u32;
+        let sector_offset = cluster_offset as usize % SIZE;
+        let remainder_in_sector = SIZE - sector_offset;
 
         // calculate max num bytes we can read
         let num_bytes = (remainder_in_sector as u64)
@@ -410,11 +425,14 @@ impl File {
     /// Exfat has the concept of valid_data_length which is less than or equal to data_length.
     /// If a zero length Vec is passed it will be extended to data_length size and the bytes between valid_data_length and data_length will contain zeros.
     #[bisync]
-    pub async fn read_to_end<D: BlockDevice, const N: usize>(
+    pub async fn read_to_end<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
+        fs: &mut FileSystem<D, SIZE, N>,
         buf: &mut Vec<u8>,
-    ) -> Result<usize, ExFatError<D>> {
+    ) -> Result<usize, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         fs.mount().await?;
         let len = self.details.valid_data_length as usize;
         let valid_len = self.details.valid_data_length as usize;
@@ -426,7 +444,7 @@ impl File {
         // reading in block size chunks from position 0 is the most efficient way to get data off the disk in one go
         // we can ignore the len returned from the read operation as a result
         // we are only interested in reading valid_data_length bytes as the rest are garbage and we return zeros instead (initialized above)
-        let (blocks, remainder) = buf[start..start + valid_len].as_chunks_mut::<BLOCK_SIZE>();
+        let (blocks, remainder) = buf[start..start + valid_len].as_chunks_mut::<SIZE>();
         for block in blocks {
             self.read(fs, block.as_mut_slice()).await?;
         }
@@ -437,10 +455,13 @@ impl File {
 
     /// Read all bytes from file and interprets them as a utf8 encoded string
     #[bisync]
-    pub async fn read_to_string<D: BlockDevice, const N: usize>(
+    pub async fn read_to_string<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<String, ExFatError<D>> {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<String, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         fs.mount().await?;
 
         // because multi byte characters may cross sector boundaries
@@ -476,11 +497,14 @@ impl File {
     }
 
     #[bisync]
-    async fn update_chain<D: BlockDevice, const N: usize>(
+    async fn update_chain<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
+        fs: &mut FileSystem<D, SIZE, N>,
         run: &AllocatedRun,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         if self.should_convert_to_fat_chain(run) {
             self.convert_file_to_fat_chain_if_required(fs).await?;
         }
@@ -544,11 +568,14 @@ impl File {
     }
 
     #[bisync]
-    async fn allocate_clusters_for<D: BlockDevice, const N: usize>(
+    async fn allocate_clusters_for<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
+        fs: &mut FileSystem<D, SIZE, N>,
         num_bytes: usize,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         let mut cluster_count = num_bytes.div_ceil(fs.fs.cluster_length as usize) as u32;
 
         loop {
@@ -566,10 +593,13 @@ impl File {
     }
 
     #[bisync]
-    async fn next_cluster_if_required<D: BlockDevice, const N: usize>(
+    async fn next_cluster_if_required<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<(), ExFatError<D>> {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         if self.remaining_bytes_in_cluster == 0 {
             self.current_cluster = self.next_cursor_id(fs).await?;
             self.remaining_bytes_in_cluster = fs.fs.cluster_length;
@@ -582,11 +612,14 @@ impl File {
     ///
     /// This function will automatically increase the length of the file if necessary
     #[bisync]
-    pub async fn write<D: BlockDevice, const N: usize>(
+    pub async fn write<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
+        fs: &mut FileSystem<D, SIZE, N>,
         buf: &[u8],
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         if buf.len() == 0 {
             return Ok(());
         }
@@ -617,13 +650,17 @@ impl File {
         // if there are still more bytes to write
         if len < buf.len() {
             let start_index = len;
-            let (blocks, remainder) = buf[start_index..].as_chunks::<BLOCK_SIZE>();
+            let mut aligned = Aligned([0u8; SIZE]);
+            let (blocks, remainder) = buf[start_index..].as_chunks::<SIZE>();
 
             // write full sectors
             for block in blocks {
+                aligned.copy_from_slice(block);
                 self.next_cluster_if_required(fs).await?;
                 let sector_id = self.get_current_sector_id(fs)?;
-                fs.data_blocks.write(&mut fs.dev, sector_id, block).await?;
+                fs.data_blocks
+                    .write(&mut fs.dev, sector_id, &aligned)
+                    .await?;
                 self.move_file_cursor(block.len()).await?;
             }
 
@@ -634,22 +671,27 @@ impl File {
         Ok(())
     }
 
-    fn set_current_cluster<D: BlockDevice, const N: usize>(
+    fn set_current_cluster<D, const SIZE: usize, const N: usize>(
         &mut self,
         cluster_id: u32,
-        fs: &FileSystem<D, N>,
-    ) {
+        fs: &FileSystem<D, SIZE, N>,
+    ) where
+        D: BlockDevice<SIZE>,
+    {
         self.current_cluster = cluster_id;
         self.remaining_bytes_in_cluster = fs.fs.cluster_length;
     }
 
     /// Seek to an offset, in bytes, in the file
     #[bisync]
-    pub async fn seek<D: BlockDevice, const N: usize>(
+    pub async fn seek<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
+        fs: &mut FileSystem<D, SIZE, N>,
         cursor: u64,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         fs.mount().await?;
         if cursor > self.details.valid_data_length {
             return Err(ExFatError::SeekOutOfRange);
@@ -692,11 +734,14 @@ impl File {
     /// If directories in the to_path do not exist they will be created
     /// File attributes will also be copied but timestamps will be new
     #[bisync]
-    pub(crate) async fn copy_to<D: BlockDevice, const N: usize>(
+    pub(crate) async fn copy_to<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
+        fs: &mut FileSystem<D, SIZE, N>,
         to_path: &str,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         let (dir_path, file_or_dir_name) = split_path(to_path);
         let num_clusters = self.num_clusters(fs);
 
@@ -732,11 +777,11 @@ impl File {
             .await?;
 
         let mut sector_id = fs.fs.get_heap_sector_id(run.first_cluster)?;
-        let mut buf = [0u8; BLOCK_SIZE];
+        let mut buf = Aligned([0u8; SIZE]);
 
-        while let Some(_len) = self.read(fs, &mut buf).await? {
+        while let Some(_len) = self.read(fs, buf.as_mut_slice()).await? {
             fs.dev
-                .write(sector_id, &buf)
+                .write(sector_id, &[buf])
                 .await
                 .map_err(ExFatError::Io)?;
             sector_id += 1;
@@ -753,17 +798,26 @@ impl File {
         self.touched.is_dir_entry_dirty = true;
     }
 
-    fn get_current_sector_id<D: BlockDevice, const N: usize>(
+    fn get_current_sector_id<D, const SIZE: usize, const N: usize>(
         &self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<u32, ExFatError<D>> {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<u32, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         let cluster_offset_bytes = self.cursor % fs.fs.cluster_length as u64;
         let start_sector_id = fs.fs.get_heap_sector_id(self.current_cluster)?;
-        let sector_id = start_sector_id + cluster_offset_bytes as u32 / BLOCK_SIZE as u32;
+        let sector_id = start_sector_id + cluster_offset_bytes as u32 / SIZE as u32;
         Ok(sector_id)
     }
 
-    fn num_clusters<D: BlockDevice, const N: usize>(&self, fs: &mut FileSystem<D, N>) -> u32 {
+    fn num_clusters<D, const SIZE: usize, const N: usize>(
+        &self,
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> u32
+    where
+        D: BlockDevice<SIZE>,
+    {
         self.details
             .data_length
             .div_ceil(fs.fs.cluster_length as u64) as u32
@@ -771,10 +825,13 @@ impl File {
 
     /// helps to convert a file that had no_fat_chain to one with a fat chain
     #[bisync]
-    async fn convert_file_to_fat_chain_if_required<D: BlockDevice, const N: usize>(
+    async fn convert_file_to_fat_chain_if_required<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<(), ExFatError<D>> {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         if self
             .details
             .flags
@@ -797,23 +854,26 @@ impl File {
     }
 
     #[bisync]
-    async fn write_partial_sector<D: BlockDevice, const N: usize>(
+    async fn write_partial_sector<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
+        fs: &mut FileSystem<D, SIZE, N>,
         buf: &[u8],
-    ) -> Result<usize, ExFatError<D>> {
+    ) -> Result<usize, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         if buf.is_empty() {
             return Ok(0);
         }
 
-        let start_index = (self.cursor % BLOCK_SIZE as u64) as usize;
-        let end_index = BLOCK_SIZE.min(start_index + buf.len());
+        let start_index = (self.cursor % SIZE as u64) as usize;
+        let end_index = SIZE.min(start_index + buf.len());
         let sector_id = self.get_current_sector_id(fs)?;
 
         // for the first block, if the write does not start on a block boundary
         // we need to read the existing sector and add in the bit we want to write
         // for max efficiency the user should write in block size chunks
-        if start_index > 0 || end_index < BLOCK_SIZE {
+        if start_index > 0 || end_index < SIZE {
             let slot = fs.data_blocks.read_mut(sector_id, &mut fs.dev).await?;
             let len = end_index - start_index;
             slot.as_mut_slice()[start_index..end_index].copy_from_slice(&buf[..len]);
@@ -827,10 +887,13 @@ impl File {
     }
 
     #[bisync]
-    async fn get_file_dir_entry_set<D: BlockDevice, const N: usize>(
+    async fn get_file_dir_entry_set<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError<D>> {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         let mut chain = DirectoryEntryChain::new_from_location(&self.details.location, &fs.fs);
 
         let mut counter = 0;
@@ -851,7 +914,13 @@ impl File {
         Ok(dir_entries)
     }
 
-    fn get_cluster_offset<D: BlockDevice, const N: usize>(&self, fs: &mut FileSystem<D, N>) -> u32 {
+    fn get_cluster_offset<D, const SIZE: usize, const N: usize>(
+        &self,
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> u32
+    where
+        D: BlockDevice<SIZE>,
+    {
         (self.cursor % fs.fs.cluster_length as u64) as u32
     }
 
@@ -861,20 +930,26 @@ impl File {
     }
 
     #[bisync]
-    async fn move_file_cursor<D: BlockDevice>(
+    async fn move_file_cursor<D, const SIZE: usize>(
         &mut self,
         num_bytes: usize,
-    ) -> Result<(), ExFatError<D>> {
+    ) -> Result<(), ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         self.cursor += num_bytes as u64;
         self.remaining_bytes_in_cluster -= num_bytes as u32;
         Ok(())
     }
 
     #[bisync]
-    async fn next_cursor_id<D: BlockDevice, const N: usize>(
+    async fn next_cursor_id<D, const SIZE: usize, const N: usize>(
         &mut self,
-        fs: &mut FileSystem<D, N>,
-    ) -> Result<u32, ExFatError<D>> {
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> Result<u32, ExFatError<D, SIZE>>
+    where
+        D: BlockDevice<SIZE>,
+    {
         match self.chain {
             StoredChain::Empty => Err(ExFatError::EndOfFatChain),
             StoredChain::Contiguous {
