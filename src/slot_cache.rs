@@ -4,7 +4,7 @@ use core::{array, fmt::Debug};
 use aligned::Aligned;
 use block_device_driver::{blocks_to_slice, blocks_to_slice_mut};
 
-use super::{BlockDevice, bisync, error::ExFatError};
+use super::{BlockDevice, bisync, error::ExFatError, file_system::ExFatResult};
 
 #[derive(Debug)]
 pub(crate) struct Slot<D, const SIZE: usize>
@@ -46,7 +46,7 @@ where
     }
 
     #[bisync]
-    pub async fn flush(&mut self, io: &mut D) -> Result<(), ExFatError<D, SIZE>>
+    pub async fn flush(&mut self, io: &mut D) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -97,7 +97,7 @@ where
     }
 
     #[bisync]
-    pub async fn flush(&mut self, io: &mut D) -> Result<(), ExFatError<D, SIZE>> {
+    pub async fn flush(&mut self, io: &mut D) -> ExFatResult<(), D, SIZE> {
         for slot in &mut self.cache {
             slot.flush(io).await?;
         }
@@ -106,11 +106,7 @@ where
     }
 
     #[bisync]
-    pub async fn flush_sector(
-        &mut self,
-        io: &mut D,
-        sector: u32,
-    ) -> Result<(), ExFatError<D, SIZE>> {
+    pub async fn flush_sector(&mut self, io: &mut D, sector: u32) -> ExFatResult<(), D, SIZE> {
         for slot in &mut self.cache {
             if slot.sector_id == sector {
                 slot.flush(io).await?;
@@ -126,7 +122,7 @@ where
         &mut self,
         sector_id: u32,
         io: &mut D,
-    ) -> Result<&mut Slot<D, SIZE>, ExFatError<D, SIZE>> {
+    ) -> ExFatResult<&mut Slot<D, SIZE>, D, SIZE> {
         self.read_inner(sector_id, io).await
     }
 
@@ -135,7 +131,7 @@ where
         &mut self,
         sector_id: u32,
         io: &mut D,
-    ) -> Result<&Slot<D, SIZE>, ExFatError<D, SIZE>> {
+    ) -> ExFatResult<&Slot<D, SIZE>, D, SIZE> {
         let slot = self.read_inner(sector_id, io).await?;
         Ok(slot)
     }
@@ -145,7 +141,7 @@ where
         &mut self,
         sector_id: u32,
         io: &mut D,
-    ) -> Result<&mut Slot<D, SIZE>, ExFatError<D, SIZE>> {
+    ) -> ExFatResult<&mut Slot<D, SIZE>, D, SIZE> {
         if let Some(index) = self.cache_hit(sector_id) {
             return Ok(&mut self.cache[index]);
         }
@@ -168,7 +164,7 @@ where
         io: &mut D,
         sector_id: u32,
         block: &Aligned<D::Align, [u8; SIZE]>,
-    ) -> Result<(), ExFatError<D, SIZE>> {
+    ) -> ExFatResult<(), D, SIZE> {
         if let Some(index) = self.cache_hit(sector_id) {
             // we are not interested in the bytes of this slot
             // and we don't want something to overwrite it later
@@ -202,7 +198,7 @@ where
     }
 
     #[bisync]
-    async fn choose_victim(&mut self, io: &mut D) -> Result<usize, ExFatError<D, SIZE>> {
+    async fn choose_victim(&mut self, io: &mut D) -> ExFatResult<usize, D, SIZE> {
         loop {
             let i = self.hand;
             self.hand += 1;
@@ -232,7 +228,7 @@ where
     }
 
     #[bisync]
-    async fn write_back(io: &mut D, slot: &mut Slot<D, SIZE>) -> Result<(), ExFatError<D, SIZE>> {
+    async fn write_back(io: &mut D, slot: &mut Slot<D, SIZE>) -> ExFatResult<(), D, SIZE> {
         io.write(slot.sector_id, &slot.blocks)
             .await
             .map_err(ExFatError::Io)?;

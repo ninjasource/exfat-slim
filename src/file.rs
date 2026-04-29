@@ -11,7 +11,7 @@ use super::{
         StreamExtensionDirEntry, update_checksum,
     },
     error::ExFatError,
-    file_system::FileSystem,
+    file_system::{ExFatResult, FileSystem},
     utils::split_path,
 };
 
@@ -136,7 +136,7 @@ pub(crate) trait Touched {
     async fn flush<D, const SIZE: usize, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>;
 }
@@ -203,7 +203,7 @@ impl<const NUM_SECTORS: usize> Touched for FileDirty<NUM_SECTORS> {
     async fn flush<D, const SIZE: usize, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -311,7 +311,7 @@ impl File {
     pub async fn flush<D, const SIZE: usize, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -358,7 +358,7 @@ impl File {
     pub async fn close<D, const SIZE: usize, const N: usize>(
         mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -374,7 +374,7 @@ impl File {
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
         buf: &mut [u8],
-    ) -> Result<Option<usize>, ExFatError<D, SIZE>>
+    ) -> ExFatResult<Option<usize>, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -393,7 +393,7 @@ impl File {
         self.next_cluster_if_required(fs).await?;
         let cluster_id = self.current_cluster;
         let cluster_offset = self.get_cluster_offset(fs);
-        let start_sector_id = fs.fs.get_heap_sector_id(cluster_id)?;
+        let start_sector_id = fs.fs.get_heap_sector_id::<D, SIZE>(cluster_id)?;
         let sector_id = start_sector_id + cluster_offset / SIZE as u32;
         let sector_offset = cluster_offset as usize % SIZE;
         let remainder_in_sector = SIZE - sector_offset;
@@ -409,7 +409,7 @@ impl File {
             .copy_from_slice(&slot.as_slice()[sector_offset..sector_offset + num_bytes]);
 
         // update file read cursor position
-        self.move_file_cursor(num_bytes).await?;
+        self.move_file_cursor::<D, SIZE>(num_bytes).await?;
 
         Ok(Some(num_bytes))
     }
@@ -429,7 +429,7 @@ impl File {
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
         buf: &mut Vec<u8>,
-    ) -> Result<usize, ExFatError<D, SIZE>>
+    ) -> ExFatResult<usize, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -458,7 +458,7 @@ impl File {
     pub async fn read_to_string<D, const SIZE: usize, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<String, ExFatError<D, SIZE>>
+    ) -> ExFatResult<String, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -501,7 +501,7 @@ impl File {
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
         run: &AllocatedRun,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -572,7 +572,7 @@ impl File {
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
         num_bytes: usize,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -596,7 +596,7 @@ impl File {
     async fn next_cluster_if_required<D, const SIZE: usize, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -616,7 +616,7 @@ impl File {
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
         buf: &[u8],
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -661,7 +661,7 @@ impl File {
                 fs.data_blocks
                     .write(&mut fs.dev, sector_id, &aligned)
                     .await?;
-                self.move_file_cursor(block.len()).await?;
+                self.move_file_cursor::<D, SIZE>(block.len()).await?;
             }
 
             // write the last sector (could be partially full)
@@ -688,7 +688,7 @@ impl File {
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
         cursor: u64,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -738,7 +738,7 @@ impl File {
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
         to_path: &str,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -776,7 +776,7 @@ impl File {
             .mark_allocated(&mut fs.dev, &mut self.touched, &run, true)
             .await?;
 
-        let mut sector_id = fs.fs.get_heap_sector_id(run.first_cluster)?;
+        let mut sector_id = fs.fs.get_heap_sector_id::<D, SIZE>(run.first_cluster)?;
         let mut buf = Aligned([0u8; SIZE]);
 
         while let Some(_len) = self.read(fs, buf.as_mut_slice()).await? {
@@ -801,12 +801,12 @@ impl File {
     fn get_current_sector_id<D, const SIZE: usize, const N: usize>(
         &self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<u32, ExFatError<D, SIZE>>
+    ) -> ExFatResult<u32, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
         let cluster_offset_bytes = self.cursor % fs.fs.cluster_length as u64;
-        let start_sector_id = fs.fs.get_heap_sector_id(self.current_cluster)?;
+        let start_sector_id = fs.fs.get_heap_sector_id::<D, SIZE>(self.current_cluster)?;
         let sector_id = start_sector_id + cluster_offset_bytes as u32 / SIZE as u32;
         Ok(sector_id)
     }
@@ -828,7 +828,7 @@ impl File {
     async fn convert_file_to_fat_chain_if_required<D, const SIZE: usize, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -858,7 +858,7 @@ impl File {
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
         buf: &[u8],
-    ) -> Result<usize, ExFatError<D, SIZE>>
+    ) -> ExFatResult<usize, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -879,7 +879,7 @@ impl File {
             slot.as_mut_slice()[start_index..end_index].copy_from_slice(&buf[..len]);
             self.touched
                 .insert(TouchedSector::new(TouchedKind::Data, sector_id));
-            self.move_file_cursor(len).await?;
+            self.move_file_cursor::<D, SIZE>(len).await?;
             return Ok(len);
         }
 
@@ -890,7 +890,7 @@ impl File {
     async fn get_file_dir_entry_set<D, const SIZE: usize, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<Vec<[u8; RAW_ENTRY_LEN]>, ExFatError<D, SIZE>>
+    ) -> ExFatResult<Vec<[u8; RAW_ENTRY_LEN]>, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -933,7 +933,7 @@ impl File {
     async fn move_file_cursor<D, const SIZE: usize>(
         &mut self,
         num_bytes: usize,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -946,7 +946,7 @@ impl File {
     async fn next_cursor_id<D, const SIZE: usize, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<u32, ExFatError<D, SIZE>>
+    ) -> ExFatResult<u32, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {

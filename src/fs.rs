@@ -26,7 +26,7 @@ use crate::asynchronous::{
     directory_entry::{self},
     error::ExFatError,
     file::{File, Metadata, OpenOptions},
-    file_system::FileSystem,
+    file_system::{ExFatResult, FileSystem},
 };
 
 static REQ: Channel<CriticalSectionRawMutex, Req, 8> = Channel::new();
@@ -118,12 +118,11 @@ pub enum Error {
     Unexpected(&'static str),
 }
 
-impl<D, const SIZE: usize> From<ExFatError<D, SIZE>> for Error
+impl<E> From<ExFatError<E>> for Error
 where
-    D: BlockDevice<SIZE>,
-    D::Error: BlockDeviceError,
+    E: BlockDeviceError,
 {
-    fn from(value: ExFatError<D, SIZE>) -> Self {
+    fn from(value: ExFatError<E>) -> Self {
         match value {
             ExFatError::Io(e) => {
                 if e.no_card() {
@@ -810,13 +809,14 @@ where
 
     pub async fn mount(
         &mut self,
-    ) -> Result<
+    ) -> ExFatResult<
         (
             &mut FileSystem<D, SIZE, N>,
             &mut Handles<File>,
             &mut Handles<DirectoryIterator<SIZE>>,
         ),
-        ExFatError<D, SIZE>,
+        D,
+        SIZE,
     > {
         if let Some(dev) = self.dev.take() {
             let mut file_system = FileSystem::new(dev);

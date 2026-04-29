@@ -1,14 +1,11 @@
-use super::{BlockDevice, boot_sector, directory_entry};
+use super::{boot_sector, directory_entry};
 
 #[non_exhaustive]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(thiserror::Error, Debug)]
-pub enum ExFatError<D, const SIZE: usize>
-where
-    D: BlockDevice<SIZE>,
-{
+pub enum ExFatError<E> {
     #[error("io")]
-    Io(D::Error),
+    Io(E),
 
     #[error("directory entry ({0:?})")]
     DirectoryEntry(#[from] directory_entry::Error),

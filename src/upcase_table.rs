@@ -1,8 +1,10 @@
 use aligned::Aligned;
 
 use super::{
-    BlockDevice, bisync, directory_entry::UpcaseTableDirEntry, error::ExFatError,
-    file_system::FileSystemDetails,
+    BlockDevice, bisync,
+    directory_entry::UpcaseTableDirEntry,
+    error::ExFatError,
+    file_system::{ExFatResult, FileSystemDetails},
 };
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -38,11 +40,11 @@ impl UpcaseTable {
         dir_entry: &UpcaseTableDirEntry,
         fs: &FileSystemDetails,
         io: &mut D,
-    ) -> Result<(), ExFatError<D, SIZE>>
+    ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
-        let sector_id = fs.get_heap_sector_id(dir_entry.first_cluster)?;
+        let sector_id = fs.get_heap_sector_id::<D, SIZE>(dir_entry.first_cluster)?;
         let mut block = [Aligned([0u8; SIZE])];
         io.read(sector_id, &mut block)
             .await

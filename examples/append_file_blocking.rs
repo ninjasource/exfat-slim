@@ -1,11 +1,14 @@
 mod common;
 
 use crate::common::{BLOCK_SIZE, N, blocking::InMemoryBlockDevice};
-use exfat_slim::blocking::{error::ExFatError, file::OpenOptions, file_system::FileSystem};
+use exfat_slim::blocking::{
+    file::OpenOptions,
+    file_system::{ExFatResult, FileSystem},
+};
 use log::info;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
-fn main() -> Result<(), ExFatError<InMemoryBlockDevice, BLOCK_SIZE>> {
+fn main() -> ExFatResult<(), InMemoryBlockDevice, BLOCK_SIZE> {
     env_logger::init();
     color_backtrace::install();
 

@@ -5,11 +5,9 @@ use thiserror::Error;
 use super::{
     BlockDevice, bisync,
     directory::DirectoryEntryFilter,
-    error::ExFatError,
     file::FileDetails,
-    file_system::{FileSystem, FileSystemDetails},
-    utils::decode_utf16,
-    utils::{read_u16_le, read_u32_le, read_u64_le},
+    file_system::{ExFatResult, FileSystem, FileSystemDetails},
+    utils::{decode_utf16, read_u16_le, read_u32_le, read_u64_le},
 };
 
 pub const RAW_ENTRY_LEN: usize = 32;
@@ -456,7 +454,7 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
     pub(crate) async fn next_file_dir_entry<D, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<Option<(FileDirEntry, Location)>, ExFatError<D, SIZE>>
+    ) -> ExFatResult<Option<(FileDirEntry, Location)>, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -484,7 +482,7 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
         filter: &impl DirectoryEntryFilter,
-    ) -> Result<Option<FileDetails>, ExFatError<D, SIZE>>
+    ) -> ExFatResult<Option<FileDetails>, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -519,7 +517,7 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
                         continue 'outer;
                     }
 
-                    let name = decode_utf16(file_name)?;
+                    let name = decode_utf16::<D, SIZE>(file_name)?;
                     let file_details = FileDetails {
                         attributes: file_dir_entry.file_attributes,
                         data_length: stream_entry.data_length,
@@ -540,11 +538,11 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
         }
     }
 
-    fn get_current_sector_id<D>(&self) -> Result<u32, ExFatError<D, SIZE>>
+    fn get_current_sector_id<D>(&self) -> ExFatResult<u32, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
-        let mut sector_id = self.fs.get_heap_sector_id(self.cluster_id)?;
+        let mut sector_id = self.fs.get_heap_sector_id::<D, SIZE>(self.cluster_id)?;
         sector_id += self.cluster_offset as u32;
         Ok(sector_id)
     }
@@ -557,7 +555,7 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
     pub(crate) async fn next<D, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<Option<(&[u8; RAW_ENTRY_LEN], Location)>, ExFatError<D, SIZE>>
+    ) -> ExFatResult<Option<(&[u8; RAW_ENTRY_LEN], Location)>, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -585,7 +583,7 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
         }
 
         if self.fetch_required {
-            let sector_id = self.get_current_sector_id()?;
+            let sector_id = self.get_current_sector_id::<D>()?;
             let slot = fs.data_blocks.read(sector_id, &mut fs.dev).await?;
             self.buf.copy_from_slice(slot.as_slice());
             self.fetch_required = false;
@@ -593,7 +591,7 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
 
         let (entries, _remainder) = self.buf.as_chunks::<RAW_ENTRY_LEN>();
         let entry = &entries[self.dir_entry_offset];
-        let location = Location::new(self.get_current_sector_id()?, self.dir_entry_offset);
+        let location = Location::new(self.get_current_sector_id::<D>()?, self.dir_entry_offset);
         self.dir_entry_offset += 1;
         Ok(Some((entry, location)))
     }

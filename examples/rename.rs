@@ -1,11 +1,11 @@
 mod common;
 use crate::common::{BLOCK_SIZE, N, asynchronous::InMemoryBlockDevice};
-use exfat_slim::asynchronous::{error::ExFatError, file_system::FileSystem};
+use exfat_slim::asynchronous::{ file_system::{ExFatResult, FileSystem},};
 use log::info;
 
 /// a rename can also be considered to be a move if it changes directories
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), ExFatError<InMemoryBlockDevice, BLOCK_SIZE>> {
+async fn main() -> ExFatResult<(), InMemoryBlockDevice, BLOCK_SIZE> {
     env_logger::init();
     color_backtrace::install();
 

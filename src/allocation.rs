@@ -21,6 +21,7 @@ use super::{
     error::ExFatError,
     fat::Fat,
     file::{NO_CLUSTER_ID, Touched, TouchedKind, TouchedSector},
+    file_system::ExFatResult,
     slot_cache::SlotCache,
 };
 
@@ -97,17 +98,13 @@ where
     }
 
     #[bisync]
-    pub async fn flush_sector(
-        &mut self,
-        io: &mut D,
-        sector: u32,
-    ) -> Result<(), ExFatError<D, SIZE>> {
+    pub async fn flush_sector(&mut self, io: &mut D, sector: u32) -> ExFatResult<(), D, SIZE> {
         self.cache.flush_sector(io, sector).await?;
         Ok(())
     }
 
     #[bisync]
-    pub async fn flush(&mut self, io: &mut D) -> Result<(), ExFatError<D, SIZE>> {
+    pub async fn flush(&mut self, io: &mut D) -> ExFatResult<(), D, SIZE> {
         self.cache.flush(io).await?;
         Ok(())
     }
@@ -119,7 +116,7 @@ where
         touched: &mut impl Touched,
         chain: &StoredChain,
         count: u32,
-    ) -> Result<AllocatedRun, ExFatError<D, SIZE>> {
+    ) -> ExFatResult<AllocatedRun, D, SIZE> {
         match chain {
             StoredChain::Empty => {
                 let run = self.find_free_clusters(io, count).await?;
@@ -159,7 +156,7 @@ where
         touched: &mut impl Touched,
         fat: &mut Fat<D, SIZE, N>,
         chain: &StoredChain,
-    ) -> Result<(), ExFatError<D, SIZE>> {
+    ) -> ExFatResult<(), D, SIZE> {
         match chain {
             StoredChain::Empty => {
                 // nothing to do
@@ -225,7 +222,7 @@ where
         touched: &mut impl Touched,
         run: &AllocatedRun,
         allocated: bool,
-    ) -> Result<(), ExFatError<D, SIZE>> {
+    ) -> ExFatResult<(), D, SIZE> {
         let first_sector = self.bitmap.first_sector;
         let num_sectors = self.bitmap.num_sectors;
 
@@ -262,7 +259,7 @@ where
         io: &mut D,
         from_cluster: u32,
         num_clusters: u32,
-    ) -> Result<AllocatedRun, ExFatError<D, SIZE>> {
+    ) -> ExFatResult<AllocatedRun, D, SIZE> {
         let first_sector = self.bitmap.first_sector;
         let num_sectors = self.bitmap.num_sectors;
 
@@ -327,7 +324,7 @@ where
         &mut self,
         io: &mut D,
         num_clusters: u32,
-    ) -> Result<AllocatedRun, ExFatError<D, SIZE>> {
+    ) -> ExFatResult<AllocatedRun, D, SIZE> {
         let mut cluster_id = self.next_search_cluster;
         let sector_id = self.bitmap.first_sector;
         let num_sectors = self.bitmap.num_sectors;

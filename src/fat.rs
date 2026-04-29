@@ -4,6 +4,7 @@ use super::{
     BlockDevice, bisync,
     error::ExFatError,
     file::{Touched, TouchedKind, TouchedSector},
+    file_system::ExFatResult,
     slot_cache::SlotCache,
 };
 
@@ -35,17 +36,13 @@ where
     }
 
     #[bisync]
-    pub async fn flush(&mut self, io: &mut D) -> Result<(), ExFatError<D, SIZE>> {
+    pub async fn flush(&mut self, io: &mut D) -> ExFatResult<(), D, SIZE> {
         self.cache.flush(io).await?;
         Ok(())
     }
 
     #[bisync]
-    pub async fn flush_sector(
-        &mut self,
-        io: &mut D,
-        sector: u32,
-    ) -> Result<(), ExFatError<D, SIZE>> {
+    pub async fn flush_sector(&mut self, io: &mut D, sector: u32) -> ExFatResult<(), D, SIZE> {
         self.cache.flush_sector(io, sector).await?;
         Ok(())
     }
@@ -59,7 +56,7 @@ where
         touched: &mut impl Touched,
         cluster_id: u32,
         cluster_id_to: u32,
-    ) -> Result<(), ExFatError<D, SIZE>> {
+    ) -> ExFatResult<(), D, SIZE> {
         assert!(cluster_id >= MIN_CLUSER_ID);
         let sector_id = self.get_sector_id(cluster_id)?;
         touched.insert(TouchedSector::new(TouchedKind::Fat, sector_id));
@@ -76,7 +73,7 @@ where
         (SIZE / ENTRY_SIZE) as u32
     }
 
-    fn get_sector_id(&self, cluster_id: u32) -> Result<u32, ExFatError<D, SIZE>> {
+    fn get_sector_id(&self, cluster_id: u32) -> ExFatResult<u32, D, SIZE> {
         match self.start_of_fat_sector {
             Some(fat_offset) => Ok(fat_offset + cluster_id / Self::num_entries()),
             None => Err(ExFatError::Unexpected(
@@ -91,7 +88,7 @@ where
         &mut self,
         cluster_id: u32,
         io: &mut D,
-    ) -> Result<Option<u32>, ExFatError<D, SIZE>> {
+    ) -> ExFatResult<Option<u32>, D, SIZE> {
         assert!(cluster_id >= MIN_CLUSER_ID);
         let sector_id = self.get_sector_id(cluster_id)?;
         let sector_offset = (cluster_id % Self::num_entries()) as usize;

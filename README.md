@@ -97,7 +97,6 @@ Note that power loss during a large write operation could result in pre-allocate
 As per the license, this codebase comes with no guarantees and I don't accept any responsibility for data corruption or loss regardless of the guidelines that follow. 
 Read functions do not mutate the file system so are considered safer than write functions if you are concerned about data corruption or loss. 
 The library should not panic and if it does as a result of a badly formed file system then this is a bug, please report it. 
-The only exception to this is `unimplemented!` or `todo!` code sections that are temporary. 
 I have attempted to replicate how the Rust standard library exposes a file system so that the API feels familiar. 
 As a result I have chosen to require an allocator. 
 If you create a file in a nested directory the library will attempt to create all the required directories if they do not exist.

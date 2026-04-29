@@ -5,7 +5,7 @@ use super::{
     directory_entry::{DirectoryEntryChain, FileAttributes},
     error::ExFatError,
     file::{FileDetails, Metadata},
-    file_system::FileSystem,
+    file_system::{ExFatResult, FileSystem},
     upcase_table::UpcaseTable,
     utils::encode_utf16_upcase_and_hash,
 };
@@ -77,7 +77,7 @@ pub(crate) async fn get_leaf_file_entry<D, const SIZE: usize, const N: usize>(
     fs: &mut FileSystem<D, SIZE, N>,
     path: &str,
     file_attributes: Option<FileAttributes>,
-) -> Result<Option<FileDetails>, ExFatError<D, SIZE>>
+) -> ExFatResult<Option<FileDetails>, D, SIZE>
 where
     D: BlockDevice<SIZE>,
 {
@@ -136,7 +136,7 @@ fn is_root_directory(path: &str) -> bool {
 pub(crate) async fn directory_list<D, const SIZE: usize, const N: usize>(
     fs: &mut FileSystem<D, SIZE, N>,
     path: &str,
-) -> Result<DirectoryIterator<SIZE>, ExFatError<D, SIZE>>
+) -> ExFatResult<DirectoryIterator<SIZE>, D, SIZE>
 where
     D: BlockDevice<SIZE>,
 {
@@ -187,7 +187,7 @@ impl<const SIZE: usize> DirectoryIterator<SIZE> {
     pub async fn next_entry<D, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> Result<Option<DirectoryEntry>, ExFatError<D, SIZE>>
+    ) -> ExFatResult<Option<DirectoryEntry>, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {

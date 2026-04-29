@@ -2,7 +2,8 @@ use aligned::Aligned;
 use alloc::{string::String, vec, vec::Vec};
 
 use super::{
-    BlockDevice, bisync, boot_sector::VolumeFlags, error::ExFatError, upcase_table::UpcaseTable,
+    BlockDevice, bisync, boot_sector::VolumeFlags, error::ExFatError, file_system::ExFatResult,
+    upcase_table::UpcaseTable,
 };
 
 pub(crate) fn _chunk_at<const N: usize, T>(slice: &[T], index: usize) -> Option<&[T; N]> {
@@ -71,9 +72,7 @@ pub(crate) fn calc_hash_u16(utf16_file_name: &[u16]) -> u16 {
     hash
 }
 
-pub(crate) fn _decode_utf16<D, const SIZE: usize>(
-    buf: Vec<u16>,
-) -> Result<String, ExFatError<D, SIZE>>
+pub(crate) fn _decode_utf16<D, const SIZE: usize>(buf: Vec<u16>) -> ExFatResult<String, D, SIZE>
 where
     D: BlockDevice<SIZE>,
 {
@@ -84,7 +83,7 @@ where
                 reason: "invalid u16 char detected",
             })
         })
-        .collect::<Result<String, ExFatError<D, SIZE>>>()?;
+        .collect::<ExFatResult<String, D, SIZE>>()?;
     Ok(decoded)
 }
 
@@ -98,7 +97,7 @@ pub(crate) fn split_path(path: &str) -> (&str, &str) {
 pub async fn set_volume_dirty<D, const SIZE: usize>(
     io: &mut D,
     is_dirty: bool,
-) -> Result<(), ExFatError<D, SIZE>>
+) -> ExFatResult<(), D, SIZE>
 where
     D: BlockDevice<SIZE>,
 {
@@ -114,9 +113,7 @@ where
     Ok(())
 }
 
-pub(crate) fn decode_utf16<D, const SIZE: usize>(
-    buf: Vec<u16>,
-) -> Result<String, ExFatError<D, SIZE>>
+pub(crate) fn decode_utf16<D, const SIZE: usize>(buf: Vec<u16>) -> ExFatResult<String, D, SIZE>
 where
     D: BlockDevice<SIZE>,
 {
@@ -127,6 +124,6 @@ where
                 reason: "invalid u16 char detected",
             })
         })
-        .collect::<Result<String, ExFatError<D, SIZE>>>()?;
+        .collect::<ExFatResult<String, D, SIZE>>()?;
     Ok(decoded)
 }
