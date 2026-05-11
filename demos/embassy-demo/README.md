@@ -37,3 +37,9 @@ There is no need to manually mount and unmount the file system.
 ```bash
 defmt-print -e ./target/thumbv8m.main-none-eabihf/release/embassy-demo.elf < log.bin
 ```
+
+## Run the tests
+
+```bash
+cargo test --lib --target host-tuple
+```

@@ -7,12 +7,21 @@
 
 extern crate alloc;
 
+pub mod backup_ram;
+pub mod logger_fs;
+pub mod memory;
+pub mod rcc_setup;
+pub mod sdmmc_fs;
+pub mod time;
+
+#[global_allocator]
+pub static ALLOCATOR: embedded_alloc::Heap = embedded_alloc::Heap::empty();
+
 use chrono::Timelike;
 use defmt::{error, info, unwrap};
-use defmt_persist::{self as _, Consumer, ConsumerAndMetadata};
-use embassy_demo::{ALLOCATOR, backup_ram::BACKUP, rcc_setup, sdmmc_fs, time::rtc_unix_ms_now};
+use defmt_persist::{self as _, ConsumerAndMetadata};
+use embassy_demo::error::Error;
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either, select};
 use embassy_stm32::{
     bind_interrupts,
     gpio::{Input, Pull},
@@ -20,11 +29,12 @@ use embassy_stm32::{
     rtc::{DateTime, DayOfWeek, Rtc, RtcConfig},
     sdmmc::{self, Sdmmc},
 };
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_time::{Duration, Timer};
-use exfat_slim::asynchronous::{
-    file::OpenOptions,
-    fs::{self, FileHandle},
+use exfat_slim::asynchronous::file::OpenOptions;
+
+use crate::{
+    logger_fs::{flush_logs, logger_loop},
+    time::rtc_unix_ms_now,
 };
 
 bind_interrupts!(struct Irqs {
@@ -40,17 +50,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     cortex_m::peripheral::SCB::sys_reset(); // Or hardfault if it should go via fault handlers.
 }
 
-#[derive(Debug, defmt::Format)]
-enum Error {
-    Fs(fs::Error),
-}
-
-impl From<fs::Error> for Error {
-    fn from(value: fs::Error) -> Self {
-        Self::Fs(value)
-    }
-}
-
 #[embassy_executor::task()]
 async fn file_system_task(sdmmc: Sdmmc<'static>) {
     sdmmc_fs::file_system_task(sdmmc).await;
@@ -58,68 +57,19 @@ async fn file_system_task(sdmmc: Sdmmc<'static>) {
 }
 
 #[embassy_executor::task()]
-async fn logger_task(mut log_init: ConsumerAndMetadata<'static>, mut sd_detect: Input<'static>) {
+async fn logger_task(mut logger: ConsumerAndMetadata<'static>, mut sd_detect: Input<'static>) {
     loop {
         // the logger loop will exit if there is no sd card but at
         // some point the user can put a card in and the system will recover
-        match logger_loop(&mut log_init, &mut sd_detect).await {
+        match logger_loop(&mut logger, &mut sd_detect).await {
             Ok(()) => {}
-            Err(_e) => {} // error!("{:?}", _e),
+            Err(_e) => {
+                // it's not a good idea to capture these errors as they may lead to more
+            }
         }
 
         Timer::after_secs(1).await;
     }
-}
-
-const MAX_LOG_BYTES_PER_DAY: u64 = 1024 * 1024; // 1MB
-static FLUSH_LOGS: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
-
-async fn logger_loop(
-    log: &mut ConsumerAndMetadata<'static>,
-    sd_detect: &mut Input<'static>,
-) -> Result<(), Error> {
-    if sd_detect.is_high() {
-        return Err(Error::Fs(fs::Error::NoCard));
-    }
-
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(true)
-        .open("log.bin")
-        .await?;
-
-    loop {
-        while !log.consumer.is_empty() {
-            write_to_file(&mut log.consumer, &file).await?;
-        }
-
-        match select(log.consumer.wait_for_data(), FLUSH_LOGS.receive()).await {
-            Either::First(_) => {
-                if !log.consumer.is_empty() {
-                    write_to_file(&mut log.consumer, &file).await?;
-                }
-            }
-            Either::Second(_) => {
-                file.flush().await?;
-                info!("log flushed");
-            }
-        }
-    }
-}
-
-async fn write_to_file(consumer: &mut Consumer<'_>, file: &FileHandle) -> Result<(), Error> {
-    let grant = consumer.read();
-    let (a, b) = grant.bufs();
-    let num_bytes = a.len() + b.len();
-
-    if !daily_limit_exceeded(num_bytes) {
-        file.write(a).await?;
-        file.write(b).await?;
-    }
-
-    grant.release_all();
-    Ok(())
 }
 
 const RTC_MAGIC_REG: usize = 0;
@@ -160,16 +110,6 @@ async fn main(mut spawner: Spawner) {
     }
 }
 
-fn daily_limit_exceeded(num_bytes: usize) -> bool {
-    let mut daily_log_bytes = 0;
-    BACKUP.write(|x| {
-        daily_log_bytes = x.daily_log_bytes;
-        x.daily_log_bytes.wrapping_add(num_bytes as u64)
-    });
-
-    daily_log_bytes > MAX_LOG_BYTES_PER_DAY
-}
-
 async fn do_stuff() -> Result<(), Error> {
     let file = OpenOptions::new()
         .create(true)
@@ -201,10 +141,6 @@ async fn do_stuff() -> Result<(), Error> {
     }
 }
 
-async fn flush_logs() {
-    FLUSH_LOGS.send(()).await;
-}
-
 fn setup_logging(spawner: &mut Spawner, mut rtc: Rtc, sd_detect: Input<'static>) {
     // Only initialize calendar once.
     let already_initialized = rtc.read_backup_register(RTC_MAGIC_REG) == Some(RTC_MAGIC);
@@ -216,12 +152,12 @@ fn setup_logging(spawner: &mut Spawner, mut rtc: Rtc, sd_detect: Input<'static>)
     }
     defmt::timestamp!("{=u64:iso8601ms}", rtc_unix_ms_now());
 
-    let Ok(log_init) = defmt_persist::init() else {
+    let Ok(logger) = defmt_persist::init() else {
         panic!("log init failed");
     };
 
-    spawner.spawn(unwrap!(logger_task(log_init, sd_detect)));
-    BACKUP.init_if_needed();
+    spawner.spawn(unwrap!(logger_task(logger, sd_detect)));
+    backup_ram::init_if_needed();
 }
 
 #[embassy_executor::task]
@@ -247,7 +183,7 @@ async fn daily_reset_task() -> ! {
                 let mut daily_log_bytes = 0;
                 let mut daily_reset_counter = 0;
 
-                BACKUP.write(|x| {
+                backup_ram::write(|x| {
                     daily_log_bytes = x.daily_log_bytes;
                     daily_reset_counter = x.daily_reset_counter;
                     x.daily_log_bytes = 0;
