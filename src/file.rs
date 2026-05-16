@@ -1,14 +1,21 @@
 use aligned::Aligned;
+
+#[cfg(feature = "alloc")]
 use alloc::{string::String, vec::Vec};
-use core::str::from_utf8;
 
 use super::{
     BlockDevice,
     allocation::{AllocatedRun, StoredChain},
     bisync,
     directory_entry::{
-        DirectoryEntryChain, FileAttributes, GeneralSecondaryFlags, Location, RAW_ENTRY_LEN,
-        StreamExtensionDirEntry, update_checksum,
+        DirSetWriter,
+        DirectoryEntryChain,
+        FileAttributes,
+        GeneralSecondaryFlags,
+        Location,
+        RAW_ENTRY_LEN,
+        RawDirEntry,
+        StreamExtensionDirEntry, //update_checksum,
     },
     error::ExFatError,
     file_system::{ExFatResult, FileSystem},
@@ -100,7 +107,6 @@ pub(crate) struct FileDetails {
     pub data_length: u64,
     pub valid_data_length: u64, // number of valid bytes in the file (reads past valid_data_length should return zeros)
     pub attributes: FileAttributes,
-    pub name: String, // TODO: look into removing this and only reading it if requested via an impl
     pub location: Location,
     pub flags: GeneralSecondaryFlags,
     pub secondary_count: u8,
@@ -158,19 +164,14 @@ impl FileDirty {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) enum TouchedKind {
     Data,
     Fat,
     Bitmap,
     Dir,
+    #[default]
     None,
-}
-
-impl Default for TouchedKind {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Default)]
@@ -192,10 +193,9 @@ impl<const NUM_SECTORS: usize> Touched for FileDirty<NUM_SECTORS> {
             .iter()
             .find(|x| x.sector == touched.sector)
             .is_none()
+            && self.sectors.push(touched).is_err()
         {
-            if self.sectors.push(touched).is_err() {
-                self.overflowed = true;
-            }
+            self.overflowed = true;
         }
     }
 
@@ -317,39 +317,56 @@ impl File {
     {
         // check if we need to update the file directory entry
         if self.touched.is_dir_entry_dirty {
-            // read dir entries for this file from disk
-            let mut dir_entries = self.get_file_dir_entry_set(fs).await?;
+            let mut chain = DirectoryEntryChain::new_from_file_details(&self.details, &fs.fs);
+            let mut counter = 0;
+            let mut dir_set_writer = DirSetWriter::new(self.details.location);
+            let mut file_dir: Option<RawDirEntry> = None;
 
-            // the stream ext is always the second entry
-            let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
-            stream_ext.first_cluster = match &self.chain {
-                StoredChain::Empty => NO_CLUSTER_ID,
-                StoredChain::Contiguous {
-                    first,
-                    cluster_count: _cluster_count,
-                } => *first,
-                StoredChain::Fat {
-                    first,
-                    last: _last,
-                    cluster_count: _cluster_count,
-                } => *first,
-            };
-            stream_ext.data_length = self.details.data_length;
-            stream_ext.valid_data_length = self.details.valid_data_length;
-            stream_ext.general_secondary_flags = self.details.flags;
+            while let Some((dir_entry, _location)) = chain.next(fs).await? {
+                match counter {
+                    0 => {
+                        // file dir
+                        dir_set_writer.add_no_write::<SIZE>(dir_entry, true);
+                        let mut raw = [0u8; RAW_ENTRY_LEN];
+                        raw.copy_from_slice(dir_entry);
+                        file_dir = Some(raw);
+                    }
+                    1 => {
+                        // stream ext
+                        let mut stream_ext: StreamExtensionDirEntry = dir_entry.into();
+                        stream_ext.first_cluster = match &self.chain {
+                            StoredChain::Empty => NO_CLUSTER_ID,
+                            StoredChain::Contiguous {
+                                first,
+                                cluster_count: _cluster_count,
+                            } => *first,
+                            StoredChain::Fat {
+                                first,
+                                last: _last,
+                                cluster_count: _cluster_count,
+                            } => *first,
+                        };
+                        stream_ext.data_length = self.details.data_length;
+                        stream_ext.valid_data_length = self.details.valid_data_length;
+                        stream_ext.general_secondary_flags = self.details.flags;
 
-            // serialize the mutated stream ext back to the dir entry
-            dir_entries[1].copy_from_slice(&stream_ext.serialize());
+                        dir_set_writer
+                            .add(fs, &stream_ext.serialize(), false)
+                            .await?;
+                    }
+                    _ => {
+                        // file name
+                        dir_set_writer.add_no_write::<SIZE>(dir_entry, false);
+                    }
+                }
+                counter += 1;
+            }
 
-            // recalculate the file checksum and save back to appropriate dir entry
-            update_checksum(&mut dir_entries);
-
-            // write to disk - only the directory entries are written.
-            fs.write_dir_entries_to_disk(self.details.location, dir_entries, &mut self.touched)
-                .await?;
+            if let Some(file_dir) = file_dir {
+                // writes the checksum
+                dir_set_writer.finish(fs, &file_dir).await?;
+            }
         }
-
-        self.touched.flush(fs).await?;
 
         Ok(())
     }
@@ -424,6 +441,7 @@ impl File {
     ///
     /// Exfat has the concept of valid_data_length which is less than or equal to data_length.
     /// If a zero length Vec is passed it will be extended to data_length size and the bytes between valid_data_length and data_length will contain zeros.
+    #[cfg(feature = "alloc")]
     #[bisync]
     pub async fn read_to_end<D, const SIZE: usize, const N: usize>(
         &mut self,
@@ -454,6 +472,7 @@ impl File {
     }
 
     /// Read all bytes from file and interprets them as a utf8 encoded string
+    #[cfg(feature = "alloc")]
     #[bisync]
     pub async fn read_to_string<D, const SIZE: usize, const N: usize>(
         &mut self,
@@ -468,7 +487,7 @@ impl File {
         // I recon its safer to read the entire file into a buffer before decoding it
         let mut buf = Vec::new();
         let len = self.read_to_end(fs, &mut buf).await?;
-        let decoded = from_utf8(&buf[..len])
+        let decoded = core::str::from_utf8(&buf[..len])
             .map_err(|_| ExFatError::Utf8Error)?
             .into();
         Ok(decoded)
@@ -620,7 +639,7 @@ impl File {
     where
         D: BlockDevice<SIZE>,
     {
-        if buf.len() == 0 {
+        if buf.is_empty() {
             return Ok(());
         }
 
@@ -884,34 +903,6 @@ impl File {
         }
 
         Ok(0)
-    }
-
-    #[bisync]
-    async fn get_file_dir_entry_set<D, const SIZE: usize, const N: usize>(
-        &mut self,
-        fs: &mut FileSystem<D, SIZE, N>,
-    ) -> ExFatResult<Vec<[u8; RAW_ENTRY_LEN]>, D, SIZE>
-    where
-        D: BlockDevice<SIZE>,
-    {
-        let mut chain = DirectoryEntryChain::new_from_location(&self.details.location, &fs.fs);
-
-        let mut counter = 0;
-
-        let mut dir_entries = Vec::with_capacity(self.details.secondary_count as usize + 1);
-
-        // copy all directory entries for the file into a Vec
-        while let Some((dir_entry, _location)) = chain.next(fs).await? {
-            let mut entry = [0u8; RAW_ENTRY_LEN];
-            entry.copy_from_slice(dir_entry);
-            dir_entries.push(entry);
-            counter += 1;
-            if counter == self.details.secondary_count + 1 {
-                break;
-            }
-        }
-
-        Ok(dir_entries)
     }
 
     fn get_cluster_offset<D, const SIZE: usize, const N: usize>(

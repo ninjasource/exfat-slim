@@ -1,4 +1,6 @@
 use aligned::Aligned;
+
+#[cfg(feature = "alloc")]
 use alloc::{string::String, vec::Vec};
 
 use super::{
@@ -8,20 +10,17 @@ use super::{
     boot_sector::BootSector,
     directory::{DirectoryIterator, ExactNameFilter, directory_list, get_leaf_file_entry},
     directory_entry::{
-        AllocationBitmapDirEntry, DirectoryEntryChain, EntryType, FileAttributes, FileDirEntry,
-        FileNameDirEntry, GeneralSecondaryFlags, Location, RAW_ENTRY_LEN, RawDirEntry,
-        StreamExtensionDirEntry, UpcaseTableDirEntry, VolumeLabelDirEntry, is_end_of_directory,
-        update_checksum,
+        AllocationBitmapDirEntry, DirSetWriter, DirectoryEntryChain, EntryType, FileAttributes,
+        FileDirEntry, FileNameDirEntry, GeneralSecondaryFlags, Location, RAW_ENTRY_LEN,
+        RawDirEntry, StreamExtensionDirEntry, UpcaseTableDirEntry, VolumeLabelDirEntry,
+        is_end_of_directory,
     },
     error::ExFatError,
     fat::Fat,
-    file::{
-        File, FileDetails, FileDirty, NO_CLUSTER_ID, OpenOptions, Touched, TouchedKind,
-        TouchedSector,
-    },
+    file::{File, FileDetails, FileDirty, NO_CLUSTER_ID, OpenOptions, Touched},
     slot_cache::SlotCache,
     upcase_table::UpcaseTable,
-    utils::{calc_dir_entry_set_len, encode_utf16_and_hash, split_path},
+    utils::{Utf16Chunks, calc_dir_entry_set_len, encode_utf16_upcase_and_hash, split_path},
 };
 
 pub type ExFatResult<T, D, const SIZE: usize> =
@@ -235,6 +234,7 @@ where
     /// Reads the entire contents of the file into a byte vector
     ///
     /// Supports nested paths
+    #[cfg(feature = "alloc")]
     #[bisync]
     pub async fn read(&mut self, path: &str) -> ExFatResult<Vec<u8>, D, SIZE> {
         self.mount().await?;
@@ -249,6 +249,7 @@ where
     /// Reads the entire contents of the file into a string
     ///
     /// Supports nested paths
+    #[cfg(feature = "alloc")]
     #[bisync]
     pub async fn read_to_string(&mut self, path: &str) -> ExFatResult<String, D, SIZE> {
         self.mount().await?;
@@ -324,19 +325,17 @@ where
         // in exFAT a directory cannot have a directory and file with the same name in it so no need to filter here
         let file_details = self.find_file_inner(from_path, None).await?;
 
-        // mark dir entries as free
-        let mut freed_dir_entries = Vec::with_capacity(1 + file_details.secondary_count as usize);
-        for _ in 0..freed_dir_entries.capacity() {
-            let mut dir_entry = [0u8; RAW_ENTRY_LEN];
-            Self::mark_dir_entry_free(&mut dir_entry);
-            freed_dir_entries.push(dir_entry);
+        let mut dir_set_writer = DirSetWriter::new(file_details.location);
+        let dir_entry = [0u8; RAW_ENTRY_LEN];
+
+        for _ in 0..file_details.secondary_count + 1 {
+            dir_set_writer.add(self, &dir_entry, false).await?;
         }
 
-        let (dir_path, file_or_dir_name) = split_path(to_path);
+        dir_set_writer.finish_no_checksum(self).await?;
 
+        let (dir_path, file_or_dir_name) = split_path(to_path);
         let mut touched = FileDirty::new();
-        self.write_dir_entries_to_disk(file_details.location, freed_dir_entries, &mut touched)
-            .await?;
 
         // find directory or recursively create it if it does not already exist
         let directory_cluster_id = self.get_or_create_directory(&mut touched, dir_path).await?;
@@ -411,7 +410,7 @@ where
             }
         } else {
             let last = self
-                .get_cluster_id_at(file_details.data_length, &file_details)
+                .get_cluster_id_at(file_details.data_length, file_details)
                 .await?;
             StoredChain::Fat {
                 first: file_details.first_cluster,
@@ -459,28 +458,45 @@ where
             unimplemented!("length greater than 0 not yet supported")
         }
 
-        let mut chain = DirectoryEntryChain::new_from_location(&file_details.location, &self.fs);
-        let mut counter = 0;
-        let mut dir_entries = Vec::with_capacity(file_details.secondary_count as usize + 1);
+        let mut chain = DirectoryEntryChain::new_from_file_details(file_details, &self.fs);
+        let mut count = 0;
+        let mut dir_set_writer = DirSetWriter::new(file_details.location);
+        let mut file_dir: Option<RawDirEntry> = None;
 
-        // copy all directory entries for the file into a Vec
         while let Some((dir_entry, _location)) = chain.next(self).await? {
-            let mut entry = [0u8; RAW_ENTRY_LEN];
-            entry.copy_from_slice(dir_entry);
-            dir_entries.push(entry);
-            counter += 1;
-            if counter == file_details.secondary_count + 1 {
-                break;
+            match count {
+                0 => {
+                    // file dir
+                    dir_set_writer.add_no_write::<SIZE>(dir_entry, true);
+                    let mut raw = [0u8; RAW_ENTRY_LEN];
+                    raw.copy_from_slice(dir_entry);
+                    file_dir = Some(raw);
+                }
+                1 => {
+                    // stream ext
+                    let mut stream_ext: StreamExtensionDirEntry = dir_entry.into();
+                    stream_ext.data_length = file_details.data_length;
+                    stream_ext.valid_data_length = file_details.valid_data_length;
+                    dir_set_writer
+                        .add(self, &stream_ext.serialize(), false)
+                        .await?;
+                }
+                _ => {
+                    // file name
+                    dir_set_writer.add_no_write::<SIZE>(dir_entry, false);
+                }
             }
+
+            count += 1;
+        }
+
+        if let Some(file_dir) = file_dir {
+            dir_set_writer.finish(self, &file_dir).await?;
         }
 
         // set file length to 0
         file_details.data_length = length;
         file_details.valid_data_length = file_details.valid_data_length.min(length);
-        let mut stream_ext: StreamExtensionDirEntry = (&dir_entries[1]).into();
-        stream_ext.data_length = file_details.data_length;
-        stream_ext.valid_data_length = file_details.valid_data_length;
-        dir_entries[1].copy_from_slice(&stream_ext.serialize());
 
         let mut touched = FileDirty::new();
 
@@ -488,14 +504,6 @@ where
         let chain = self.get_stored_chain(file_details).await?;
         self.allocator
             .free(&mut self.dev, &mut touched, &mut self.fat, &chain)
-            .await?;
-
-        // calculate and update the set_checksum field
-        update_checksum(&mut dir_entries);
-
-        // write to disk - only the directory entries are written.
-        // the data the file points to is left as is (but is free to be overwritten)
-        self.write_dir_entries_to_disk(file_details.location, dir_entries, &mut touched)
             .await?;
 
         touched.flush(self).await?;
@@ -603,14 +611,16 @@ where
         valid_data_length: u64,
         data_length: u64,
     ) -> ExFatResult<FileDetails, D, SIZE> {
-        let (utf16_name, name_hash) = encode_utf16_and_hash(name, &self.upcase_table);
-        let dir_entry_set_len = calc_dir_entry_set_len(&utf16_name);
+        let (name_hash, file_name_char_count) =
+            encode_utf16_upcase_and_hash(name, &self.upcase_table);
+        let dir_entry_set_len = calc_dir_entry_set_len(file_name_char_count);
         let location = self
             .find_empty_dir_entry_set(directory_cluster_id, dir_entry_set_len)
             .await?;
-        let mut dir_entries: Vec<RawDirEntry> = Vec::with_capacity(dir_entry_set_len);
-
+        let location_copy = location;
         let secondary_count = dir_entry_set_len as u8 - 1;
+
+        let mut dir_set_writer = DirSetWriter::new(location);
 
         // write file directory entry set
         let file = FileDirEntry {
@@ -626,46 +636,39 @@ where
             last_modified_utc_offset: 0,
             last_accessed_utc_offset: 0,
         };
-        dir_entries.push(file.serialize());
+        let file_dir = file.serialize();
+        dir_set_writer.add(self, &file_dir, true).await?;
 
         // write stream extension directory entry
         let stream_ext = StreamExtensionDirEntry {
             general_secondary_flags: stream_ext_flags,
-            name_length: utf16_name.len() as u8,
+            name_length: file_name_char_count as u8,
             name_hash,
             valid_data_length,
             first_cluster,
             data_length,
         };
-        dir_entries.push(stream_ext.serialize());
+        dir_set_writer
+            .add(self, &stream_ext.serialize(), false)
+            .await?;
 
         // write file name directory entries chunked by 15 characters
-        let (chunks, remainder) = utf16_name.as_chunks::<15>();
-        for chunk in chunks {
-            let file_name = FileNameDirEntry {
-                general_secondary_flags: GeneralSecondaryFlags::empty(),
-                file_name: *chunk,
-            };
-            dir_entries.push(file_name.serialize());
-        }
-        if !remainder.is_empty() {
-            // any file name ness than 15 characters gets zeros after the name
+        let mut chunk_iter = Utf16Chunks::new(name);
+        loop {
             let mut file_name = FileNameDirEntry {
                 general_secondary_flags: GeneralSecondaryFlags::empty(),
                 file_name: [0u16; 15],
             };
-            file_name.file_name[..remainder.len()].copy_from_slice(remainder);
-            dir_entries.push(file_name.serialize());
+            if let Some(_len) = chunk_iter.next_chunk(&mut file_name.file_name) {
+                dir_set_writer
+                    .add(self, &file_name.serialize(), false)
+                    .await?;
+            } else {
+                break;
+            }
         }
 
-        // calculate and update the set_checksum field
-        update_checksum(&mut dir_entries);
-
-        // write to disk
-        let mut touched = FileDirty::new();
-        self.write_dir_entries_to_disk(location, dir_entries, &mut touched)
-            .await?;
-        touched.flush(self).await?;
+        dir_set_writer.finish(self, &file_dir).await?;
 
         let file_details = FileDetails {
             attributes: file_attributes,
@@ -673,10 +676,10 @@ where
             valid_data_length,
             first_cluster,
             flags: stream_ext_flags,
-            location,
-            name: name.into(),
+            location: location_copy,
             secondary_count,
         };
+
         Ok(file_details)
     }
 
@@ -830,40 +833,6 @@ where
             None => unimplemented!("growing a directory not yet supported"),
         }
     }
-
-    #[bisync]
-    pub(crate) async fn write_dir_entries_to_disk(
-        &mut self,
-        location: Location,
-        dir_entries: Vec<RawDirEntry>,
-        touched: &mut impl Touched,
-    ) -> ExFatResult<(), D, SIZE> {
-        let mut sector_id = location.sector_id;
-        touched.insert(TouchedSector::new(TouchedKind::Dir, sector_id));
-        let mut offset = location.dir_entry_offset * RAW_ENTRY_LEN;
-
-        for (index, dir_entry) in dir_entries.iter().enumerate() {
-            let slot = self.data_blocks.read_mut(sector_id, &mut self.dev).await?;
-            slot.as_mut_slice()[offset..offset + RAW_ENTRY_LEN].copy_from_slice(dir_entry);
-            offset += RAW_ENTRY_LEN;
-
-            // move to the next sector if required
-            if offset >= SIZE {
-                // if this is the last entry
-                if index == dir_entries.len() - 1 {
-                    break;
-                }
-
-                // we don't need to check if sector_id has overflowed the cluster
-                // because we asked for a valid dir entry set
-                offset = 0;
-                sector_id += 1;
-                touched.insert(TouchedSector::new(TouchedKind::Dir, sector_id));
-            }
-        }
-
-        Ok(())
-    }
 }
 
 fn path_to_iter(path: &str) -> impl Iterator<Item = &str> {
@@ -930,12 +899,10 @@ where
                 let entry: UpcaseTableDirEntry = chunk.into();
                 upcase_table_dir_entry = Some(entry);
             }
-            EntryType::UnusedOrEndOfDirectory => {
-                if is_end_of_directory(chunk) {
-                    break;
-                }
+            EntryType::UnusedOrEndOfDirectory if is_end_of_directory(chunk) => {
+                break;
             }
-            _entry_type => {} // ignore
+            _ => {} // ignore
         }
 
         if allocation_bitmap_dir_entry.is_some()

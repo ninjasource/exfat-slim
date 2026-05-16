@@ -71,4 +71,7 @@ pub enum ExFatError<E> {
 
     #[error("unexpected error occured: {0}")]
     Unexpected(&'static str),
+
+    #[error("supplied buffer to decode file name into was too small")]
+    FileNameBufferTooSmall,
 }

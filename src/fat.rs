@@ -31,7 +31,7 @@ where
         Self {
             start_of_fat_sector: None,
             cache: SlotCache::new(),
-            _phantom: PhantomData::default(),
+            _phantom: PhantomData,
         }
     }
 

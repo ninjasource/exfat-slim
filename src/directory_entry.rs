@@ -1,13 +1,12 @@
-use alloc::vec::Vec;
 use bitflags::bitflags;
 use thiserror::Error;
 
 use super::{
     BlockDevice, bisync,
     directory::DirectoryEntryFilter,
-    file::FileDetails,
+    file::{DEFAULT_TOUCHED_SECTORS, FileDetails, FileDirty, Touched, TouchedKind, TouchedSector},
     file_system::{ExFatResult, FileSystem, FileSystemDetails},
-    utils::{decode_utf16, read_u16_le, read_u32_le, read_u64_le},
+    utils::{read_u16_le, read_u32_le, read_u64_le},
 };
 
 pub const RAW_ENTRY_LEN: usize = 32;
@@ -417,17 +416,20 @@ pub(crate) struct DirectoryEntryChain<const SIZE: usize> {
     cluster_offset: usize,
     // offset, in number of RAW_ENTRY_LEN chunks, from start of sector
     dir_entry_offset: usize,
-    buf: [u8; SIZE],
+    buf: [u8; SIZE], // TODO: figure out if this is still needed after slot cache was introduced
     fetch_required: bool,
+    cursor: usize,
+    num_entries: Option<usize>,
 }
 
 impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
-    pub(crate) fn new_from_location(location: &Location, fs: &FileSystemDetails) -> Self {
+    pub(crate) fn new_from_file_details(details: &FileDetails, fs: &FileSystemDetails) -> Self {
         // This is so gross, make it better
-        let sector_id_from_start = location.sector_id - fs.cluster_heap_offset;
+        let sector_id_from_start = details.location.sector_id - fs.cluster_heap_offset;
         let cluster_id = 2 + sector_id_from_start / fs.sectors_per_cluster as u32;
         let cluster_offset = (sector_id_from_start % fs.sectors_per_cluster as u32) as usize;
-        let dir_entry_offset = location.dir_entry_offset;
+        let dir_entry_offset = details.location.dir_entry_offset;
+        let num_entries = Some(details.secondary_count as usize + 1);
 
         Self {
             buf: [0; SIZE],
@@ -436,6 +438,8 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
             cluster_offset,
             dir_entry_offset,
             fetch_required: true,
+            cursor: 0,
+            num_entries,
         }
     }
 
@@ -447,6 +451,8 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
             cluster_offset: 0,
             dir_entry_offset: 0,
             fetch_required: true,
+            cursor: 0,
+            num_entries: None,
         }
     }
 
@@ -461,10 +467,8 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
         while let Some((entry, location)) = self.next(fs).await? {
             let entry_type_val = entry[0];
             match EntryType::from(entry_type_val) {
-                EntryType::UnusedOrEndOfDirectory => {
-                    if is_end_of_directory(entry) {
-                        return Ok(None);
-                    }
+                EntryType::UnusedOrEndOfDirectory if is_end_of_directory(entry) => {
+                    return Ok(None);
                 }
                 EntryType::FileAndDirectory => {
                     let file_entry: FileDirEntry = entry.into();
@@ -489,41 +493,55 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
         'outer: loop {
             if let Some((file_dir_entry, location)) = self.next_file_dir_entry(fs).await? {
                 if let Some((stream_entry, _location)) = self.next(fs).await? {
-                    // TODO: check entry type
-                    let stream_entry: StreamExtensionDirEntry = stream_entry.into();
+                    let Some(stream_entry) = try_into::<StreamExtensionDirEntry>(
+                        stream_entry,
+                        EntryType::StreamExtension,
+                    ) else {
+                        return Ok(None);
+                    };
+
                     if !filter.hash(stream_entry.name_hash, file_dir_entry.file_attributes) {
                         continue 'outer;
                     }
 
                     // read the entire file_name
                     let name_length = stream_entry.name_length as usize;
-                    let mut file_name: Vec<u16> = Vec::with_capacity(name_length);
+                    if !filter.file_name_length(name_length) {
+                        return Ok(None);
+                    }
+
+                    let mut cursor = 0;
                     'inner: loop {
                         if let Some((file_name_entry, _location)) = self.next(fs).await? {
-                            // TODO: check entry type
-                            let file_name_entry: FileNameDirEntry = file_name_entry.into();
-                            let len = (name_length - file_name.len())
-                                .min(file_name_entry.file_name.len());
-                            file_name.extend_from_slice(&file_name_entry.file_name[..len]);
-                            if file_name.len() == name_length {
-                                break 'inner;
+                            let Some(file_name_entry) =
+                                try_into::<FileNameDirEntry>(file_name_entry, EntryType::Filename)
+                            else {
+                                return Ok(None);
+                            };
+
+                            let len = (name_length - cursor).min(file_name_entry.file_name.len());
+                            if !filter.file_name(
+                                &file_name_entry.file_name[..len],
+                                cursor,
+                                &fs.upcase_table,
+                            ) {
+                                return Ok(None);
+                            } else {
+                                cursor += len;
+                                if cursor == name_length {
+                                    break 'inner;
+                                }
                             }
                         } else {
                             return Ok(None);
                         }
                     }
 
-                    if !filter.file_name(&file_name, &fs.upcase_table) {
-                        continue 'outer;
-                    }
-
-                    let name = decode_utf16::<D, SIZE>(file_name)?;
                     let file_details = FileDetails {
                         attributes: file_dir_entry.file_attributes,
                         data_length: stream_entry.data_length,
                         valid_data_length: stream_entry.valid_data_length,
                         first_cluster: stream_entry.first_cluster,
-                        name,
                         location,
                         flags: stream_entry.general_secondary_flags,
                         secondary_count: file_dir_entry.secondary_count,
@@ -555,10 +573,17 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
     pub(crate) async fn next<D, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> ExFatResult<Option<(&[u8; RAW_ENTRY_LEN], Location)>, D, SIZE>
+    ) -> ExFatResult<Option<(&RawDirEntry, Location)>, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
+        // return early if we have reached the num entries in our file
+        if let Some(num_entries) = self.num_entries.as_ref()
+            && self.cursor == *num_entries
+        {
+            return Ok(None);
+        }
+
         if self.dir_entry_offset >= Self::dir_entries_per_block() {
             self.cluster_offset += 1;
             self.dir_entry_offset = 0;
@@ -593,6 +618,7 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
         let entry = &entries[self.dir_entry_offset];
         let location = Location::new(self.get_current_sector_id::<D>()?, self.dir_entry_offset);
         self.dir_entry_offset += 1;
+        self.cursor += 1;
         Ok(Some((entry, location)))
     }
 }
@@ -602,29 +628,116 @@ pub(crate) fn is_end_of_directory(directory_entry: &[u8; 32]) -> bool {
     directory_entry.iter().all(|&x| x == 0)
 }
 
-/// calculates the checksum for a file directory set
-fn calc_checksum(dir_entry_set: &[RawDirEntry]) -> u16 {
-    if dir_entry_set.is_empty() {
-        return 0;
+fn try_into<'a, T: From<&'a RawDirEntry>>(
+    dir_entry: &'a RawDirEntry,
+    entry_type: EntryType,
+) -> Option<T> {
+    let et: EntryType = dir_entry[0].into();
+    if et == entry_type {
+        let entry: T = dir_entry.into();
+        Some(entry)
+    } else {
+        None
     }
+}
 
-    let mut checksum: u16 = 0;
+pub(crate) struct DirSetWriter {
+    start: Location,
+    current: Location,
+    touched: FileDirty<DEFAULT_TOUCHED_SECTORS>,
+    checksum: u16,
+}
 
-    for (entry_index, entry) in dir_entry_set.iter().enumerate() {
-        for (byte_index, &b) in entry.iter().enumerate() {
-            if entry_index == 0 && (byte_index == 2 || byte_index == 3) {
-                continue;
-            }
-
-            checksum = checksum.rotate_right(1).wrapping_add(b as u16);
+impl DirSetWriter {
+    pub fn new(location: Location) -> Self {
+        Self {
+            start: location,
+            current: location,
+            touched: FileDirty::new(),
+            checksum: 0,
         }
     }
 
-    checksum
-}
+    #[bisync]
+    pub async fn add<D, const SIZE: usize, const N: usize>(
+        &mut self,
+        fs: &mut FileSystem<D, SIZE, N>,
+        dir_entry: &[u8; RAW_ENTRY_LEN],
+        is_file_dir: bool,
+    ) -> ExFatResult<(), D, SIZE>
+    where
+        D: BlockDevice<SIZE>,
+    {
+        let sector_id = self.current.sector_id;
+        let offset = self.current.dir_entry_offset * RAW_ENTRY_LEN;
 
-/// calculate and update the set_checksum field
-pub(crate) fn update_checksum(dir_entries: &mut [RawDirEntry]) {
-    let set_checksum = calc_checksum(dir_entries);
-    dir_entries[0][2..4].copy_from_slice(&set_checksum.to_le_bytes());
+        let slot = fs.data_blocks.read_mut(sector_id, &mut fs.dev).await?;
+
+        slot.as_mut_slice()[offset..offset + RAW_ENTRY_LEN].copy_from_slice(dir_entry);
+
+        self.touched
+            .insert(TouchedSector::new(TouchedKind::Dir, sector_id));
+
+        self.next_dir_entry_location::<SIZE>();
+        self.calc_checksum(dir_entry, is_file_dir);
+
+        Ok(())
+    }
+
+    pub fn add_no_write<const SIZE: usize>(&mut self, dir_entry: &RawDirEntry, is_file_dir: bool) {
+        self.next_dir_entry_location::<SIZE>();
+        self.calc_checksum(dir_entry, is_file_dir);
+    }
+
+    fn next_dir_entry_location<const SIZE: usize>(&mut self) {
+        self.current.dir_entry_offset += 1;
+        if self.current.dir_entry_offset == SIZE / RAW_ENTRY_LEN {
+            self.current.sector_id += 1;
+            self.current.dir_entry_offset = 0;
+        }
+    }
+
+    /// calculates the checksum for a file directory set
+    fn calc_checksum(&mut self, raw: &RawDirEntry, is_file_dir: bool) {
+        for (byte_index, &b) in raw.iter().enumerate() {
+            if is_file_dir && (byte_index == 2 || byte_index == 3) {
+                continue;
+            }
+
+            self.checksum = self.checksum.rotate_right(1).wrapping_add(b as u16);
+        }
+    }
+
+    #[bisync]
+    pub async fn finish<D, const SIZE: usize, const N: usize>(
+        mut self,
+        fs: &mut FileSystem<D, SIZE, N>,
+        file_dir: &RawDirEntry,
+    ) -> ExFatResult<(), D, SIZE>
+    where
+        D: BlockDevice<SIZE>,
+    {
+        let sector_id = self.start.sector_id;
+        let offset = self.start.dir_entry_offset * RAW_ENTRY_LEN;
+
+        let slot = fs.data_blocks.read_mut(sector_id, &mut fs.dev).await?;
+        let slice = slot.as_mut_slice();
+        slice[offset..offset + RAW_ENTRY_LEN].copy_from_slice(file_dir);
+        slice[offset + 2..offset + 4].copy_from_slice(&self.checksum.to_le_bytes());
+
+        self.touched.flush(fs).await?;
+        Ok(())
+    }
+
+    #[bisync]
+    pub async fn finish_no_checksum<D, const SIZE: usize, const N: usize>(
+        mut self,
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> ExFatResult<(), D, SIZE>
+    where
+        D: BlockDevice<SIZE>,
+    {
+        self.touched.flush(fs).await?;
+        Ok(())
+    }
 }

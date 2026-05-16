@@ -1,5 +1,5 @@
 # exfat-slim
-An exFAT file system library written in safe Rust for embedded environments. 
+An exFAT file system library written in safe Rust for embedded environments. No std library or allocator required.
 
 ## Introduction
 
@@ -16,7 +16,7 @@ The table below highlights some differences.
 | Contiguous sector access `NoFatChain` | Yes for un-fragmented files. Fat chain for fragmented files | Fat chain only
 
 The file system is optimized for flash storage and is particularly good for SD cards when it comes to wear levelling.
-This is a `[no_std]` implementation requiring the `alloc` crate.
+This is an allocator free `[no_std]` implementation but you can enable some ergonomic functions by optionally enabling the `alloc` feature.
 There is no unsafe Rust in the codebase (excl. dependencies)
 
 ## Why build this
@@ -160,5 +160,5 @@ It is zipped because it contains mostly zeros. You can use a crate like `mbr-nos
 ## Run all examples
 
 ```bash
- sh ./run_all_examples.sh
+ source ./run_all_examples.sh
 ```

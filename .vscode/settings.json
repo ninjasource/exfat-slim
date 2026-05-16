@@ -1,9 +1,11 @@
 {
     "rust-analyzer.check.features": [
-        "embassy"
+        "embassy",
+        "alloc"
     ],
     "rust-analyzer.cargo.features": [
-        "embassy"
+        "embassy",
+        "alloc"
     ],
     "rust-analyzer.cargo.noDefaultFeatures": true,
 }

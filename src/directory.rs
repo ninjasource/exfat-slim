@@ -1,8 +1,13 @@
-use alloc::{string::String, vec::Vec};
+use core::char::decode_utf16;
+
+#[cfg(feature = "alloc")]
+use alloc::string::String;
 
 use super::{
     BlockDevice, bisync,
-    directory_entry::{DirectoryEntryChain, FileAttributes},
+    directory_entry::{
+        DirectoryEntryChain, FileAttributes, FileNameDirEntry, StreamExtensionDirEntry,
+    },
     error::ExFatError,
     file::{FileDetails, Metadata},
     file_system::{ExFatResult, FileSystem},
@@ -12,7 +17,8 @@ use super::{
 
 pub(crate) trait DirectoryEntryFilter {
     fn hash(&self, file_name_hash: u16, file_attributes: FileAttributes) -> bool;
-    fn file_name(&self, file_name: &[u16], upcase_table: &UpcaseTable) -> bool;
+    fn file_name_length(&self, length: usize) -> bool;
+    fn file_name(&self, file_name: &[u16], ordinal: usize, upcase_table: &UpcaseTable) -> bool;
 }
 
 pub(crate) struct AllPassFilter {}
@@ -22,24 +28,29 @@ impl DirectoryEntryFilter for AllPassFilter {
         true
     }
 
-    fn file_name(&self, _file_name: &[u16], _upcase_table: &UpcaseTable) -> bool {
+    fn file_name(&self, _file_name: &[u16], _ordinal: usize, _upcase_table: &UpcaseTable) -> bool {
+        true
+    }
+
+    fn file_name_length(&self, _length: usize) -> bool {
         true
     }
 }
 
-pub(crate) struct ExactNameFilter {
-    file_name: Vec<u16>,
+pub(crate) struct ExactNameFilter<'a> {
+    file_name: &'a str,
     file_name_hash: u16,
     file_attributes: Option<FileAttributes>,
 }
 
-impl ExactNameFilter {
+impl<'a> ExactNameFilter<'a> {
     pub(crate) fn new(
-        file_name_str: &str,
+        file_name: &'a str,
         upcase_table: &UpcaseTable,
         file_attributes: Option<FileAttributes>,
     ) -> Self {
-        let (file_name, file_name_hash) = encode_utf16_upcase_and_hash(file_name_str, upcase_table);
+        let (file_name_hash, _file_name_count) =
+            encode_utf16_upcase_and_hash(file_name, upcase_table);
         Self {
             file_name,
             file_name_hash,
@@ -48,7 +59,7 @@ impl ExactNameFilter {
     }
 }
 
-impl DirectoryEntryFilter for ExactNameFilter {
+impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
     fn hash(&self, file_name_hash: u16, file_attributes: FileAttributes) -> bool {
         match self.file_attributes {
             Some(attributes) => {
@@ -58,17 +69,32 @@ impl DirectoryEntryFilter for ExactNameFilter {
         }
     }
 
-    fn file_name(&self, file_name: &[u16], upcase_table: &UpcaseTable) -> bool {
+    fn file_name(
+        &self,
+        file_name_part: &[u16],
+        ordinal: usize,
+        upcase_table: &UpcaseTable,
+    ) -> bool {
         // perform case insensitive name match
-        for (left, right) in self.file_name.iter().zip(file_name.iter()) {
-            let upcased = upcase_table.upcase(*right);
-            if *left != upcased {
+        for (left, right) in self
+            .file_name
+            .encode_utf16()
+            .skip(ordinal)
+            .zip(file_name_part.iter())
+        {
+            let upcased_left = upcase_table.upcase(left);
+            let upcased_right = upcase_table.upcase(*right);
+            if upcased_left != upcased_right {
                 // name does not match
                 return false;
             }
         }
 
         true
+    }
+
+    fn file_name_length(&self, length: usize) -> bool {
+        self.file_name.len() == length
     }
 }
 
@@ -144,14 +170,10 @@ where
         fs.fs.first_cluster_of_root_dir
     } else {
         match get_leaf_file_entry(fs, path, Some(FileAttributes::Directory)).await? {
-            Some(file_details) => {
-                if file_details.attributes.contains(FileAttributes::Directory) {
-                    file_details.first_cluster
-                } else {
-                    return Err(ExFatError::DirectoryNotFound);
-                }
+            Some(file_details) if file_details.attributes.contains(FileAttributes::Directory) => {
+                file_details.first_cluster
             }
-            None => return Err(ExFatError::DirectoryNotFound),
+            _ => return Err(ExFatError::DirectoryNotFound),
         }
     };
 
@@ -169,9 +191,109 @@ pub struct DirectoryEntry {
 }
 
 impl DirectoryEntry {
+    /// file or directly name using a buffer
+    #[bisync]
+    pub async fn file_name_into<'a, D, const SIZE: usize, const N: usize>(
+        &self,
+        fs: &mut FileSystem<D, SIZE, N>,
+        buf: &'a mut [u8],
+    ) -> ExFatResult<&'a str, D, SIZE>
+    where
+        D: BlockDevice<SIZE>,
+    {
+        let mut chain = DirectoryEntryChain::new_from_file_details(&self.details, &fs.fs);
+        let mut count = 0;
+        let mut name_len = 0;
+        let mut cursor = 0;
+
+        while let Some((dir_entry, _location)) = chain.next(fs).await? {
+            match count {
+                0 => {
+                    // ignore
+                }
+                1 => {
+                    let stream_ext: StreamExtensionDirEntry = dir_entry.into();
+                    name_len = stream_ext.name_length as usize;
+                }
+                _ => {
+                    if name_len == 0 {
+                        return Ok("");
+                    }
+
+                    let file_name: FileNameDirEntry = dir_entry.into();
+                    let len = file_name.file_name.len().min(name_len - cursor);
+                    for ch in decode_utf16((file_name.file_name[..len]).iter().copied()) {
+                        let ch = ch.map_err(|_| ExFatError::InvalidUtf16String {
+                            reason: "file name contains an invalif utf16 character",
+                        })?;
+
+                        let needed = ch.len_utf8();
+                        if cursor + needed < buf.len() {
+                            ch.encode_utf8(&mut buf[cursor..cursor + needed]);
+                            cursor += needed;
+                        } else {
+                            return Err(ExFatError::FileNameBufferTooSmall);
+                        }
+                    }
+                }
+            }
+
+            count += 1;
+        }
+
+        let s = core::str::from_utf8(&buf[..cursor]).map_err(|_| ExFatError::Utf8Error)?;
+        Ok(s)
+    }
+
     /// file or directly name
-    pub fn file_name(&self) -> String {
-        self.details.name.clone()
+    #[cfg(feature = "alloc")]
+    #[bisync]
+    pub async fn file_name<'a, D, const SIZE: usize, const N: usize>(
+        &self,
+        fs: &mut FileSystem<D, SIZE, N>,
+    ) -> ExFatResult<String, D, SIZE>
+    where
+        D: BlockDevice<SIZE>,
+    {
+        let mut chain = DirectoryEntryChain::new_from_file_details(&self.details, &fs.fs);
+        let mut count = 0;
+        let mut name_len = 0;
+        let mut cursor = 0;
+        let mut s = String::new();
+
+        while let Some((dir_entry, _location)) = chain.next(fs).await? {
+            match count {
+                0 => {
+                    // ignore
+                }
+                1 => {
+                    let stream_ext: StreamExtensionDirEntry = dir_entry.into();
+                    name_len = stream_ext.name_length as usize;
+
+                    // best guess on how much space this will take up (may take more for unicode chars)
+                    s = String::with_capacity(name_len);
+                }
+                _ => {
+                    if name_len == 0 {
+                        return Ok(String::new());
+                    }
+
+                    let file_name: FileNameDirEntry = dir_entry.into();
+                    let len = file_name.file_name.len().min(name_len - cursor);
+                    for ch in decode_utf16((&file_name.file_name[..len]).iter().copied()) {
+                        let ch = ch.map_err(|_| ExFatError::InvalidUtf16String {
+                            reason: "file name contains an invalif utf16 character",
+                        })?;
+
+                        s.push(ch);
+                        cursor += 1;
+                    }
+                }
+            }
+
+            count += 1;
+        }
+        Ok(s)
     }
 
     /// metadata for the file or directory

@@ -15,14 +15,13 @@ async fn main() -> ExFatResult<(), InMemoryBlockDevice, BLOCK_SIZE> {
 
     let path = ""; // root dir
     let mut dir = fs.read_dir(path).await?;
-    let mut name_buf = [0u8; 255];
     while let Some(entry) = dir.next_entry(&mut fs).await? {
         let entry_type = if entry.metadata().is_dir() {
             "DIR"
         } else {
             "FILE"
         };
-        let file_name = entry.file_name_into(&mut fs, &mut name_buf).await?;
+        let file_name = entry.file_name(&mut fs).await?;
         info!(
             "{} | {} | {} bytes",
             file_name,

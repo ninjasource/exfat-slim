@@ -40,6 +40,66 @@ rand = "0.9.2"
 
 [features]
 default = []
+alloc = []
 defmt = ["dep:defmt"]
 log = ["dep:log"]
 embassy = ["dep:embassy-sync", "dep:static_cell"]
+
+[[example]]
+name = "append_file_blocking"
+
+[[example]]
+name = "combined"
+required-features = ["alloc"]
+
+[[example]]
+name = "copy_file"
+required-features = ["alloc"]
+
+[[example]]
+name = "create_dir"
+
+[[example]]
+name = "file_exists_blocking"
+
+[[example]]
+name = "open_file_multi_cluster"
+required-features = ["alloc"]
+
+[[example]]
+name = "open_file"
+required-features = ["alloc"]
+
+[[example]]
+name = "read_dir_alloc"
+required-features = ["alloc"]
+
+[[example]]
+name = "read_dir"
+
+[[example]]
+name = "read_file_blocking"
+required-features = ["alloc"]
+
+[[example]]
+name = "read_file"
+required-features = ["alloc"]
+
+[[example]]
+name = "remove_file_blocking"
+
+[[example]]
+name = "remove_file"
+
+[[example]]
+name = "rename"
+
+[[example]]
+name = "write_append_blocking"
+
+[[example]]
+name = "write_file_blocking"
+required-features = ["alloc"]
+
+[[example]]
+name = "write_file"

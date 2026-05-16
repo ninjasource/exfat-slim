@@ -93,7 +93,7 @@ where
             bitmap: AllocationBitmapSlim::default(),
             cache: SlotCache::new(),
             next_search_cluster: FIRST_CLUSTER_ID,
-            _phantom: PhantomData::default(),
+            _phantom: PhantomData,
         }
     }
 
@@ -298,7 +298,7 @@ where
                             } else {
                                 if let Some(first_cluster) = first_cluster {
                                     return Ok(AllocatedRun {
-                                        first_cluster: first_cluster,
+                                        first_cluster,
                                         cluster_count: count,
                                     });
                                 }
@@ -358,13 +358,13 @@ where
                                     });
                                 }
                             } else {
-                                if fallback.is_none() {
-                                    if let Some(cluster_id) = first_cluster {
-                                        fallback = Some(AllocatedRun {
-                                            first_cluster: cluster_id,
-                                            cluster_count: num_clusters,
-                                        })
-                                    }
+                                if fallback.is_none()
+                                    && let Some(cluster_id) = first_cluster
+                                {
+                                    fallback = Some(AllocatedRun {
+                                        first_cluster: cluster_id,
+                                        cluster_count: num_clusters,
+                                    })
                                 }
                                 first_cluster = None;
                             }

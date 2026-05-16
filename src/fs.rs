@@ -3,7 +3,6 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use alloc::{
-    // borrow::Cow,
     borrow::Cow,
     collections::btree_map::{BTreeMap, Entry},
     string::{String, ToString},
@@ -116,6 +115,9 @@ pub enum Error {
 
     #[error("unexpected error occured: {0}")]
     Unexpected(&'static str),
+
+    #[error("supplied buffer to decode file name into was too small")]
+    FileNameBufferTooSmall,
 }
 
 impl<E> From<ExFatError<E>> for Error
@@ -163,6 +165,7 @@ where
             ExFatError::Utf8Error => Error::Utf8Error,
             ExFatError::WriteNotEnabled => Error::WriteNotEnabled,
             ExFatError::Unexpected(reason) => Error::Unexpected(reason),
+            ExFatError::FileNameBufferTooSmall => Error::FileNameBufferTooSmall,
         }
     }
 }

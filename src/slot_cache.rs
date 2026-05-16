@@ -1,5 +1,4 @@
-use core::marker::PhantomData;
-use core::{array, fmt::Debug};
+use core::{array, fmt::Debug, marker::PhantomData};
 
 use aligned::Aligned;
 use block_device_driver::{blocks_to_slice, blocks_to_slice_mut};
@@ -92,7 +91,7 @@ where
         Self {
             cache: array::from_fn(|_| Slot::new()),
             hand: 0,
-            _phantom: PhantomData::default(),
+            _phantom: PhantomData,
         }
     }
 

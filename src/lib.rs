@@ -1,7 +1,8 @@
 #![allow(clippy::duplicate_mod)]
 #![deny(unsafe_code)]
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
+#[cfg(any(feature = "alloc", test))]
 extern crate alloc;
 
 #[path = "."]
@@ -39,6 +40,7 @@ pub mod asynchronous {
     pub mod file;
     pub mod file_system;
     #[cfg(feature = "embassy")]
+    #[cfg(feature = "alloc")]
     pub mod fs;
     mod slot_cache;
     mod upcase_table;
