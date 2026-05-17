@@ -4,7 +4,7 @@ use thiserror::Error;
 use super::{
     BlockDevice, bisync,
     directory::DirectoryEntryFilter,
-    file::{DEFAULT_TOUCHED_SECTORS, FileDetails, FileDirty, Touched, TouchedKind, TouchedSector},
+    file::{FileDetails, Touched, TouchedKind, TouchedSector},
     file_system::{ExFatResult, FileSystem, FileSystemDetails},
     utils::{read_u16_le, read_u32_le, read_u64_le},
 };
@@ -644,7 +644,6 @@ fn try_into<'a, T: From<&'a RawDirEntry>>(
 pub(crate) struct DirSetWriter {
     start: Location,
     current: Location,
-    touched: FileDirty<DEFAULT_TOUCHED_SECTORS>,
     checksum: u16,
 }
 
@@ -653,7 +652,6 @@ impl DirSetWriter {
         Self {
             start: location,
             current: location,
-            touched: FileDirty::new(),
             checksum: 0,
         }
     }
@@ -662,6 +660,7 @@ impl DirSetWriter {
     pub async fn add<D, const SIZE: usize, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
+        touched: &mut impl Touched,
         dir_entry: &[u8; RAW_ENTRY_LEN],
         is_file_dir: bool,
     ) -> ExFatResult<(), D, SIZE>
@@ -674,9 +673,7 @@ impl DirSetWriter {
         let slot = fs.data_blocks.read_mut(sector_id, &mut fs.dev).await?;
 
         slot.as_mut_slice()[offset..offset + RAW_ENTRY_LEN].copy_from_slice(dir_entry);
-
-        self.touched
-            .insert(TouchedSector::new(TouchedKind::Dir, sector_id));
+        touched.insert(TouchedSector::new(TouchedKind::Dir, sector_id));
 
         self.next_dir_entry_location::<SIZE>();
         self.calc_checksum(dir_entry, is_file_dir);
@@ -710,8 +707,9 @@ impl DirSetWriter {
 
     #[bisync]
     pub async fn finish<D, const SIZE: usize, const N: usize>(
-        mut self,
+        self,
         fs: &mut FileSystem<D, SIZE, N>,
+        touched: &mut impl Touched,
         file_dir: &RawDirEntry,
     ) -> ExFatResult<(), D, SIZE>
     where
@@ -724,20 +722,20 @@ impl DirSetWriter {
         let slice = slot.as_mut_slice();
         slice[offset..offset + RAW_ENTRY_LEN].copy_from_slice(file_dir);
         slice[offset + 2..offset + 4].copy_from_slice(&self.checksum.to_le_bytes());
-
-        self.touched.flush(fs).await?;
+        touched.insert(TouchedSector::new(TouchedKind::Dir, sector_id));
         Ok(())
     }
 
     #[bisync]
     pub async fn finish_no_checksum<D, const SIZE: usize, const N: usize>(
-        mut self,
+        self,
         fs: &mut FileSystem<D, SIZE, N>,
+        touched: &mut impl Touched,
     ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
-        self.touched.flush(fs).await?;
+        touched.flush(fs).await?;
         Ok(())
     }
 }

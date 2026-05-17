@@ -145,6 +145,8 @@ pub(crate) trait Touched {
     ) -> ExFatResult<(), D, SIZE>
     where
         D: BlockDevice<SIZE>;
+
+    fn sort(&mut self);
 }
 
 #[derive(Debug)]
@@ -164,7 +166,7 @@ impl FileDirty {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) enum TouchedKind {
     Data,
     Fat,
@@ -172,6 +174,18 @@ pub(crate) enum TouchedKind {
     Dir,
     #[default]
     None,
+}
+
+impl TouchedKind {
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Data => 0,
+            Self::Fat => 1,
+            Self::Bitmap => 2,
+            Self::Dir => 3,
+            Self::None => 4,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -212,6 +226,8 @@ impl<const NUM_SECTORS: usize> Touched for FileDirty<NUM_SECTORS> {
             fs.allocator.flush(&mut fs.dev).await?;
             fs.data_blocks.flush(&mut fs.dev).await?;
         } else {
+            // make sure we save in the following order: Data, Bitmap, Fat, Dir
+            self.sort();
             for item in &self.sectors {
                 match item.kind {
                     TouchedKind::Bitmap => {
@@ -234,6 +250,11 @@ impl<const NUM_SECTORS: usize> Touched for FileDirty<NUM_SECTORS> {
         self.overflowed = false;
         self.is_dir_entry_dirty = true;
         Ok(())
+    }
+
+    fn sort(&mut self) {
+        self.sectors
+            .sort_unstable_by_key(|x| (x.kind.rank(), x.sector));
     }
 }
 
@@ -351,7 +372,7 @@ impl File {
                         stream_ext.general_secondary_flags = self.details.flags;
 
                         dir_set_writer
-                            .add(fs, &stream_ext.serialize(), false)
+                            .add(fs, &mut self.touched, &stream_ext.serialize(), false)
                             .await?;
                     }
                     _ => {
@@ -364,9 +385,13 @@ impl File {
 
             if let Some(file_dir) = file_dir {
                 // writes the checksum
-                dir_set_writer.finish(fs, &file_dir).await?;
+                dir_set_writer
+                    .finish(fs, &mut self.touched, &file_dir)
+                    .await?;
             }
         }
+
+        self.touched.flush(fs).await?;
 
         Ok(())
     }
@@ -781,6 +806,7 @@ impl File {
         let flags = GeneralSecondaryFlags::AllocationPossible | GeneralSecondaryFlags::NoFatChain;
 
         fs.create_file_dir_entry_at(
+            &mut self.touched,
             file_or_dir_name,
             directory_cluster_id,
             run.first_cluster,
@@ -799,10 +825,7 @@ impl File {
         let mut buf = Aligned([0u8; SIZE]);
 
         while let Some(_len) = self.read(fs, buf.as_mut_slice()).await? {
-            fs.dev
-                .write(sector_id, &[buf])
-                .await
-                .map_err(ExFatError::Io)?;
+            fs.data_blocks.write(&mut fs.dev, sector_id, &buf).await?;
             sector_id += 1;
         }
 

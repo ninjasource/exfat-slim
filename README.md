@@ -1,5 +1,5 @@
 # exfat-slim
-An exFAT file system library written in safe Rust for embedded environments. No std library or allocator required.
+An exFAT file system library written in safe Rust for embedded environments. Both async and blocking support with no std library or allocator required.
 
 ## Introduction
 
@@ -18,6 +18,41 @@ The table below highlights some differences.
 The file system is optimized for flash storage and is particularly good for SD cards when it comes to wear levelling.
 This is an allocator free `[no_std]` implementation but you can enable some ergonomic functions by optionally enabling the `alloc` feature.
 There is no unsafe Rust in the codebase (excl. dependencies)
+
+## Supported
+
+- Read a file
+- List all directory entries (files and directories)
+- Check if file or directory exists
+- Support for multiple nested directories
+- Delete a file
+- Write a file
+- Create a directory
+- Dual async and blocking support
+- Rename a file or directory (equivalent to move if parent directories change)
+- Delete an empty directory
+- Copy a file
+- Open File
+    - Read
+    - Write
+    - Create
+    - Create New
+    - Appends
+    - Truncate
+    - Seek
+- Use Actor pattern so that BlockDevice trait can take a shared reference to self
+- Support `close()` and `flush()` 
+- Support block caching for allocation bitmap, fat chain and data blocks (directory entries and files)
+- Embassy example
+
+## Still TODO
+
+- Return zeros where user attempts to read past valid_data_length in file (see File::read function)
+- Truncate to specified length to preallocate a file
+- Better test coverage
+- Timestamps
+- Maintain list of locked open files
+- Enable file `close()` on Drop when using the actor pattern
 
 ## Why build this
 
@@ -100,47 +135,6 @@ The library should not panic and if it does as a result of a badly formed file s
 I have attempted to replicate how the Rust standard library exposes a file system so that the API feels familiar. 
 As a result I have chosen to require an allocator. 
 If you create a file in a nested directory the library will attempt to create all the required directories if they do not exist.
-
-## Work in progress
-
-My primary use-case for this library is for an embedded device using the Embassy async framework. 
-Therefore it is async-first and I am initially only planning on implementing the bits I really need.
-However, the library support both `blocking` and `async` operation.
-This project is still undergoing significant churn and testing so just be aware of that. 
-A comprehensive test suite will come when the internal data structures are stable.
-
-Implemented so far:
-- Read a file
-- List all directory entries (files and directories)
-- Check if file or directory exists
-- Support for multiple nested directories
-- Delete a file
-- Write a file
-- Create a directory
-- Dual async and blocking support
-- Rename a file or directory (equivalent to move if parent directories change)
-- Delete an empty directory
-- Copy a file
-- Open File
-    - Read
-    - Write
-    - Create
-    - Create New
-    - Appends
-    - Truncate
-    - Seek
-- Use Actor pattern so that BlockDevice trait can take a shared reference to self
-- Support `close()` and `flush()` 
-- Support block caching for allocation bitmap, fat chain and data blocks (directory entries and files)
-- Embassy example
-
-Work in progress:
-- Return zeros where user attempts to read past valid_data_length in file (see File::read function)
-- Truncate to specified length to preallocate a file
-- Better test coverage
-- Timestamps
-- Maintain list of locked open files
-- Enable file `close()` on Drop when using the actor pattern
 
 ## Contribution
 

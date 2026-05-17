@@ -35,7 +35,12 @@ There is no need to manually mount and unmount the file system.
 ## Read the logs
 
 ```bash
-defmt-print -e ./target/thumbv8m.main-none-eabihf/release/embassy-demo.elf < log.bin
+defmt-print -e ./target/thumbv8m.main-none-eabihf/release/embassy-demo < log.bin
+```
+## Reattach logs without reflashing:
+
+```bash
+probe-rs attach --chip STM32U5G9ZJTxQ --speed 1000 ./target/thumbv8m.main-none-eabihf/release/embassy-demo
 ```
 
 ## Run the tests

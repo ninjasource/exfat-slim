@@ -58,13 +58,20 @@ async fn file_system_task(sdmmc: Sdmmc<'static>) {
 
 #[embassy_executor::task()]
 async fn logger_task(mut logger: ConsumerAndMetadata<'static>, mut sd_detect: Input<'static>) {
+    let mut error = None;
     loop {
         // the logger loop will exit if there is no sd card but at
         // some point the user can put a card in and the system will recover
         match logger_loop(&mut logger, &mut sd_detect).await {
             Ok(()) => {}
-            Err(_e) => {
-                // it's not a good idea to capture these errors as they may lead to more
+            Err(e) => {
+                // we cannot log the error because it will compound the issue
+                // the system will continually fail to write the error it just attempted to log in a never ending loop
+                // a compromise is to log the first occurance of a persistence error and never again
+                if error.is_none() {
+                    error = Some(e);
+                    error!("log persistence error: {:?}", error.as_ref().unwrap())
+                }
             }
         }
 
@@ -107,6 +114,13 @@ async fn main(mut spawner: Spawner) {
         Err(e) => {
             error!("{:?}", e);
         }
+    }
+
+    let mut i = 0;
+    loop {
+        Timer::after(Duration::from_millis(1000)).await;
+        info!("tick {}", i);
+        i += 1;
     }
 }
 

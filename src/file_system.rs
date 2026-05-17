@@ -127,6 +127,10 @@ where
             data_blocks,
         }
     }
+
+    pub fn into_inner(self) -> D {
+        self.dev
+    }
 }
 
 impl<D, const SIZE: usize, const N: usize> FileSystem<D, SIZE, N>
@@ -240,9 +244,9 @@ where
         self.mount().await?;
         let options = OpenOptions::new().read(true);
         let mut file = self.open(path, options).await?;
-        //let mut file = self.with_options().read(true).open(path).await?;
         let mut buf = Vec::new();
         file.read_to_end(self, &mut buf).await?;
+        file.close(self).await?;
         Ok(buf)
     }
 
@@ -255,7 +259,9 @@ where
         self.mount().await?;
         let options = OpenOptions::new().read(true);
         let mut file = self.open(path, options).await?;
-        file.read_to_string(self).await
+        let s = file.read_to_string(self).await?;
+        file.close(self).await?;
+        Ok(s)
     }
 
     /// Returns an iterator over the entries in a directory
@@ -310,6 +316,7 @@ where
         let options = OpenOptions::new().read(true);
         let mut file = self.open(from_path, options).await?;
         file.copy_to(self, to_path).await?;
+        file.close(self).await?;
         Ok(())
     }
 
@@ -324,23 +331,28 @@ where
         self.mount().await?;
         // in exFAT a directory cannot have a directory and file with the same name in it so no need to filter here
         let file_details = self.find_file_inner(from_path, None).await?;
+        let mut touched = FileDirty::new();
 
         let mut dir_set_writer = DirSetWriter::new(file_details.location);
         let dir_entry = [0u8; RAW_ENTRY_LEN];
 
         for _ in 0..file_details.secondary_count + 1 {
-            dir_set_writer.add(self, &dir_entry, false).await?;
+            dir_set_writer
+                .add(self, &mut touched, &dir_entry, false)
+                .await?;
         }
 
-        dir_set_writer.finish_no_checksum(self).await?;
+        dir_set_writer
+            .finish_no_checksum(self, &mut touched)
+            .await?;
 
         let (dir_path, file_or_dir_name) = split_path(to_path);
-        let mut touched = FileDirty::new();
 
         // find directory or recursively create it if it does not already exist
         let directory_cluster_id = self.get_or_create_directory(&mut touched, dir_path).await?;
 
         self.create_file_dir_entry_at(
+            &mut touched,
             file_or_dir_name,
             directory_cluster_id,
             file_details.first_cluster,
@@ -457,6 +469,7 @@ where
         if length > 0 {
             unimplemented!("length greater than 0 not yet supported")
         }
+        let mut touched = FileDirty::new();
 
         let mut chain = DirectoryEntryChain::new_from_file_details(file_details, &self.fs);
         let mut count = 0;
@@ -478,7 +491,7 @@ where
                     stream_ext.data_length = file_details.data_length;
                     stream_ext.valid_data_length = file_details.valid_data_length;
                     dir_set_writer
-                        .add(self, &stream_ext.serialize(), false)
+                        .add(self, &mut touched, &stream_ext.serialize(), false)
                         .await?;
                 }
                 _ => {
@@ -491,14 +504,12 @@ where
         }
 
         if let Some(file_dir) = file_dir {
-            dir_set_writer.finish(self, &file_dir).await?;
+            dir_set_writer.finish(self, &mut touched, &file_dir).await?;
         }
 
         // set file length to 0
         file_details.data_length = length;
         file_details.valid_data_length = file_details.valid_data_length.min(length);
-
-        let mut touched = FileDirty::new();
 
         // mark all clusters as free
         let chain = self.get_stored_chain(file_details).await?;
@@ -524,6 +535,7 @@ where
         let first_cluster = NO_CLUSTER_ID; // sentinel value for no allocation
         let file_details = self
             .create_file_dir_entry_at(
+                &mut touched,
                 file_or_dir_name,
                 directory_cluster_id,
                 first_cluster,
@@ -572,6 +584,7 @@ where
                         .await?;
 
                     self.create_file_dir_entry_at(
+                        touched,
                         dir_name,
                         cluster_id,
                         run.first_cluster,
@@ -603,6 +616,7 @@ where
     #[bisync]
     pub(crate) async fn create_file_dir_entry_at(
         &mut self,
+        touched: &mut impl Touched,
         name: &str,
         directory_cluster_id: u32,
         first_cluster: u32, // the directory or file that this entry points to
@@ -637,7 +651,7 @@ where
             last_accessed_utc_offset: 0,
         };
         let file_dir = file.serialize();
-        dir_set_writer.add(self, &file_dir, true).await?;
+        dir_set_writer.add(self, touched, &file_dir, true).await?;
 
         // write stream extension directory entry
         let stream_ext = StreamExtensionDirEntry {
@@ -649,7 +663,7 @@ where
             data_length,
         };
         dir_set_writer
-            .add(self, &stream_ext.serialize(), false)
+            .add(self, touched, &stream_ext.serialize(), false)
             .await?;
 
         // write file name directory entries chunked by 15 characters
@@ -661,14 +675,14 @@ where
             };
             if let Some(_len) = chunk_iter.next_chunk(&mut file_name.file_name) {
                 dir_set_writer
-                    .add(self, &file_name.serialize(), false)
+                    .add(self, touched, &file_name.serialize(), false)
                     .await?;
             } else {
                 break;
             }
         }
 
-        dir_set_writer.finish(self, &file_dir).await?;
+        dir_set_writer.finish(self, touched, &file_dir).await?;
 
         let file_details = FileDetails {
             attributes: file_attributes,
@@ -948,4 +962,127 @@ where
         upcase_table,
         alloc_bitmap,
     })
+}
+
+#[allow(unused)]
+#[cfg(test)]
+mod tests {
+    use crate::blocking::file_system;
+
+    use super::super::only_sync;
+    use super::*;
+    use aligned::Aligned;
+    use alloc::{vec, vec::Vec};
+
+    const SECTOR_OFFSET: usize = 0;
+    const BLOCK_SIZE: usize = 512;
+
+    #[derive(Debug)]
+    struct DummyBlockDevice {
+        blocks: Vec<[u8; BLOCK_SIZE]>,
+    }
+
+    #[only_sync]
+    impl BlockDevice<BLOCK_SIZE> for DummyBlockDevice {
+        type Error = ();
+        type Align = aligned::A4;
+
+        fn read(
+            &mut self,
+            block_address: u32,
+            data: &mut [Aligned<Self::Align, [u8; BLOCK_SIZE]>],
+        ) -> Result<(), Self::Error> {
+            data[0].copy_from_slice(&self.blocks[block_address as usize - SECTOR_OFFSET]);
+            Ok(())
+        }
+
+        fn write(
+            &mut self,
+            block_address: u32,
+            data: &[Aligned<Self::Align, [u8; BLOCK_SIZE]>],
+        ) -> Result<(), Self::Error> {
+            self.blocks[block_address as usize - SECTOR_OFFSET]
+                .copy_from_slice(&data[0].as_slice());
+            Ok(())
+        }
+
+        fn size(&mut self) -> Result<u64, Self::Error> {
+            todo!()
+        }
+    }
+
+    #[only_sync]
+    #[test]
+    fn open_file_creates_empty_file() {
+        let mut io = DummyBlockDevice {
+            blocks: vec![
+                [0; BLOCK_SIZE],
+                [0; BLOCK_SIZE],
+                [0; BLOCK_SIZE],
+                [0; BLOCK_SIZE],
+            ],
+        };
+        let mut fs = FileSystem::<_, _, 4>::new(io);
+        fs.is_mounted = true;
+        fs.fs.first_cluster_of_root_dir = 2;
+        fs.upcase_table = UpcaseTable::default();
+        let options = OpenOptions::new().create(true).write(true);
+
+        let file = fs.open("hello.txt", options).unwrap();
+
+        let dir_entries = &fs.dev.blocks[0][..32 * 3];
+        #[rustfmt::skip]
+        assert_eq!(
+            dir_entries,
+            &[
+                133, 2, 90, 123, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+                192, 3, 0, 9, 70, 48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+                193, 0, 104, 0, 101, 0, 108, 0, 108, 0, 111, 0, 46, 0, 116, 0, 120, 0, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
+    }
+
+    #[only_sync]
+    #[test]
+    fn write_text_to_file() {
+        // arrange
+        let mut io = DummyBlockDevice {
+            blocks: vec![[0; BLOCK_SIZE]; 128], // 2 clusters
+        };
+        io.blocks[1][0] = 1; // mark the first cluster (cluster 2) as allocated
+        let mut fs = FileSystem::<_, _, 4>::new(io);
+        fs.is_mounted = true;
+        fs.fs.first_cluster_of_root_dir = 2;
+        fs.upcase_table = UpcaseTable::default();
+        fs.allocator.bitmap.first_sector = 1;
+        fs.allocator.bitmap.num_sectors = 1;
+        let options = OpenOptions::new().create(true).write(true);
+
+        // act
+        let mut file = fs.open("hello.txt", options).unwrap();
+        file.write(&mut fs, b"world").unwrap();
+        file.close(&mut fs).unwrap();
+
+        // check first 8 bits of the alloc bitmap
+        // it was 0b0000_0001 before the file was allocated
+        let alloc_bitmap = fs.dev.blocks[1][0];
+        assert_eq!(alloc_bitmap, 0b0000_0011);
+
+        // check the first 3 directory entried of the root directory
+        let dir_entries = &fs.dev.blocks[0][..32 * 3];
+        #[rustfmt::skip]
+        assert_eq!(
+            dir_entries,
+            &[
+                133, 2, 186, 143, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                192, 3, 0, 9, 70, 48, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0,
+                193, 0, 104, 0, 101, 0, 108, 0, 108, 0, 111, 0, 46, 0, 116, 0, 120, 0, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
+
+        // check the first sector of cluster 3
+        // there are 64 sectors in a cluster here and clusters start at 2
+        let data = &fs.dev.blocks[64][..5];
+        assert_eq!(data, b"world");
+    }
 }

@@ -40,7 +40,6 @@ pub mod asynchronous {
     pub mod file;
     pub mod file_system;
     #[cfg(feature = "embassy")]
-    #[cfg(feature = "alloc")]
     pub mod fs;
     mod slot_cache;
     mod upcase_table;

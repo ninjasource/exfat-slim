@@ -43,7 +43,7 @@ default = []
 alloc = []
 defmt = ["dep:defmt"]
 log = ["dep:log"]
-embassy = ["dep:embassy-sync", "dep:static_cell"]
+embassy = ["dep:embassy-sync", "dep:static_cell", "alloc"]
 
 [[example]]
 name = "append_file_blocking"

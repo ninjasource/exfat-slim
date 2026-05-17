@@ -50,7 +50,6 @@ where
         D: BlockDevice<SIZE>,
     {
         if self.is_dirty {
-            assert_ne!(self.sector_id, 0);
             io.write(self.sector_id, &self.blocks)
                 .await
                 .map_err(ExFatError::Io)?;
@@ -182,7 +181,7 @@ where
         let (left, right) = self.cache.split_at_mut(self.hand);
 
         for slot in right.iter_mut().chain(left) {
-            if slot.sector_id == sector_id {
+            if slot.sector_id == sector_id && slot.is_valid {
                 slot.is_used = true;
                 return Some(self.hand);
             } else {
