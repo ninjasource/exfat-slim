@@ -178,7 +178,7 @@ impl OpenOptions {
                 path: path.to_string(),
                 options: self.clone(),
             },
-            reply: token,
+            reply: Some(token),
         };
         REQ.send(req).await;
         let resp = ReplyPool::wait(token).await?;
@@ -190,20 +190,23 @@ impl OpenOptions {
     }
 }
 
+// NOTE: we use a primitive type for the file and directory handle because these
+// types implement special drop logic and we don't want to create infinite loops
+// by also using them to fulfill their own messages
 enum Op {
     ReadToString { path: String },
     Read { path: String },
     OpenFile { path: String, options: OpenOptions },
-    ReadFile { handle: FileHandle, len: usize },
-    ReadFileToEnd { handle: FileHandle },
-    ReadFileToString { handle: FileHandle },
-    WriteFile { handle: FileHandle, buffer: Vec<u8> },
-    SeekFile { handle: FileHandle, position: u64 },
-    CloseFile { handle: FileHandle },
-    FlushFile { handle: FileHandle },
-    Metadata { handle: FileHandle },
+    ReadFile { handle: u32, len: usize },
+    ReadFileToEnd { handle: u32 },
+    ReadFileToString { handle: u32 },
+    WriteFile { handle: u32, buffer: Vec<u8> },
+    SeekFile { handle: u32, position: u64 },
+    CloseFile { handle: u32 },
+    FlushFile { handle: u32 },
+    Metadata { handle: u32 },
     OpenDirectory { path: String },
-    DirectoryNextEntry { handle: DirectoryHandle },
+    DirectoryNextEntry { handle: u32 },
     Exists { path: String },
     RemoveFile { path: String },
     CreateDirectory { path: String },
@@ -211,11 +214,12 @@ enum Op {
     Rename { from_path: String, to_path: String },
     RemoveDir { path: String },
     Write { path: String, buffer: Vec<u8> },
+    CloseDirectory { handle: u32 },
 }
 
 struct Req {
     op: Op,
-    reply: ReplyToken,
+    reply: Option<ReplyToken>,
 }
 
 pub struct DirectoryHandle(u32);
@@ -224,10 +228,8 @@ impl DirectoryHandle {
     pub async fn next_entry(&self) -> Result<Option<DirectoryEntryOwned>, Error> {
         let token = ReplyPool::acquire().await;
         let req = Req {
-            op: Op::DirectoryNextEntry {
-                handle: DirectoryHandle(self.0),
-            },
-            reply: token,
+            op: Op::DirectoryNextEntry { handle: self.0 },
+            reply: Some(token),
         };
         REQ.send(req).await;
         let resp = ReplyPool::wait(token).await?;
@@ -246,10 +248,10 @@ impl FileHandle {
         let token = ReplyPool::acquire().await;
         let req = Req {
             op: Op::ReadFile {
-                handle: FileHandle(self.0),
+                handle: self.0,
                 len: buf.len(),
             },
-            reply: token,
+            reply: Some(token),
         };
         REQ.send(req).await;
         let resp = ReplyPool::wait(token).await?;
@@ -271,10 +273,8 @@ impl FileHandle {
     pub async fn read_to_end(&self) -> Result<Vec<u8>, Error> {
         let token = ReplyPool::acquire().await;
         let req = Req {
-            op: Op::ReadFileToEnd {
-                handle: FileHandle(self.0),
-            },
-            reply: token,
+            op: Op::ReadFileToEnd { handle: self.0 },
+            reply: Some(token),
         };
         REQ.send(req).await;
         let resp = ReplyPool::wait(token).await?;
@@ -288,10 +288,8 @@ impl FileHandle {
     pub async fn read_to_string(&self) -> Result<String, Error> {
         let token = ReplyPool::acquire().await;
         let req = Req {
-            op: Op::ReadFileToString {
-                handle: FileHandle(self.0),
-            },
-            reply: token,
+            op: Op::ReadFileToString { handle: self.0 },
+            reply: Some(token),
         };
         REQ.send(req).await;
         let resp = ReplyPool::wait(token).await?;
@@ -311,10 +309,10 @@ impl FileHandle {
         let token = ReplyPool::acquire().await;
         let req = Req {
             op: Op::WriteFile {
-                handle: FileHandle(self.0),
+                handle: self.0,
                 buffer: buffer.into(),
             },
-            reply: token,
+            reply: Some(token),
         };
         REQ.send(req).await;
         let resp = ReplyPool::wait(token).await?;
@@ -329,10 +327,10 @@ impl FileHandle {
         let token = ReplyPool::acquire().await;
         let req = Req {
             op: Op::SeekFile {
-                handle: FileHandle(self.0),
+                handle: self.0,
                 position,
             },
-            reply: token,
+            reply: Some(token),
         };
         REQ.send(req).await;
         let resp = ReplyPool::wait(token).await?;
@@ -346,10 +344,8 @@ impl FileHandle {
     pub async fn metdata(&self) -> Result<Metadata, Error> {
         let token = ReplyPool::acquire().await;
         let req = Req {
-            op: Op::Metadata {
-                handle: FileHandle(self.0),
-            },
-            reply: token,
+            op: Op::Metadata { handle: self.0 },
+            reply: Some(token),
         };
         REQ.send(req).await;
         let resp = ReplyPool::wait(token).await?;
@@ -364,10 +360,8 @@ impl FileHandle {
     pub async fn close(self) -> Result<(), Error> {
         let token = ReplyPool::acquire().await;
         let req = Req {
-            op: Op::CloseFile {
-                handle: FileHandle(self.0),
-            },
-            reply: token,
+            op: Op::CloseFile { handle: self.0 },
+            reply: Some(token),
         };
         REQ.send(req).await;
         let resp = ReplyPool::wait(token).await?;
@@ -385,10 +379,8 @@ impl FileHandle {
     pub async fn flush(&self) -> Result<(), Error> {
         let token = ReplyPool::acquire().await;
         let req = Req {
-            op: Op::FlushFile {
-                handle: FileHandle(self.0),
-            },
-            reply: token,
+            op: Op::FlushFile { handle: self.0 },
+            reply: Some(token),
         };
         REQ.send(req).await;
         let resp = ReplyPool::wait(token).await?;
@@ -406,17 +398,21 @@ impl Drop for FileHandle {
     // If you want to be sure that the file was closed without error
     // then call the close or flush functions explicitly
     fn drop(&mut self) {
-        // TODO: get this to work
+        let req = Req {
+            op: Op::CloseFile { handle: self.0 },
+            reply: None,
+        };
+        REQ.try_send(req).ok();
+    }
+}
 
-        /*
-        let handle = FileHandle(self.0);
-        if let Some(reply) = ReplyPool::try_acquire() {
-            let req = Req {
-                op: Op::CloseFile { handle },
-                reply,
-            };
-            REQ.try_send(req).ok();
-        }*/
+impl Drop for DirectoryHandle {
+    fn drop(&mut self) {
+        let req = Req {
+            op: Op::CloseDirectory { handle: self.0 },
+            reply: None,
+        };
+        REQ.try_send(req).ok();
     }
 }
 
@@ -427,7 +423,7 @@ pub async fn open(path: &str, options: OpenOptions) -> Result<FileHandle, Error>
             path: path.to_string(),
             options,
         },
-        reply: token,
+        reply: Some(token),
     };
     REQ.send(req).await;
     let resp = ReplyPool::wait(token).await?;
@@ -444,7 +440,7 @@ pub async fn read_to_string(path: &str) -> Result<String, Error> {
         op: Op::ReadToString {
             path: path.to_string(),
         },
-        reply: token,
+        reply: Some(token),
     };
     REQ.send(req).await;
     let resp = ReplyPool::wait(token).await?;
@@ -461,7 +457,7 @@ pub async fn read(path: &str) -> Result<Vec<u8>, Error> {
         op: Op::Read {
             path: path.to_string(),
         },
-        reply: token,
+        reply: Some(token),
     };
     REQ.send(req).await;
     let resp = ReplyPool::wait(token).await?;
@@ -478,7 +474,7 @@ pub async fn read_dir(path: &str) -> Result<DirectoryHandle, Error> {
         op: Op::OpenDirectory {
             path: path.to_string(),
         },
-        reply: token,
+        reply: Some(token),
     };
     REQ.send(req).await;
     let resp = ReplyPool::wait(token).await?;
@@ -495,7 +491,7 @@ pub async fn exists(path: &str) -> Result<bool, Error> {
         op: Op::Exists {
             path: path.to_string(),
         },
-        reply: token,
+        reply: Some(token),
     };
     REQ.send(req).await;
     let resp = ReplyPool::wait(token).await?;
@@ -512,7 +508,7 @@ pub async fn remove_file(path: &str) -> Result<(), Error> {
         op: Op::RemoveFile {
             path: path.to_string(),
         },
-        reply: token,
+        reply: Some(token),
     };
     REQ.send(req).await;
     let resp = ReplyPool::wait(token).await?;
@@ -529,7 +525,7 @@ pub async fn create_directory(path: &str) -> Result<(), Error> {
         op: Op::CreateDirectory {
             path: path.to_string(),
         },
-        reply: token,
+        reply: Some(token),
     };
     REQ.send(req).await;
     let resp = ReplyPool::wait(token).await?;
@@ -547,7 +543,7 @@ pub async fn copy(path_from: &str, path_to: &str) -> Result<(), Error> {
             from_path: path_from.to_string(),
             to_path: path_to.to_string(),
         },
-        reply: token,
+        reply: Some(token),
     };
     REQ.send(req).await;
     let resp = ReplyPool::wait(token).await?;
@@ -565,7 +561,7 @@ pub async fn rename(path_from: &str, path_to: &str) -> Result<(), Error> {
             from_path: path_from.to_string(),
             to_path: path_to.to_string(),
         },
-        reply: token,
+        reply: Some(token),
     };
     REQ.send(req).await;
     let resp = ReplyPool::wait(token).await?;
@@ -582,7 +578,7 @@ pub async fn remove_directory(path: &str) -> Result<(), Error> {
         op: Op::RemoveDir {
             path: path.to_string(),
         },
-        reply: token,
+        reply: Some(token),
     };
     REQ.send(req).await;
     let resp = ReplyPool::wait(token).await?;
@@ -602,7 +598,7 @@ pub async fn write(path: &str, buffer: impl Into<Cow<'_, [u8]>>) -> Result<(), E
             path: path.to_string(),
             buffer: buffer.into(),
         },
-        reply: token,
+        reply: Some(token),
     };
     REQ.send(req).await;
     let resp = ReplyPool::wait(token).await?;
@@ -869,15 +865,21 @@ where
 
         match handle_req(op, &mut fs_manager).await {
             Ok(resp) => {
-                ReplyPool::complete(reply, Ok(resp));
+                if let Some(reply) = reply {
+                    ReplyPool::complete(reply, Ok(resp))
+                }
             }
             Err(Error::NoCard) => {
                 fs_manager.unmount();
                 info!("no card, unmounted");
-                ReplyPool::complete(reply, Err(Error::NoCard))
+                if let Some(reply) = reply {
+                    ReplyPool::complete(reply, Err(Error::NoCard))
+                }
             }
             Err(e) => {
-                ReplyPool::complete(reply, Err(e));
+                if let Some(reply) = reply {
+                    ReplyPool::complete(reply, Err(e));
+                }
             }
         }
     }
@@ -908,44 +910,44 @@ where
             Resp::FileOpen { handle }
         }
         Op::ReadFileToString { handle } => {
-            let file = files.get(handle.0)?;
+            let file = files.get(handle)?;
             let data = file.read_to_string(file_system).await?;
             Resp::ReadToString { data }
         }
         Op::ReadFileToEnd { handle } => {
-            let file = files.get(handle.0)?;
+            let file = files.get(handle)?;
             let mut data = Vec::new();
             file.read_to_end(file_system, &mut data).await?;
             Resp::Read { data }
         }
         Op::SeekFile { handle, position } => {
-            let file = files.get(handle.0)?;
+            let file = files.get(handle)?;
             file.seek(file_system, position).await?;
             Resp::Ok
         }
         Op::ReadFile { handle, len } => {
-            let file = files.get(handle.0)?;
+            let file = files.get(handle)?;
             let mut data = vec![0u8; len];
             file.read(file_system, &mut data).await?;
             Resp::Read { data }
         }
         Op::WriteFile { handle, buffer } => {
-            let file = files.get(handle.0)?;
+            let file = files.get(handle)?;
             file.write(file_system, &buffer).await?;
             Resp::Ok
         }
         Op::CloseFile { handle } => {
-            let file = files.remove(handle.0)?;
+            let file = files.remove(handle)?;
             file.close(file_system).await?;
             Resp::Ok
         }
         Op::FlushFile { handle } => {
-            let file = files.get(handle.0)?;
+            let file = files.get(handle)?;
             file.flush(file_system).await?;
             Resp::Ok
         }
         Op::Metadata { handle } => {
-            let file = files.get(handle.0)?;
+            let file = files.get(handle)?;
             let data = file.metadata();
             Resp::Metadata { data }
         }
@@ -955,7 +957,7 @@ where
             Resp::DirectoryOpen { handle }
         }
         Op::DirectoryNextEntry { handle } => {
-            let dir = dirs.get(handle.0)?;
+            let dir = dirs.get(handle)?;
             let mut name_buf = [0; MAX_NAME_LEN];
             let data =
                 dir.next_entry(file_system, &mut name_buf)
@@ -992,6 +994,10 @@ where
         }
         Op::Write { path, buffer } => {
             file_system.write(&path, &buffer).await?;
+            Resp::Ok
+        }
+        Op::CloseDirectory { handle } => {
+            dirs.remove(handle)?;
             Resp::Ok
         }
     };
