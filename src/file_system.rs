@@ -26,6 +26,8 @@ use super::{
 pub type ExFatResult<T, D, const SIZE: usize> =
     core::result::Result<T, ExFatError<<D as BlockDevice<SIZE>>::Error>>;
 
+const MIN_TIMESTAMP: u32 = 0x0021_0000;
+
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone)]
 pub(crate) struct FileSystemDetails {
@@ -641,9 +643,9 @@ where
             secondary_count,
             set_checksum: 0,
             file_attributes,
-            create_timestamp: 0,
-            last_modified_timestamp: 0,
-            last_accessed_timestamp: 0,
+            create_timestamp: MIN_TIMESTAMP,
+            last_modified_timestamp: MIN_TIMESTAMP,
+            last_accessed_timestamp: MIN_TIMESTAMP,
             create_10ms_increment: 0,
             last_modified_10ms_increment: 0,
             create_utc_offset: 0,
