@@ -21,7 +21,7 @@ use embassy_sync::{
 
 use crate::asynchronous::{
     BlockDevice, boot_sector,
-    directory::{DirectoryEntry, DirectoryIterator},
+    directory::{DirectoryEntryOwned, DirectoryIterator, MAX_NAME_LEN},
     directory_entry::{self},
     error::ExFatError,
     file::{File, Metadata, OpenOptions},
@@ -221,7 +221,7 @@ struct Req {
 pub struct DirectoryHandle(u32);
 
 impl DirectoryHandle {
-    pub async fn next_entry(&self) -> Result<Option<DirectoryEntry>, Error> {
+    pub async fn next_entry(&self) -> Result<Option<DirectoryEntryOwned>, Error> {
         let token = ReplyPool::acquire().await;
         let req = Req {
             op: Op::DirectoryNextEntry {
@@ -664,7 +664,7 @@ enum Resp {
     FileOpen { handle: FileHandle },
     DirectoryOpen { handle: DirectoryHandle },
     Metadata { data: Metadata },
-    DirectoryEntry { data: Option<DirectoryEntry> },
+    DirectoryEntry { data: Option<DirectoryEntryOwned> },
     Exists { exists: bool },
 }
 
@@ -955,7 +955,14 @@ where
         }
         Op::DirectoryNextEntry { handle } => {
             let dir = dirs.get(handle.0)?;
-            let data = dir.next_entry(file_system).await?;
+            let mut name_buf = [0; MAX_NAME_LEN];
+            let data =
+                dir.next_entry(file_system, &mut name_buf)
+                    .await?
+                    .map(|x| DirectoryEntryOwned {
+                        metadata: x.metadata,
+                        name: x.name.to_string(),
+                    });
             Resp::DirectoryEntry { data }
         }
         Op::Exists { path } => {

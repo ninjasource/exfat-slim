@@ -569,10 +569,10 @@ where
                 Some(FileAttributes::Directory),
             );
             let mut entries = DirectoryEntryChain::new(cluster_id, &self.fs);
-            let file_details = entries.next_file_entry(self, &filter).await?;
+            let file_details = entries.next_file_entry(self, &filter, None).await?;
 
             match file_details {
-                Some(file_details) => {
+                Some((file_details, _)) => {
                     // directory already exists
                     cluster_id = file_details.first_cluster;
                 }

@@ -1,9 +1,12 @@
+use core::char::decode_utf16;
+
 use bitflags::bitflags;
 use thiserror::Error;
 
 use super::{
     BlockDevice, bisync,
     directory::DirectoryEntryFilter,
+    error::ExFatError,
     file::{FileDetails, Touched, TouchedKind, TouchedSector},
     file_system::{ExFatResult, FileSystem, FileSystemDetails},
     utils::{read_u16_le, read_u32_le, read_u64_le},
@@ -481,12 +484,15 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
         Ok(None)
     }
 
+    // returns the number of bytes needed to store all utf8 encoded characters for the
+    // file or directory name. Zero if name_buff is None. In that case file name decoding is skipped.
     #[bisync]
     pub(crate) async fn next_file_entry<D, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
         filter: &impl DirectoryEntryFilter,
-    ) -> ExFatResult<Option<FileDetails>, D, SIZE>
+        mut name_buf: Option<&mut [u8]>,
+    ) -> ExFatResult<Option<(FileDetails, usize)>, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
@@ -510,7 +516,8 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
                         return Ok(None);
                     }
 
-                    let mut cursor = 0;
+                    let mut cursor: usize = 0;
+                    let mut name_units = [0u16; 255];
                     'inner: loop {
                         if let Some((file_name_entry, _location)) = self.next(fs).await? {
                             let Some(file_name_entry) =
@@ -527,6 +534,11 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
                             ) {
                                 return Ok(None);
                             } else {
+                                if name_buf.is_some() {
+                                    name_units[cursor..cursor + len]
+                                        .copy_from_slice(&file_name_entry.file_name[..len]);
+                                }
+
                                 cursor += len;
                                 if cursor == name_length {
                                     break 'inner;
@@ -546,7 +558,14 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
                         flags: stream_entry.general_secondary_flags,
                         secondary_count: file_dir_entry.secondary_count,
                     };
-                    return Ok(Some(file_details));
+
+                    let utf8_name_length = if let Some(name_buffer) = name_buf.as_deref_mut() {
+                        decode_utf16_to_utf8::<D, SIZE, N>(&name_units[..name_length], name_buffer)?
+                    } else {
+                        0
+                    };
+
+                    return Ok(Some((file_details, utf8_name_length)));
                 } else {
                     return Ok(None);
                 }
@@ -621,6 +640,35 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
         self.cursor += 1;
         Ok(Some((entry, location)))
     }
+}
+
+// note that utf16 characters can span more than a single u16 (e.g. emojis)
+// this is why we have to collect ALL codepoints for the filename before decoding
+// otherwise we would have to keep track of previously encountered codepoints when iterating
+// though a file name that is chunked between multiple dir entries
+pub(crate) fn decode_utf16_to_utf8<D, const SIZE: usize, const N: usize>(
+    uft16: &[u16],
+    utf8: &mut [u8],
+) -> ExFatResult<usize, D, SIZE>
+where
+    D: BlockDevice<SIZE>,
+{
+    let mut cursor = 0;
+    for ch in decode_utf16(uft16.iter().copied()) {
+        let ch = ch.map_err(|_| ExFatError::InvalidUtf16String {
+            reason: "file name contains an invalid utf16 character",
+        })?;
+
+        let needed = ch.len_utf8();
+        if cursor + needed <= utf8.len() {
+            ch.encode_utf8(&mut utf8[cursor..cursor + needed]);
+            cursor += needed;
+        } else {
+            return Err(ExFatError::FileNameBufferTooSmall);
+        }
+    }
+
+    Ok(cursor)
 }
 
 pub(crate) fn is_end_of_directory(directory_entry: &[u8; 32]) -> bool {

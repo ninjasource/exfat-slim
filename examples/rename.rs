@@ -1,6 +1,9 @@
 mod common;
 use crate::common::{BLOCK_SIZE, N, asynchronous::InMemoryBlockDevice};
-use exfat_slim::asynchronous::{ file_system::{ExFatResult, FileSystem},};
+use exfat_slim::asynchronous::{
+    directory::MAX_NAME_LEN,
+    file_system::{ExFatResult, FileSystem},
+};
 use log::info;
 
 /// a rename can also be considered to be a move if it changes directories
@@ -20,7 +23,8 @@ async fn main() -> ExFatResult<(), InMemoryBlockDevice, BLOCK_SIZE> {
 
     let path = "/temp2";
     let mut list = fs.read_dir(path).await?;
-    while let Some(item) = list.next_entry(&mut fs).await? {
+    let mut name_buff = [0; MAX_NAME_LEN];
+    while let Some(item) = list.next_entry(&mut fs, &mut name_buff).await? {
         info!("{:?}", item);
     }
 

@@ -1,7 +1,10 @@
 mod common;
 
 use crate::common::{BLOCK_SIZE, N, asynchronous::InMemoryBlockDevice};
-use exfat_slim::asynchronous::file_system::{ExFatResult, FileSystem};
+use exfat_slim::asynchronous::{
+    directory::MAX_NAME_LEN,
+    file_system::{ExFatResult, FileSystem},
+};
 use log::info;
 
 #[tokio::main(flavor = "current_thread")]
@@ -49,7 +52,8 @@ async fn main() -> ExFatResult<(), InMemoryBlockDevice, BLOCK_SIZE> {
     // confirm that the file was created in the directory
     info!("list entries in directory {directory}");
     let mut list = fs.read_dir(directory).await?;
-    while let Some(item) = list.next_entry(&mut fs).await? {
+    let mut name_buf = [0; MAX_NAME_LEN];
+    while let Some(item) = list.next_entry(&mut fs, &mut name_buf).await? {
         info!("{:?}", item);
     }
 

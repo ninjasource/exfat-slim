@@ -1,19 +1,20 @@
-use core::char::decode_utf16;
+use core::str::from_utf8;
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 
 use super::{
     BlockDevice, bisync,
-    directory_entry::{
-        DirectoryEntryChain, FileAttributes, FileNameDirEntry, StreamExtensionDirEntry,
-    },
+    directory_entry::{DirectoryEntryChain, FileAttributes},
     error::ExFatError,
     file::{FileDetails, Metadata},
     file_system::{ExFatResult, FileSystem},
     upcase_table::UpcaseTable,
     utils::encode_utf16_upcase_and_hash,
 };
+
+/// The maximum number of bytes required to store the longest possible file name in utf8
+pub const MAX_NAME_LEN: usize = 765;
 
 pub(crate) trait DirectoryEntryFilter {
     fn hash(&self, file_name_hash: u16, file_attributes: FileAttributes) -> bool;
@@ -125,10 +126,10 @@ where
 
         let filter = ExactNameFilter::new(part, &fs.upcase_table, attributes);
         let mut entries = DirectoryEntryChain::new(cluster_id, &fs.fs);
-        let file_details = entries.next_file_entry(fs, &filter).await?;
+        let file_details = entries.next_file_entry(fs, &filter, None).await?;
 
         match file_details {
-            Some(file_details) => {
+            Some((file_details, _name_buf_len)) => {
                 if is_last {
                     // file or directory (there might be a directory and a file with the same name but that would have been filtered out above)
                     return Ok(Some(file_details));
@@ -186,138 +187,45 @@ pub struct DirectoryIterator<const SIZE: usize> {
 }
 
 #[derive(Debug)]
-pub struct DirectoryEntry {
-    details: FileDetails,
+#[cfg(feature = "alloc")]
+pub struct DirectoryEntryOwned {
+    pub metadata: Metadata,
+    pub name: String,
 }
 
-impl DirectoryEntry {
-    /// file or directly name using a buffer
-    #[bisync]
-    pub async fn file_name_into<'a, D, const SIZE: usize, const N: usize>(
-        &self,
-        fs: &mut FileSystem<D, SIZE, N>,
-        buf: &'a mut [u8],
-    ) -> ExFatResult<&'a str, D, SIZE>
-    where
-        D: BlockDevice<SIZE>,
-    {
-        let mut chain = DirectoryEntryChain::new_from_file_details(&self.details, &fs.fs);
-        let mut count = 0;
-        let mut name_len = 0;
-        let mut cursor = 0;
-
-        while let Some((dir_entry, _location)) = chain.next(fs).await? {
-            match count {
-                0 => {
-                    // ignore
-                }
-                1 => {
-                    let stream_ext: StreamExtensionDirEntry = dir_entry.into();
-                    name_len = stream_ext.name_length as usize;
-                }
-                _ => {
-                    if name_len == 0 {
-                        return Ok("");
-                    }
-
-                    let file_name: FileNameDirEntry = dir_entry.into();
-                    let len = file_name.file_name.len().min(name_len - cursor);
-                    for ch in decode_utf16((file_name.file_name[..len]).iter().copied()) {
-                        let ch = ch.map_err(|_| ExFatError::InvalidUtf16String {
-                            reason: "file name contains an invalif utf16 character",
-                        })?;
-
-                        let needed = ch.len_utf8();
-                        if cursor + needed < buf.len() {
-                            ch.encode_utf8(&mut buf[cursor..cursor + needed]);
-                            cursor += needed;
-                        } else {
-                            return Err(ExFatError::FileNameBufferTooSmall);
-                        }
-                    }
-                }
-            }
-
-            count += 1;
-        }
-
-        let s = core::str::from_utf8(&buf[..cursor]).map_err(|_| ExFatError::Utf8Error)?;
-        Ok(s)
-    }
-
-    /// file or directly name
-    #[cfg(feature = "alloc")]
-    #[bisync]
-    pub async fn file_name<'a, D, const SIZE: usize, const N: usize>(
-        &self,
-        fs: &mut FileSystem<D, SIZE, N>,
-    ) -> ExFatResult<String, D, SIZE>
-    where
-        D: BlockDevice<SIZE>,
-    {
-        let mut chain = DirectoryEntryChain::new_from_file_details(&self.details, &fs.fs);
-        let mut count = 0;
-        let mut name_len = 0;
-        let mut cursor = 0;
-        let mut s = String::new();
-
-        while let Some((dir_entry, _location)) = chain.next(fs).await? {
-            match count {
-                0 => {
-                    // ignore
-                }
-                1 => {
-                    let stream_ext: StreamExtensionDirEntry = dir_entry.into();
-                    name_len = stream_ext.name_length as usize;
-
-                    // best guess on how much space this will take up (may take more for unicode chars)
-                    s = String::with_capacity(name_len);
-                }
-                _ => {
-                    if name_len == 0 {
-                        return Ok(String::new());
-                    }
-
-                    let file_name: FileNameDirEntry = dir_entry.into();
-                    let len = file_name.file_name.len().min(name_len - cursor);
-                    for ch in decode_utf16((&file_name.file_name[..len]).iter().copied()) {
-                        let ch = ch.map_err(|_| ExFatError::InvalidUtf16String {
-                            reason: "file name contains an invalif utf16 character",
-                        })?;
-
-                        s.push(ch);
-                        cursor += 1;
-                    }
-                }
-            }
-
-            count += 1;
-        }
-        Ok(s)
-    }
-
-    /// metadata for the file or directory
-    pub fn metadata(&self) -> Metadata {
-        Metadata {
-            details: self.details.clone(),
-        }
-    }
+#[derive(Debug)]
+pub struct DirectoryEntry<'a> {
+    pub metadata: Metadata,
+    pub name: &'a str,
 }
 
 impl<const SIZE: usize> DirectoryIterator<SIZE> {
+    // if name_buf is too small to hold a file or directory name (just the name, not the whole path)
+    // then a FileNameBufferTooSmall error is retured
     #[bisync]
-    pub async fn next_entry<D, const N: usize>(
+    pub async fn next_entry<'a, D, const N: usize>(
         &mut self,
         fs: &mut FileSystem<D, SIZE, N>,
-    ) -> ExFatResult<Option<DirectoryEntry>, D, SIZE>
+        name_buf: &'a mut [u8], // should be large enough to hold a file name of 255 unicode chars (MAX_NAME_LEN bytes)
+    ) -> ExFatResult<Option<DirectoryEntry<'a>>, D, SIZE>
     where
         D: BlockDevice<SIZE>,
     {
         let filter = AllPassFilter {};
-        Ok(self
+        let entry = self
             .entries
-            .next_file_entry(fs, &filter)
-            .await?
-            .map(|x| DirectoryEntry { details: x.clone() }))
+            .next_file_entry(fs, &filter, Some(name_buf))
+            .await?;
+
+        match entry {
+            Some((details, uft8_name_len)) => {
+                let metadata = Metadata { details };
+                let name =
+                    from_utf8(&name_buf[..uft8_name_len]).map_err(|_| ExFatError::Utf8Error)?;
+                let dir_file_entry = DirectoryEntry { metadata, name };
+                Ok(Some(dir_file_entry))
+            }
+            None => Ok(None),
+        }
     }
 }
