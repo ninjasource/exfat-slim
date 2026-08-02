@@ -259,7 +259,8 @@ impl FileHandle {
                 if data.is_empty() {
                     Ok(None)
                 } else {
-                    buf.copy_from_slice(&data);
+                    // we may not get all the bytes we asked for (say is we encountered an EOF)
+                    buf[..data.len()].copy_from_slice(&data);
                     Ok(Some(data.len()))
                 }
             }

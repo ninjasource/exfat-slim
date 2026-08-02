@@ -1,7 +1,7 @@
 use aligned::Aligned;
 
 #[cfg(feature = "alloc")]
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 
 use super::{
     BlockDevice,
@@ -425,38 +425,57 @@ impl File {
             return Err(ExFatError::ReadNotEnabled);
         }
 
-        let remainder_in_file = self.details.valid_data_length - self.cursor;
-
         // check for end of file
         if self.eof() {
             return Ok(None);
         }
 
-        self.next_cluster_if_required(fs).await?;
-        let cluster_id = self.current_cluster;
-        let cluster_offset = self.get_cluster_offset(fs);
-        let start_sector_id = fs.fs.get_heap_sector_id::<D, SIZE>(cluster_id)?;
-        let sector_id = start_sector_id + cluster_offset / SIZE as u32;
-        let sector_offset = cluster_offset as usize % SIZE;
-        let remainder_in_sector = SIZE - sector_offset;
+        // check if the user passed an empty buffer
+        if buf.is_empty() {
+            return Ok(Some(0));
+        }
 
-        // calculate max num bytes we can read
-        let num_bytes = (remainder_in_sector as u64)
-            .min(remainder_in_file)
-            .min(buf.len() as u64) as usize;
+        let mut bytes_read = 0;
 
-        // read a single sector and copy the bytes into the user supplied buffer
-        let slot = fs.data_blocks.read(sector_id, &mut fs.dev).await?;
-        buf[..num_bytes]
-            .copy_from_slice(&slot.as_slice()[sector_offset..sector_offset + num_bytes]);
+        loop {
+            let file_remainder = self.details.data_length.saturating_sub(self.cursor);
+            let valid_remainder = self.details.valid_data_length.saturating_sub(self.cursor);
 
-        // update file read cursor position
-        self.move_file_cursor::<D, SIZE>(num_bytes).await?;
+            self.next_cluster_if_required(fs).await?;
+            let cluster_id = self.current_cluster;
+            let cluster_offset = self.get_cluster_offset(fs);
+            let start_sector_id = fs.fs.get_heap_sector_id::<D, SIZE>(cluster_id)?;
+            let sector_id = start_sector_id + cluster_offset / SIZE as u32;
+            let sector_offset = cluster_offset as usize % SIZE;
+            let remainder_in_sector = SIZE - sector_offset;
 
-        Ok(Some(num_bytes))
+            // calculate max num bytes we can read
+            let mut chunk_bytes = (remainder_in_sector as u64)
+                .min(file_remainder)
+                .min((buf.len() - bytes_read) as u64) as usize;
+
+            if valid_remainder > 0 {
+                chunk_bytes = chunk_bytes.min(valid_remainder as usize);
+                // read a single sector and copy the bytes into the user supplied buffer
+                let slot = fs.data_blocks.read(sector_id, &mut fs.dev).await?;
+                buf[bytes_read..bytes_read + chunk_bytes]
+                    .copy_from_slice(&slot.as_slice()[sector_offset..sector_offset + chunk_bytes]);
+            } else {
+                // the exfat spec allows the user to read past the valid data length in the file
+                // in that case we need to fill the buffer with zeros instead of what is actually on disk
+                buf[bytes_read..bytes_read + chunk_bytes].fill(0);
+            }
+
+            self.move_file_cursor(chunk_bytes);
+            bytes_read += chunk_bytes;
+
+            if bytes_read == buf.len() || self.eof() {
+                return Ok(Some(bytes_read));
+            }
+        }
     }
 
-    /// Read all bytes from file into the buffer, extending the buffer by the length of the file
+    /// Read all bytes from file into the buffer, appending them onto the end of buf and returning the number of bytes read.
     ///
     /// This behaves the same way the Rust std library equivalent function works
     /// If you only want the buf to contain file bytes then pass in an empty buf (length zero)
@@ -465,7 +484,7 @@ impl File {
     /// and the file will be copied from position 0 in the buf (if it is length 0)
     ///
     /// Exfat has the concept of valid_data_length which is less than or equal to data_length.
-    /// If a zero length Vec is passed it will be extended to data_length size and the bytes between valid_data_length and data_length will contain zeros.
+    /// Read_to_end will read up to data_length and pad with zeros after valid_data_length
     #[cfg(feature = "alloc")]
     #[bisync]
     pub async fn read_to_end<D, const SIZE: usize, const N: usize>(
@@ -477,26 +496,16 @@ impl File {
         D: BlockDevice<SIZE>,
     {
         fs.mount().await?;
-        let len = self.details.valid_data_length as usize;
-        let valid_len = self.details.valid_data_length as usize;
 
-        // fill empty space with zeros
+        let len = self.details.data_length.saturating_sub(self.cursor) as usize;
         let start = buf.len();
-        buf.resize(buf.len() + len, 0);
-
-        // reading in block size chunks from position 0 is the most efficient way to get data off the disk in one go
-        // we can ignore the len returned from the read operation as a result
-        // we are only interested in reading valid_data_length bytes as the rest are garbage and we return zeros instead (initialized above)
-        let (blocks, remainder) = buf[start..start + valid_len].as_chunks_mut::<SIZE>();
-        for block in blocks {
-            self.read(fs, block.as_mut_slice()).await?;
-        }
-        self.read(fs, remainder).await?;
-
-        Ok(len)
+        buf.resize(start + len, 0);
+        let filled = self.read_to_end_inner(fs, &mut buf[start..]).await?;
+        buf.truncate(start + filled); // no-op unless an early EOF was encountered
+        Ok(filled)
     }
 
-    /// Read all bytes from file and interprets them as a utf8 encoded string
+    /// Read all valid bytes from file and interprets them as a utf8 encoded string
     #[cfg(feature = "alloc")]
     #[bisync]
     pub async fn read_to_string<D, const SIZE: usize, const N: usize>(
@@ -508,14 +517,36 @@ impl File {
     {
         fs.mount().await?;
 
-        // because multi byte characters may cross sector boundaries
-        // I recon its safer to read the entire file into a buffer before decoding it
-        let mut buf = Vec::new();
-        let len = self.read_to_end(fs, &mut buf).await?;
-        let decoded = core::str::from_utf8(&buf[..len])
+        // this differs from read_to_end because we don't want zero padded files
+        // as this would give us null strings at the end of the file. Therefore we use valid_data_length
+        let len = self.details.valid_data_length.saturating_sub(self.cursor) as usize;
+        let mut buf = vec![0u8; len];
+        let filled = self.read_to_end_inner(fs, &mut buf).await?;
+        let decoded = core::str::from_utf8(&buf[..filled])
             .map_err(|_| ExFatError::Utf8Error)?
             .into();
         Ok(decoded)
+    }
+
+    #[bisync]
+    #[cfg(feature = "alloc")]
+    async fn read_to_end_inner<D, const SIZE: usize, const N: usize>(
+        &mut self,
+        fs: &mut FileSystem<D, SIZE, N>,
+        buf: &mut [u8],
+    ) -> ExFatResult<usize, D, SIZE>
+    where
+        D: BlockDevice<SIZE>,
+    {
+        let mut filled = 0;
+        while filled < buf.len() {
+            match self.read(fs, &mut buf[filled..]).await? {
+                Some(n) if n > 0 => filled += n,
+                _ => break, // unexpected EOF
+            }
+        }
+
+        Ok(filled)
     }
 
     fn should_convert_to_fat_chain(&self, run: &AllocatedRun) -> bool {
@@ -677,14 +708,18 @@ impl File {
 
         // allocate new clusters if required
         let used_in_cluster = (data_length % fs.fs.cluster_length as u64) as u32;
-        let remaining_bytes_in_current_cluster = fs.fs.cluster_length - used_in_cluster;
-        if buf.len() > remaining_bytes_in_current_cluster as usize {
-            let num_bytes = buf.len() - remaining_bytes_in_current_cluster as usize;
-            self.allocate_clusters_for(fs, num_bytes).await?;
-        } else if data_length > 0 && used_in_cluster == 0 || self.current_cluster == NO_CLUSTER_ID {
-            self.allocate_clusters_for(fs, fs.fs.cluster_length as usize)
+        let last_cluster_is_full = data_length > 0 && used_in_cluster == 0;
+        let free_in_last_cluster = if self.current_cluster == NO_CLUSTER_ID || last_cluster_is_full
+        {
+            0
+        } else {
+            (fs.fs.cluster_length - used_in_cluster) as usize
+        };
+        if buf.len() > free_in_last_cluster {
+            self.allocate_clusters_for(fs, buf.len() - free_in_last_cluster)
                 .await?;
         }
+
         self.update_data_length(buf.len());
 
         // write the first sector (could be partially full)
@@ -705,7 +740,7 @@ impl File {
                 fs.data_blocks
                     .write(&mut fs.dev, sector_id, &aligned)
                     .await?;
-                self.move_file_cursor::<D, SIZE>(block.len()).await?;
+                self.move_file_cursor(block.len());
             }
 
             // write the last sector (could be partially full)
@@ -715,15 +750,14 @@ impl File {
         Ok(())
     }
 
-    fn set_current_cluster<D, const SIZE: usize, const N: usize>(
+    fn update_remaining_bytes_in_cluster<D, const SIZE: usize, const N: usize>(
         &mut self,
-        cluster_id: u32,
         fs: &FileSystem<D, SIZE, N>,
     ) where
         D: BlockDevice<SIZE>,
     {
-        self.current_cluster = cluster_id;
-        self.remaining_bytes_in_cluster = fs.fs.cluster_length;
+        self.remaining_bytes_in_cluster =
+            fs.fs.cluster_length - (self.cursor % fs.fs.cluster_length as u64) as u32
     }
 
     /// Seek to an offset, in bytes, in the file
@@ -744,11 +778,17 @@ impl File {
         self.cursor = cursor;
         let num_clusters = (cursor / fs.fs.cluster_length as u64) as u32;
         match self.chain {
-            StoredChain::Empty => self.current_cluster = self.details.first_cluster,
+            StoredChain::Empty => {
+                self.current_cluster = self.details.first_cluster;
+                self.remaining_bytes_in_cluster = 0;
+            }
             StoredChain::Contiguous {
                 first,
                 cluster_count: _cluster_count,
-            } => self.set_current_cluster(first + num_clusters, fs),
+            } => {
+                self.current_cluster = first + num_clusters;
+                self.update_remaining_bytes_in_cluster(fs);
+            }
             StoredChain::Fat {
                 first,
                 last: _last,
@@ -766,7 +806,8 @@ impl File {
                     }
                 }
 
-                self.set_current_cluster(cluster_id, fs);
+                self.current_cluster = cluster_id;
+                self.update_remaining_bytes_in_cluster(fs);
             }
         }
 
@@ -921,7 +962,7 @@ impl File {
             slot.as_mut_slice()[start_index..end_index].copy_from_slice(&buf[..len]);
             self.touched
                 .insert(TouchedSector::new(TouchedKind::Data, sector_id));
-            self.move_file_cursor::<D, SIZE>(len).await?;
+            self.move_file_cursor(len);
             return Ok(len);
         }
 
@@ -940,20 +981,12 @@ impl File {
 
     // end of file
     fn eof(&self) -> bool {
-        self.cursor == self.details.data_length
+        self.cursor >= self.details.data_length
     }
 
-    #[bisync]
-    async fn move_file_cursor<D, const SIZE: usize>(
-        &mut self,
-        num_bytes: usize,
-    ) -> ExFatResult<(), D, SIZE>
-    where
-        D: BlockDevice<SIZE>,
-    {
+    fn move_file_cursor(&mut self, num_bytes: usize) {
         self.cursor += num_bytes as u64;
         self.remaining_bytes_in_cluster -= num_bytes as u32;
-        Ok(())
     }
 
     #[bisync]
