@@ -16,7 +16,7 @@ pub enum ExFatError<E> {
     #[error("end of fat chain")]
     EndOfFatChain,
 
-    #[error("invalid uft16 string encountered ({reason})")]
+    #[error("invalid utf16 string encountered ({reason})")]
     InvalidUtf16String { reason: &'static str },
 
     #[error("invalid file name ({reason})")]

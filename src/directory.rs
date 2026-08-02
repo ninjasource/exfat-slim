@@ -42,6 +42,7 @@ pub(crate) struct ExactNameFilter<'a> {
     file_name: &'a str,
     file_name_hash: u16,
     file_attributes: Option<FileAttributes>,
+    file_name_count: usize,
 }
 
 impl<'a> ExactNameFilter<'a> {
@@ -50,12 +51,13 @@ impl<'a> ExactNameFilter<'a> {
         upcase_table: &UpcaseTable,
         file_attributes: Option<FileAttributes>,
     ) -> Self {
-        let (file_name_hash, _file_name_count) =
+        let (file_name_hash, file_name_count) =
             encode_utf16_upcase_and_hash(file_name, upcase_table);
         Self {
             file_name,
             file_name_hash,
             file_attributes,
+            file_name_count,
         }
     }
 }
@@ -94,8 +96,9 @@ impl<'a> DirectoryEntryFilter for ExactNameFilter<'a> {
         true
     }
 
+    // the number of utf-16 units (an emoji counts as 2 u16s)
     fn file_name_length(&self, length: usize) -> bool {
-        self.file_name.len() == length
+        self.file_name_count == length
     }
 }
 
@@ -188,12 +191,14 @@ pub struct DirectoryIterator<const SIZE: usize> {
 
 #[derive(Debug)]
 #[cfg(feature = "alloc")]
+#[non_exhaustive]
 pub struct DirectoryEntryOwned {
     pub metadata: Metadata,
     pub name: String,
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct DirectoryEntry<'a> {
     pub metadata: Metadata,
     pub name: &'a str,
@@ -218,10 +223,10 @@ impl<const SIZE: usize> DirectoryIterator<SIZE> {
             .await?;
 
         match entry {
-            Some((details, uft8_name_len)) => {
+            Some((details, utf8_name_len)) => {
                 let metadata = Metadata { details };
                 let name =
-                    from_utf8(&name_buf[..uft8_name_len]).map_err(|_| ExFatError::Utf8Error)?;
+                    from_utf8(&name_buf[..utf8_name_len]).map_err(|_| ExFatError::Utf8Error)?;
                 let dir_file_entry = DirectoryEntry { metadata, name };
                 Ok(Some(dir_file_entry))
             }

@@ -20,7 +20,7 @@ pub type RawDirEntry = [u8; RAW_ENTRY_LEN];
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Error, Debug, Clone, Copy)]
 pub enum Error {
-    #[error("invalid uft16 string encountered ({reason})")]
+    #[error("invalid utf16 string encountered ({reason})")]
     InvalidUtf16String { reason: &'static str },
 }
 
@@ -513,7 +513,7 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
                     // read the entire file_name
                     let name_length = stream_entry.name_length as usize;
                     if !filter.file_name_length(name_length) {
-                        return Ok(None);
+                        continue 'outer;
                     }
 
                     let mut cursor: usize = 0;
@@ -532,7 +532,7 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
                                 cursor,
                                 &fs.upcase_table,
                             ) {
-                                return Ok(None);
+                                continue 'outer;
                             } else {
                                 if name_buf.is_some() {
                                     name_units[cursor..cursor + len]
@@ -609,7 +609,7 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
             self.fetch_required = true;
         }
 
-        if self.cluster_offset > self.fs.sectors_per_cluster as usize {
+        if self.cluster_offset >= self.fs.sectors_per_cluster as usize {
             // we have reached the end of the cluster
             let cluster_id = fs
                 .fat
@@ -647,14 +647,14 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
 // otherwise we would have to keep track of previously encountered codepoints when iterating
 // though a file name that is chunked between multiple dir entries
 pub(crate) fn decode_utf16_to_utf8<D, const SIZE: usize, const N: usize>(
-    uft16: &[u16],
+    utf16: &[u16],
     utf8: &mut [u8],
 ) -> ExFatResult<usize, D, SIZE>
 where
     D: BlockDevice<SIZE>,
 {
     let mut cursor = 0;
-    for ch in decode_utf16(uft16.iter().copied()) {
+    for ch in decode_utf16(utf16.iter().copied()) {
         let ch = ch.map_err(|_| ExFatError::InvalidUtf16String {
             reason: "file name contains an invalid utf16 character",
         })?;
