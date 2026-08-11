@@ -22,11 +22,10 @@ use super::{
     upcase_table::UpcaseTable,
     utils::{Utf16Chunks, calc_dir_entry_set_len, encode_utf16_upcase_and_hash, split_path},
 };
+use crate::timestamp::{EncodedTimestamp, Timestamp};
 
 pub type ExFatResult<T, D, const SIZE: usize> =
     core::result::Result<T, ExFatError<<D as BlockDevice<SIZE>>::Error>>;
-
-const MIN_TIMESTAMP: u32 = 0x0021_0000;
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone)]
@@ -100,6 +99,7 @@ where
     pub(crate) allocator: Allocator<D, SIZE, N>,
     pub(crate) fat: Fat<D, SIZE, N>,
     pub(crate) data_blocks: SlotCache<D, SIZE, N>,
+    pub(crate) time_provider: Option<fn() -> Timestamp>,
 }
 
 pub(crate) struct FileSystemMetadata<const SIZE: usize> {
@@ -127,18 +127,29 @@ where
             fat,
             allocator,
             data_blocks,
+            time_provider: None,
         }
     }
 
     pub fn into_inner(self) -> D {
         self.dev
     }
-}
 
-impl<D, const SIZE: usize, const N: usize> FileSystem<D, SIZE, N>
-where
-    D: BlockDevice<SIZE>,
-{
+    /// Sets the time provider for file and directory timestamps
+    pub fn set_time_provider(&mut self, time_provider: fn() -> Timestamp) {
+        self.time_provider = Some(time_provider)
+    }
+
+    pub(crate) fn get_current_timestamp(&self) -> EncodedTimestamp {
+        match self.time_provider.as_ref() {
+            Some(get_timestamp) => {
+                let timestamp = get_timestamp();
+                timestamp.encode()
+            }
+            None => EncodedTimestamp::default(),
+        }
+    }
+
     /// Calling this is optional as the file system will be automatically mounted upon first use if it is not already mounted
     /// Reads the boot sector using the block device and initializes the file system returning an instance of it
     #[bisync]
@@ -637,20 +648,21 @@ where
         let secondary_count = dir_entry_set_len as u8 - 1;
 
         let mut dir_set_writer = DirSetWriter::new(location);
+        let timestamp = self.get_current_timestamp();
 
         // write file directory entry set
         let file = FileDirEntry {
             secondary_count,
             set_checksum: 0,
             file_attributes,
-            create_timestamp: MIN_TIMESTAMP,
-            last_modified_timestamp: MIN_TIMESTAMP,
-            last_accessed_timestamp: MIN_TIMESTAMP,
-            create_10ms_increment: 0,
-            last_modified_10ms_increment: 0,
-            create_utc_offset: 0,
-            last_modified_utc_offset: 0,
-            last_accessed_utc_offset: 0,
+            create_timestamp: timestamp.packed,
+            last_modified_timestamp: timestamp.packed,
+            last_accessed_timestamp: timestamp.packed,
+            create_10ms_increment: timestamp.increment_10ms,
+            last_modified_10ms_increment: timestamp.increment_10ms,
+            create_utc_offset: timestamp.utc_offset,
+            last_modified_utc_offset: timestamp.utc_offset,
+            last_accessed_utc_offset: timestamp.utc_offset,
         };
         let file_dir = file.serialize();
         dir_set_writer.add(self, touched, &file_dir, true).await?;
@@ -694,6 +706,9 @@ where
             flags: stream_ext_flags,
             location: location_copy,
             secondary_count,
+            accessed: timestamp,
+            modified: timestamp,
+            created: timestamp,
         };
 
         Ok(file_details)
@@ -1037,7 +1052,7 @@ mod tests {
         assert_eq!(
             dir_entries,
             &[
-                133, 2, 90, 123, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+                133, 2, 114, 4, 32, 0, 0, 0, 0, 0, 33, 0, 0, 0, 33, 0, 0, 0, 33, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 192, 3, 0, 9, 70, 48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
                 193, 0, 104, 0, 101, 0, 108, 0, 108, 0, 111, 0, 46, 0, 116, 0, 120, 0, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
             ]
@@ -1076,7 +1091,7 @@ mod tests {
         assert_eq!(
             dir_entries,
             &[
-                133, 2, 186, 143, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                133, 2, 84, 24, 32, 0, 0, 0, 0, 0, 33, 0, 0, 0, 33, 0, 0, 0, 33, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 192, 3, 0, 9, 70, 48, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0,
                 193, 0, 104, 0, 101, 0, 108, 0, 108, 0, 111, 0, 46, 0, 116, 0, 120, 0, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
             ]

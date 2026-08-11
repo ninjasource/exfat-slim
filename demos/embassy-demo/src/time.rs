@@ -1,5 +1,6 @@
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use embassy_stm32::pac;
+use exfat_slim::timestamp::Timestamp;
 
 pub fn rtc_unix_ms_now() -> u64 {
     //sync_rtc_shadow_registers_once();
@@ -73,6 +74,29 @@ fn read_rtc_calendar_and_ssr_stable() -> (i32, u32, u32, u32, u32, u32, u32, u32
 
             return (year, month, day, hour, minute, second, ssr1, prediv_s);
         }
+    }
+}
+
+pub fn rtc_timestamp_now() -> Timestamp {
+    let (year, month, day, hour, minute, second, ssr, prediv_s) =
+        read_rtc_calendar_and_ssr_stable();
+    let centis = ((prediv_s - ssr) as u32 * 100 / (prediv_s as u32 + 1)) as u8;
+    let timestamp = Timestamp {
+        year: year as u16,
+        month: month as u8,
+        day: day as u8,
+        hour: hour as u8,
+        minute: minute as u8,
+        second: second as u8,
+        centis,
+        utc_offset_15min: Some(0), // UTC for now
+    };
+
+    if timestamp.is_valid() {
+        timestamp
+    } else {
+        // the UTC might be out of range
+        Timestamp::default()
     }
 }
 

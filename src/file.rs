@@ -3,6 +3,8 @@ use aligned::Aligned;
 #[cfg(feature = "alloc")]
 use alloc::{string::String, vec, vec::Vec};
 
+use crate::timestamp::{EncodedTimestamp, Timestamp};
+
 use super::{
     BlockDevice,
     allocation::{AllocatedRun, StoredChain},
@@ -11,9 +13,9 @@ use super::{
         DirSetWriter,
         DirectoryEntryChain,
         FileAttributes,
+        FileDirEntry,
         GeneralSecondaryFlags,
         Location,
-        RAW_ENTRY_LEN,
         RawDirEntry,
         StreamExtensionDirEntry, //update_checksum,
     },
@@ -110,6 +112,9 @@ pub(crate) struct FileDetails {
     pub location: Location,
     pub flags: GeneralSecondaryFlags,
     pub secondary_count: u8,
+    pub created: EncodedTimestamp,
+    pub modified: EncodedTimestamp,
+    pub accessed: EncodedTimestamp,
 }
 
 #[cfg(feature = "defmt")]
@@ -258,7 +263,6 @@ impl<const NUM_SECTORS: usize> Touched for FileDirty<NUM_SECTORS> {
     }
 }
 
-// TODO: add created and modified timestamps here
 impl Metadata {
     /// Size of the file in bytes
     pub fn len(&self) -> u64 {
@@ -278,6 +282,21 @@ impl Metadata {
     /// Returns true if the metadata is for a file (aka archive)
     pub fn is_file(&self) -> bool {
         self.details.attributes.contains(FileAttributes::Archive)
+    }
+
+    /// Returns the created timestamp of the file or directory
+    pub fn created(&self) -> Timestamp {
+        Timestamp::decode(self.details.created)
+    }
+
+    // Returns the last accessed timestamp of the file or directory (if the file system recorded it which this one doesn't)
+    pub fn accessed(&self) -> Timestamp {
+        Timestamp::decode(self.details.accessed)
+    }
+
+    // Returns the last modified timestamp of the file or directory
+    pub fn modified(&self) -> Timestamp {
+        Timestamp::decode(self.details.modified)
     }
 }
 
@@ -347,9 +366,17 @@ impl File {
                 match counter {
                     0 => {
                         // file dir
-                        dir_set_writer.add_no_write::<SIZE>(dir_entry, true);
-                        let mut raw = [0u8; RAW_ENTRY_LEN];
-                        raw.copy_from_slice(dir_entry);
+                        let mut file_dir_entry = FileDirEntry::from(dir_entry);
+                        let timestamp = fs.get_current_timestamp();
+                        file_dir_entry.last_modified_timestamp = timestamp.packed;
+                        file_dir_entry.last_modified_10ms_increment = timestamp.increment_10ms;
+                        file_dir_entry.last_modified_utc_offset = timestamp.utc_offset;
+                        file_dir_entry.last_accessed_timestamp = timestamp.packed;
+                        file_dir_entry.last_accessed_utc_offset = timestamp.utc_offset;
+                        let raw = file_dir_entry.serialize();
+                        dir_set_writer
+                            .add(fs, &mut self.touched, &raw, true)
+                            .await?;
                         file_dir = Some(raw);
                     }
                     1 => {

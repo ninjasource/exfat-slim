@@ -23,7 +23,6 @@ pub mod blocking {
     mod slot_cache;
     mod upcase_table;
     pub mod utils;
-
     //#[cfg(test)]
     //mod mocks;
 }
@@ -50,6 +49,8 @@ pub mod asynchronous {
     //#[cfg(test)]
     //mod mocks;
 }
+
+pub mod timestamp;
 
 #[cfg(all(feature = "log", feature = "defmt"))]
 compile_error!("features `log` and `defmt` are mutually exclusive");

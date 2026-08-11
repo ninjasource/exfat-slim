@@ -2,6 +2,7 @@ extern crate alloc;
 
 use core::fmt::Debug;
 
+use crate::time::rtc_timestamp_now;
 use aligned::{A4, Aligned};
 use defmt::info;
 use embassy_stm32::{
@@ -28,7 +29,7 @@ pub async fn file_system_task(mut sdmmc: Sdmmc<'static>) {
         is_init: false,
     };
 
-    fs::fs_actor_task::<_, _, 4>(block_device).await;
+    fs::fs_actor_task::<_, _, 4>(block_device, Some(rtc_timestamp_now)).await;
 }
 
 struct SdBlockDevice<'a> {

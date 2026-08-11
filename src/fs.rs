@@ -10,7 +10,7 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::info;
+use crate::{info, timestamp::Timestamp};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::Channel,
@@ -792,18 +792,20 @@ where
     file_system: Option<FileSystem<D, SIZE, N>>,
     files: Handles<File>,
     directories: Handles<DirectoryIterator<SIZE>>,
+    time_provider: Option<fn() -> Timestamp>,
 }
 
 impl<D, const SIZE: usize, const N: usize> FsManager<D, SIZE, N>
 where
     D: BlockDevice<SIZE>,
 {
-    pub fn new(dev: D) -> Self {
+    pub fn new(dev: D, time_provider: Option<fn() -> Timestamp>) -> Self {
         Self {
             dev: Some(dev),
             file_system: None,
             files: Handles::new(),
             directories: Handles::new(),
+            time_provider,
         }
     }
 
@@ -820,6 +822,10 @@ where
     > {
         if let Some(dev) = self.dev.take() {
             let mut file_system = FileSystem::new(dev);
+            if let Some(time_provider) = self.time_provider {
+                file_system.set_time_provider(time_provider);
+            }
+
             info!("mounting file system");
             match file_system.mount().await {
                 Ok(()) => {
@@ -852,12 +858,14 @@ where
     }
 }
 
-pub async fn fs_actor_task<D, const SIZE: usize, const N: usize>(device: D)
-where
+pub async fn fs_actor_task<D, const SIZE: usize, const N: usize>(
+    device: D,
+    time_provider: Option<fn() -> Timestamp>,
+) where
     D: BlockDevice<SIZE>,
     D::Error: BlockDeviceError,
 {
-    let mut fs_manager: FsManager<D, SIZE, N> = FsManager::new(device);
+    let mut fs_manager: FsManager<D, SIZE, N> = FsManager::new(device, time_provider);
     let rx = REQ.receiver();
 
     loop {

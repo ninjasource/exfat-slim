@@ -3,6 +3,8 @@ use core::char::decode_utf16;
 use bitflags::bitflags;
 use thiserror::Error;
 
+use crate::timestamp::EncodedTimestamp;
+
 use super::{
     BlockDevice, bisync,
     directory::DirectoryEntryFilter,
@@ -114,6 +116,30 @@ impl FileDirEntry {
         raw[23] = self.last_modified_utc_offset;
         raw[24] = self.last_accessed_utc_offset;
         raw
+    }
+
+    pub(crate) fn created(&self) -> EncodedTimestamp {
+        EncodedTimestamp {
+            packed: self.create_timestamp,
+            increment_10ms: self.create_10ms_increment,
+            utc_offset: self.create_utc_offset,
+        }
+    }
+
+    pub(crate) fn modified(&self) -> EncodedTimestamp {
+        EncodedTimestamp {
+            packed: self.last_modified_timestamp,
+            increment_10ms: self.last_modified_10ms_increment,
+            utc_offset: self.last_modified_utc_offset,
+        }
+    }
+
+    pub(crate) fn accessed(&self) -> EncodedTimestamp {
+        EncodedTimestamp {
+            packed: self.last_accessed_timestamp,
+            increment_10ms: 0, // none for accessed
+            utc_offset: self.last_accessed_utc_offset,
+        }
     }
 }
 
@@ -557,6 +583,9 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
                         location,
                         flags: stream_entry.general_secondary_flags,
                         secondary_count: file_dir_entry.secondary_count,
+                        accessed: file_dir_entry.accessed(),
+                        created: file_dir_entry.created(),
+                        modified: file_dir_entry.modified(),
                     };
 
                     let utf8_name_length = if let Some(name_buffer) = name_buf.as_deref_mut() {
