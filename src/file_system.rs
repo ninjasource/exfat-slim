@@ -17,7 +17,10 @@ use super::{
     },
     error::ExFatError,
     fat::Fat,
-    file::{File, FileDetails, FileDirty, NO_CLUSTER_ID, OpenOptions, Touched},
+    file::{
+        File, FileDetails, FileDirty, NO_CLUSTER_ID, OpenOptions, Touched, TouchedKind,
+        TouchedSector,
+    },
     slot_cache::SlotCache,
     upcase_table::UpcaseTable,
     utils::{Utf16Chunks, calc_dir_entry_set_len, encode_utf16_upcase_and_hash, split_path},
@@ -565,6 +568,22 @@ where
     }
 
     #[bisync]
+    async fn zero_cluster(
+        &mut self,
+        touched: &mut impl Touched,
+        cluster_id: u32,
+    ) -> ExFatResult<(), D, SIZE> {
+        let first_sector = self.fs.get_heap_sector_id::<D, SIZE>(cluster_id)?;
+        for sector_id in first_sector..first_sector + self.fs.sectors_per_cluster as u32 {
+            let slot = self.data_blocks.read_mut(sector_id, &mut self.dev).await?;
+            slot.as_mut_slice().fill(0);
+            touched.insert(TouchedSector::new(TouchedKind::Dir, sector_id));
+        }
+
+        Ok(())
+    }
+
+    #[bisync]
     pub(crate) async fn get_or_create_directory(
         &mut self,
         touched: &mut impl Touched,
@@ -595,6 +614,10 @@ where
                     self.allocator
                         .mark_allocated(&mut self.dev, touched, &run, true)
                         .await?;
+
+                    // it is important to zero the data in a cluster that you want to use for a directory because
+                    // garbage data can be confused with an end-of-directory marker which causes problems
+                    self.zero_cluster(touched, run.first_cluster).await?;
 
                     self.create_file_dir_entry_at(
                         touched,
