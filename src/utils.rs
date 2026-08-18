@@ -31,11 +31,21 @@ pub(crate) fn calc_dir_entry_set_len(name_char_count: usize) -> usize {
     2 + (name_char_count as u32).div_ceil(15) as usize
 }
 
-pub(crate) fn encode_utf16_upcase_and_hash(s: &str, upcase_table: &UpcaseTable) -> (u16, usize) {
+pub(crate) fn encode_utf16_upcase_and_hash(
+    s: &str,
+    upcase_table: &UpcaseTable,
+) -> Result<(u16, usize), &'static str> {
+    if s == "." || s == ".." {
+        return Err(". and .. are reserved names");
+    }
+
     let mut hash = 0u16;
     let mut count: usize = 0;
     for c in s.encode_utf16() {
         count += 1;
+        if is_illegal_name_char(c) {
+            return Err("name contains an illegal character");
+        }
         let c = upcase_table.upcase(c);
         let byte0 = (c & 0xFF) as u8;
         let byte1 = (c >> 8) as u8;
@@ -43,13 +53,16 @@ pub(crate) fn encode_utf16_upcase_and_hash(s: &str, upcase_table: &UpcaseTable) 
         hash = if hash & 1 > 0 { 0x8000 } else { 0 } + hash.wrapping_shr(1) + byte1 as u16;
     }
 
-    (hash, count)
+    if count == 0 {
+        return Err("name is empty");
+    }
+
+    Ok((hash, count))
 }
 
 pub(crate) fn split_path(path: &str) -> (&str, &str) {
-    path.rfind(['/', '\\']).map_or(("", path.trim()), |index| {
-        (path[..index].trim(), path[index + 1..].trim())
-    })
+    path.rfind(['/', '\\'])
+        .map_or(("", path), |index| (&path[..index], &path[index + 1..]))
 }
 
 #[bisync]
@@ -100,5 +113,101 @@ impl<'a> Utf16Chunks<'a> {
             chunk[index..].fill(0);
             Some(index)
         }
+    }
+}
+
+pub(crate) fn is_illegal_name_char(c: u16) -> bool {
+    // all 32 ascii control characters and
+    // "*/:<>?\|
+    c <= 0x001F
+        || matches!(
+            c,
+            0x0022 | 0x002A | 0x002F | 0x003A | 0x003C | 0x003E | 0x003F | 0x005C | 0x007C
+        )
+}
+
+#[allow(unused)]
+#[cfg(test)]
+mod tests {
+    // use crate::blocking::upcase_table::UpcaseTable;
+
+    use super::super::only_sync;
+    use super::*;
+    use aligned::Aligned;
+    use alloc::{vec, vec::Vec};
+
+    #[only_sync]
+    #[test]
+    fn calc_dir_entry_set_len_boundaries() {
+        assert_eq!(calc_dir_entry_set_len(1), 3);
+        assert_eq!(calc_dir_entry_set_len(15), 3);
+        assert_eq!(calc_dir_entry_set_len(16), 4);
+        assert_eq!(calc_dir_entry_set_len(30), 4);
+        assert_eq!(calc_dir_entry_set_len(31), 5);
+    }
+
+    #[only_sync]
+    #[test]
+    fn encode_utf16_upcase_and_hash_tests() {
+        let upcase_table = UpcaseTable::default();
+        assert_eq!(
+            (0x3046, 9),
+            encode_utf16_upcase_and_hash("Hello.TXT", &upcase_table).unwrap()
+        );
+        assert_eq!(
+            (0xEF63, 29),
+            encode_utf16_upcase_and_hash("This IS A LONG folder NAME !!", &upcase_table).unwrap()
+        );
+        assert_eq!(
+            (0x6FAD, 27),
+            encode_utf16_upcase_and_hash("File name with no extension", &upcase_table).unwrap()
+        );
+        assert_eq!(
+            (0x72B1, 82),
+            encode_utf16_upcase_and_hash(
+                "This is a very long file name but ok 123 - to use as an exfat name 🦀 so there.Txt",
+                &upcase_table
+            ).unwrap()
+        );
+        assert_eq!(
+            (0xE28E, 254),
+            encode_utf16_upcase_and_hash(
+                "Here is an example of an extremely long file name but it should still be compatible with the exfat file SYSTEM even though nobody would EVERY use a filename like this right. Am I right. Maybe Im wrong - maybe you get those that dont even use an extension",
+                &upcase_table
+            ).unwrap()
+        );
+    }
+
+    #[only_sync]
+    #[test]
+    fn invalid_file_names() {
+        let upcase_table = UpcaseTable::default();
+        assert!(encode_utf16_upcase_and_hash("", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash(".", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash("..", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash("\0", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash("hello*", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash("hello\"", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash("hello/", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash("hello:", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash("hello<", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash("hello>", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash("hello?", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash("hello\\", &upcase_table).is_err());
+        assert!(encode_utf16_upcase_and_hash("hello|", &upcase_table).is_err());
+    }
+
+    #[only_sync]
+    #[test]
+    fn split_path_edge_cases() {
+        assert_eq!(split_path("a/b/c.txt"), ("a/b", "c.txt"));
+        assert_eq!(split_path("c.txt"), ("", "c.txt"));
+        assert_eq!(split_path("/c.txt"), ("", "c.txt"));
+        assert_eq!(split_path("a\\b\\c.txt"), ("a\\b", "c.txt"));
+        assert_eq!(split_path(" c.txt"), ("", " c.txt"));
+        assert_eq!(split_path("c.txt "), ("", "c.txt "));
+        assert_eq!(split_path("  c.txt  "), ("", "  c.txt  "));
+        assert_eq!(split_path(" a / b / c.txt "), (" a / b ", " c.txt "));
+        assert_eq!(split_path("a/b/"), ("a/b", ""));
     }
 }

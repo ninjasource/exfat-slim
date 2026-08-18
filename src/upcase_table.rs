@@ -67,3 +67,29 @@ impl UpcaseTable {
         }
     }
 }
+
+#[allow(unused)]
+#[cfg(test)]
+mod tests {
+    use super::super::only_sync;
+    use super::*;
+    use aligned::Aligned;
+    use alloc::{vec, vec::Vec};
+
+    #[only_sync]
+    #[test]
+    fn default_upcase_table_upcases_ascii() {
+        let t = UpcaseTable::default();
+        assert_eq!(t.upcase('a' as u16), 'A' as u16);
+        assert_eq!(t.upcase('A' as u16), 'A' as u16);
+        assert_eq!(t.upcase('{' as u16), '{' as u16);
+    }
+
+    #[only_sync]
+    #[test]
+    fn default_upcase_table_upcases_unicode() {
+        let t = UpcaseTable::default();
+        assert_eq!(t.upcase('🦀' as u16), '🦀' as u16);
+        assert_eq!(t.upcase(0xFFFF), 0xFFFF);
+    }
+}

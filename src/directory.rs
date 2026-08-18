@@ -50,15 +50,15 @@ impl<'a> ExactNameFilter<'a> {
         file_name: &'a str,
         upcase_table: &UpcaseTable,
         file_attributes: Option<FileAttributes>,
-    ) -> Self {
+    ) -> Result<Self, &'static str> {
         let (file_name_hash, file_name_count) =
-            encode_utf16_upcase_and_hash(file_name, upcase_table);
-        Self {
+            encode_utf16_upcase_and_hash(file_name, upcase_table)?;
+        Ok(Self {
             file_name,
             file_name_hash,
             file_attributes,
             file_name_count,
-        }
+        })
     }
 }
 
@@ -127,7 +127,8 @@ where
             Some(FileAttributes::Directory)
         };
 
-        let filter = ExactNameFilter::new(part, &fs.upcase_table, attributes);
+        let filter = ExactNameFilter::new(part, &fs.upcase_table, attributes)
+            .map_err(|e| ExFatError::InvalidFileName { reason: e })?;
         let mut entries = DirectoryEntryChain::new(cluster_id, &fs.fs);
         let file_details = entries.next_file_entry(fs, &filter, None).await?;
 

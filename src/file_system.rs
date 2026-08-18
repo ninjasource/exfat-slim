@@ -599,7 +599,8 @@ where
                 dir_name,
                 &self.upcase_table,
                 Some(FileAttributes::Directory),
-            );
+            )
+            .map_err(|e| ExFatError::InvalidFileName { reason: e })?;
             let mut entries = DirectoryEntryChain::new(cluster_id, &self.fs);
             let file_details = entries.next_file_entry(self, &filter, None).await?;
 
@@ -662,7 +663,8 @@ where
         data_length: u64,
     ) -> ExFatResult<FileDetails, D, SIZE> {
         let (name_hash, file_name_char_count) =
-            encode_utf16_upcase_and_hash(name, &self.upcase_table);
+            encode_utf16_upcase_and_hash(name, &self.upcase_table)
+                .map_err(|e| ExFatError::InvalidFileName { reason: e })?;
         let dir_entry_set_len = calc_dir_entry_set_len(file_name_char_count);
         let location = self
             .find_empty_dir_entry_set(directory_cluster_id, dir_entry_set_len)
