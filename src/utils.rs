@@ -98,12 +98,14 @@ impl<'a> Utf16Chunks<'a> {
     pub fn next_chunk<const N: usize>(&mut self, chunk: &mut [u16; N]) -> Option<usize> {
         assert!(N > 0);
         let mut index = 0;
-        for item in self.iter.by_ref() {
-            if index < chunk.len() {
-                chunk[index] = item;
-                index += 1;
-            } else {
-                return None;
+
+        while index < N {
+            match self.iter.next() {
+                Some(item) => {
+                    chunk[index] = item;
+                    index += 1;
+                }
+                None => break,
             }
         }
 
@@ -129,12 +131,44 @@ pub(crate) fn is_illegal_name_char(c: u16) -> bool {
 #[allow(unused)]
 #[cfg(test)]
 mod tests {
-    // use crate::blocking::upcase_table::UpcaseTable;
-
     use super::super::only_sync;
     use super::*;
     use aligned::Aligned;
     use alloc::{vec, vec::Vec};
+
+    #[only_sync]
+    #[test]
+    fn directory_entry_name_longer_than_15_utf16_units() {
+        // 20 utf16 units
+        let mut chunks = Utf16Chunks::new("abcdefghij0123456789ABCDE");
+        let mut buf = [0u16; 15];
+        assert_eq!(chunks.next_chunk(&mut buf), Some(15));
+        assert_eq!(buf[14], '4' as u16);
+        assert_eq!(chunks.next_chunk(&mut buf), Some(10));
+        assert_eq!(buf[0], '5' as u16);
+        assert_eq!(&buf[10..], [0u16; 5]); // zero padding
+        assert_eq!(chunks.next_chunk(&mut buf), None)
+    }
+
+    #[only_sync]
+    #[test]
+    fn directory_entry_name_less_than_one_full_chunk() {
+        // 15 utf16 units
+        let mut chunks = Utf16Chunks::new("0123456789");
+        let mut buf = [0u16; 15];
+        assert_eq!(chunks.next_chunk(&mut buf), Some(10));
+        assert_eq!(chunks.next_chunk(&mut buf), None)
+    }
+
+    #[only_sync]
+    #[test]
+    fn directory_entry_name_one_full_chunk() {
+        // 10 utf16 units
+        let mut chunks = Utf16Chunks::new("012345678901234");
+        let mut buf = [0u16; 15];
+        assert_eq!(chunks.next_chunk(&mut buf), Some(15));
+        assert_eq!(chunks.next_chunk(&mut buf), None)
+    }
 
     #[only_sync]
     #[test]
