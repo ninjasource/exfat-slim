@@ -44,15 +44,15 @@ There is no unsafe Rust in the codebase (excl. dependencies)
 - Support `close()` and `flush()` 
 - Support block caching for allocation bitmap, fat chain and data blocks (directory entries and files)
 - Embassy example
+- Timestamps
+- Enable file `close()` on Drop when using the actor pattern
 
 ## Still TODO
 
 - Return zeros where user attempts to read past valid_data_length in file (see File::read function)
 - Truncate to specified length to preallocate a file
 - Better test coverage
-- Timestamps
 - Maintain list of locked open files
-- Enable file `close()` on Drop when using the actor pattern
 
 ## Why build this
 
