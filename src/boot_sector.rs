@@ -21,6 +21,14 @@ pub enum Error {
 
     #[error("invalid boot signature at boot_sector[510..512] expected [0x55, 0xaa]")]
     InvalidBootSignature,
+
+    #[error("bytes per sector shift boot_sector[108] out of range (got {0}, expected 9..=12)")]
+    InvalidBytesPerSectorShift(u8),
+
+    #[error(
+        "sectors per cluster shift boot_sector[109] out of range (got {0}, max is 25 - bytes_per_sector_shift)"
+    )]
+    InvalidSectorsPerClusterShift(u8),
 }
 
 /// boot sector describes the exfat volume structure
@@ -61,7 +69,7 @@ pub(crate) struct BootSector {
     pub bytes_per_sector: u16,
 
     /// number of sectors per cluster (64 is normal for an SD card of 8GB - that equates to 32KB per cluster)
-    pub sectors_per_cluster: u8,
+    pub sectors_per_cluster: u32,
 
     /// number of fats and allocation bitmaps (normally 1 but can be two for TexFAT volumes)
     pub number_of_fats: u8,
@@ -115,8 +123,19 @@ impl<A: Alignment, const SIZE: usize> TryFrom<&Aligned<A, [u8; SIZE]>> for BootS
         let volume_serial_number = read_u32_le::<100, _>(value);
         let file_system_revision = read_u16_le::<104, _>(value);
         let volume_flags = VolumeFlags::from_bits_truncate(read_u16_le::<106, _>(value));
-        let bytes_per_sector = 1u16 << value[108]; // bytes_per_sector_shift 
-        let sectors_per_cluster = 1u8 << value[109]; // sectors_per_cluster_shift
+        let bytes_per_sector_shift = value[108];
+        if !(9..=12).contains(&bytes_per_sector_shift) {
+            return Err(Error::InvalidBytesPerSectorShift(bytes_per_sector_shift));
+        }
+        let sectors_per_cluster_shift = value[109];
+        if bytes_per_sector_shift as u32 + sectors_per_cluster_shift as u32 > 25 {
+            return Err(Error::InvalidSectorsPerClusterShift(
+                sectors_per_cluster_shift,
+            ));
+        }
+
+        let bytes_per_sector = 1u16 << bytes_per_sector_shift;
+        let sectors_per_cluster = 1u32 << sectors_per_cluster_shift;
         let number_of_fats = value[110];
         let drive_select = value[111];
         let percent_in_use = value[112];
@@ -225,39 +244,109 @@ mod tests {
 
     #[only_sync]
     #[test]
-    fn reject_corrupt_boot_sector() {
+    fn supports_sdxc_cards() {
+        let mut boot_sector = BOOT_SECTOR;
+        boot_sector[109] = 8;
+        assert_eq!(
+            BootSector::try_from(&boot_sector)
+                .unwrap()
+                .sectors_per_cluster,
+            256
+        );
+    }
+
+    #[only_sync]
+    #[test]
+    fn reject_invalid_jump_boot() {
         let mut boot_sector = BOOT_SECTOR;
         boot_sector[0] = 0;
+        assert!(matches!(
+            BootSector::try_from(&boot_sector),
+            Err(Error::InvalidJumpBoot)
+        ));
+    }
+
+    // reject boot sectors with >4096 bytes per sector
+    #[only_sync]
+    #[test]
+    fn check_bytes_per_sector() {
+        let mut boot_sector = BOOT_SECTOR;
+        boot_sector[108] = 12; // 4096 bytes per sector
+        let bs = BootSector::try_from(&boot_sector).unwrap();
+        assert_eq!(bs.bytes_per_sector, 4096);
+
+        // too small
+        let mut boot_sector = BOOT_SECTOR;
+        boot_sector[108] = 8; // 256 bytes per sector
+        assert!(matches!(
+            BootSector::try_from(&boot_sector),
+            Err(Error::InvalidBytesPerSectorShift(8))
+        ));
+
+        // too large
+        let mut boot_sector = BOOT_SECTOR;
+        boot_sector[108] = 13; // 8192 bytes per sector
+        assert!(matches!(
+            BootSector::try_from(&boot_sector),
+            Err(Error::InvalidBytesPerSectorShift(13))
+        ));
+    }
+
+    // range checks on sectors per cluster
+    #[only_sync]
+    #[test]
+    fn check_sectors_per_cluster() {
+        // largest the spec allows
+        let mut boot_sector = BOOT_SECTOR;
+        boot_sector[108] = 12;
+        boot_sector[109] = 13;
+        let bs = BootSector::try_from(&boot_sector).unwrap();
+        assert_eq!(bs.bytes_per_sector, 4096);
+        assert_eq!(bs.sectors_per_cluster, 8192);
+
+        // can't have larger than 32 MB clusters
+        let mut boot_sector = BOOT_SECTOR;
+        boot_sector[108] = 12;
+        boot_sector[109] = 14;
+        assert!(matches!(
+            BootSector::try_from(&boot_sector),
+            Err(Error::InvalidSectorsPerClusterShift(14))
+        ));
+
+        // corrupt boot sector should not panic
+        let mut boot_sector = BOOT_SECTOR;
+        boot_sector[108] = 12;
+        boot_sector[109] = 250;
         assert!(BootSector::try_from(&boot_sector).is_err());
     }
 
     #[only_sync]
     #[test]
     fn check_boot_sector_validity() {
-        let mut bool_sector = [0u8; 512];
-        bool_sector[0] = 0xeb;
-        bool_sector[1] = 0x76;
-        bool_sector[2] = 0x90;
-        bool_sector[3..11].copy_from_slice(b"EXFAT   ");
-        bool_sector[510] = 0x55;
-        bool_sector[511] = 0xaa;
-        BootSector::check_is_valid(&bool_sector).unwrap();
-        bool_sector[0] = 0;
-        assert!(BootSector::check_is_valid(&bool_sector).is_err());
-        bool_sector[0] = 0xeb;
-        bool_sector[1] = 0;
-        assert!(BootSector::check_is_valid(&bool_sector).is_err());
-        bool_sector[1] = 0x76;
-        bool_sector[2] = 0;
-        assert!(BootSector::check_is_valid(&bool_sector).is_err());
-        bool_sector[2] = 0x90;
-        bool_sector[3] = 0;
-        assert!(BootSector::check_is_valid(&bool_sector).is_err());
-        bool_sector[3..11].copy_from_slice(b"EXFAT   ");
-        bool_sector[510] = 0;
-        assert!(BootSector::check_is_valid(&bool_sector).is_err());
-        bool_sector[510] = 0x55;
-        bool_sector[511] = 0;
-        assert!(BootSector::check_is_valid(&bool_sector).is_err());
+        let mut boot_sector = [0u8; 512];
+        boot_sector[0] = 0xeb;
+        boot_sector[1] = 0x76;
+        boot_sector[2] = 0x90;
+        boot_sector[3..11].copy_from_slice(b"EXFAT   ");
+        boot_sector[510] = 0x55;
+        boot_sector[511] = 0xaa;
+        BootSector::check_is_valid(&boot_sector).unwrap();
+        boot_sector[0] = 0;
+        assert!(BootSector::check_is_valid(&boot_sector).is_err());
+        boot_sector[0] = 0xeb;
+        boot_sector[1] = 0;
+        assert!(BootSector::check_is_valid(&boot_sector).is_err());
+        boot_sector[1] = 0x76;
+        boot_sector[2] = 0;
+        assert!(BootSector::check_is_valid(&boot_sector).is_err());
+        boot_sector[2] = 0x90;
+        boot_sector[3] = 0;
+        assert!(BootSector::check_is_valid(&boot_sector).is_err());
+        boot_sector[3..11].copy_from_slice(b"EXFAT   ");
+        boot_sector[510] = 0;
+        assert!(BootSector::check_is_valid(&boot_sector).is_err());
+        boot_sector[510] = 0x55;
+        boot_sector[511] = 0;
+        assert!(BootSector::check_is_valid(&boot_sector).is_err());
     }
 }

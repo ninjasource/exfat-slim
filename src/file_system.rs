@@ -40,7 +40,7 @@ pub(crate) struct FileSystemDetails {
     pub fat_offset: u32,
 
     /// number of sectors per cluster (64 is normal for an SD card of 8GB - that equates to 32KB per cluster)
-    pub sectors_per_cluster: u8,
+    pub sectors_per_cluster: u32,
 
     /// number of bytes in a cluster
     pub cluster_length: u32,
@@ -61,8 +61,7 @@ impl FileSystemDetails {
     }
 
     pub(crate) fn new(boot_sector: &BootSector) -> Self {
-        let cluster_length =
-            boot_sector.bytes_per_sector as u32 * boot_sector.sectors_per_cluster as u32;
+        let cluster_length = boot_sector.bytes_per_sector as u32 * boot_sector.sectors_per_cluster;
         Self {
             cluster_heap_offset: boot_sector.cluster_heap_offset,
             sectors_per_cluster: boot_sector.sectors_per_cluster,
@@ -83,8 +82,7 @@ impl FileSystemDetails {
             return Err(ExFatError::InvalidClusterId(cluster_id));
         }
 
-        let sector_id =
-            self.cluster_heap_offset + (cluster_id - 2) * self.sectors_per_cluster as u32;
+        let sector_id = self.cluster_heap_offset + (cluster_id - 2) * self.sectors_per_cluster;
         Ok(sector_id)
     }
 }
@@ -574,7 +572,7 @@ where
         cluster_id: u32,
     ) -> ExFatResult<(), D, SIZE> {
         let first_sector = self.fs.get_heap_sector_id::<D, SIZE>(cluster_id)?;
-        for sector_id in first_sector..first_sector + self.fs.sectors_per_cluster as u32 {
+        for sector_id in first_sector..first_sector + self.fs.sectors_per_cluster {
             let slot = self.data_blocks.read_mut(sector_id, &mut self.dev).await?;
             slot.as_mut_slice().fill(0);
             touched.insert(TouchedSector::new(TouchedKind::Dir, sector_id));

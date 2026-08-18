@@ -454,8 +454,8 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
     pub(crate) fn new_from_file_details(details: &FileDetails, fs: &FileSystemDetails) -> Self {
         // This is so gross, make it better
         let sector_id_from_start = details.location.sector_id - fs.cluster_heap_offset;
-        let cluster_id = 2 + sector_id_from_start / fs.sectors_per_cluster as u32;
-        let cluster_offset = (sector_id_from_start % fs.sectors_per_cluster as u32) as usize;
+        let cluster_id = 2 + sector_id_from_start / fs.sectors_per_cluster;
+        let cluster_offset = (sector_id_from_start % fs.sectors_per_cluster) as usize;
         let dir_entry_offset = details.location.dir_entry_offset;
         let num_entries = Some(details.secondary_count as usize + 1);
 
