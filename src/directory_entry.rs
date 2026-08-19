@@ -820,6 +820,8 @@ impl DirSetWriter {
 #[cfg(test)]
 mod tests {
 
+    use crate::test_utils::{BLOCK_SIZE, DummyBlockDevice};
+
     use super::super::only_sync;
     use super::*;
 
@@ -915,5 +917,30 @@ mod tests {
         }
 
         assert_ne!(writer.checksum, 0x77F0);
+    }
+
+    #[only_sync]
+    #[test]
+    fn self_referencing_directory_cluster_endless_loop() {
+        let mut io = DummyBlockDevice::new(2);
+        io.blocks[0][8..12].copy_from_slice(&2u32.to_le_bytes());
+        io.blocks[1] = [0x85; BLOCK_SIZE]; // all file entries, no end of directory marker
+
+        let mut fs = FileSystem::<_, BLOCK_SIZE, 4>::new(io);
+        fs.fat.start_of_fat_sector = Some(0);
+        fs.fs.cluster_heap_offset = 1;
+        fs.fs.sectors_per_cluster = 1;
+        fs.fs.cluster_length = BLOCK_SIZE as u32;
+
+        let mut chain = DirectoryEntryChain::<BLOCK_SIZE>::new(2, &fs.fs);
+
+        let mut counter = 0;
+        while chain.next(&mut fs).unwrap().is_some() {
+            counter += 1;
+            assert!(
+                counter < 1000,
+                "directory walk not terminating due to endless loop"
+            )
+        }
     }
 }

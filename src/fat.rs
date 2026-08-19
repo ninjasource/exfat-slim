@@ -97,7 +97,7 @@ where
         let (chunks, _remainder) = slot.as_slice().as_chunks::<ENTRY_SIZE>();
         let next_cluster_id = u32::from_le_bytes(chunks[sector_offset]);
 
-        if (MIN_CLUSER_ID..CLUSTER_LEN).contains(&next_cluster_id) {
+        if (MIN_CLUSER_ID..=CLUSTER_LEN).contains(&next_cluster_id) {
             Ok(Some(next_cluster_id))
         } else {
             Ok(None)
@@ -113,7 +113,7 @@ mod tests {
     const END_OF_CHAIN: u32 = 0xFFFF_FFFF;
 
     use crate::{
-        blocking::file::FileDirty,
+        blocking::file::{FileDirty, NO_CLUSTER_ID},
         test_utils::{BLOCK_SIZE, DummyBlockDevice},
     };
 
@@ -157,5 +157,57 @@ mod tests {
             Some(129)
         );
         assert_eq!(fat.next_cluster_in_fat_chain(129, &mut io).unwrap(), None);
+    }
+
+    #[only_sync]
+    #[test]
+    fn unlinking_cluster_breaks_chain() {
+        let mut io = DummyBlockDevice::new(2);
+
+        let mut fat = Fat::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
+        fat.start_of_fat_sector = Some(0);
+        let mut touched = FileDirty::new();
+
+        fat.set(&mut io, &mut touched, 2, 3).unwrap();
+        fat.set(&mut io, &mut touched, 3, END_OF_CHAIN).unwrap();
+        assert_eq!(fat.next_cluster_in_fat_chain(2, &mut io).unwrap(), Some(3));
+        assert_eq!(fat.next_cluster_in_fat_chain(3, &mut io).unwrap(), None);
+
+        // act
+        fat.set(&mut io, &mut touched, 2, NO_CLUSTER_ID).unwrap();
+
+        // assert
+        assert_eq!(fat.next_cluster_in_fat_chain(2, &mut io).unwrap(), None);
+        io.blocks[0].fill(0xAA); // just so that the very last assert is actually tested
+        fat.flush(&mut io).unwrap();
+        assert_eq!(&io.blocks[0][8..12], &[0, 0, 0, 0]);
+    }
+
+    #[only_sync]
+    #[test]
+    fn fat_entry_values_that_terminate_a_chain() {
+        let mut io = DummyBlockDevice::new(2);
+        let mut fat = Fat::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
+        fat.start_of_fat_sector = Some(0);
+        let mut touched = FileDirty::new();
+
+        let cases = [
+            (0x0000_0000, None),
+            (0x0000_0001, None),
+            (0x0000_0002, Some(0x0000_0002)),
+            (0xFFFF_FFF5, Some(0xFFFF_FFF5)),
+            (0xFFFF_FFF6, Some(0xFFFF_FFF6)),
+            (0xFFFF_FFF7, None),
+            (0xFFFF_FFFF, None),
+        ];
+
+        for (entry, expected) in cases {
+            fat.set(&mut io, &mut touched, 2, entry).unwrap();
+            assert_eq!(
+                fat.next_cluster_in_fat_chain(2, &mut io).unwrap(),
+                expected,
+                "fat entry {entry:#010x}"
+            )
+        }
     }
 }
