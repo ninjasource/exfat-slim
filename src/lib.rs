@@ -52,6 +52,9 @@ pub mod asynchronous {
 
 pub mod timestamp;
 
+#[cfg(test)]
+mod test_utils;
+
 #[cfg(all(feature = "log", feature = "defmt"))]
 compile_error!("features `log` and `defmt` are mutually exclusive");
 

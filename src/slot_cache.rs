@@ -238,62 +238,20 @@ where
 #[allow(unused)]
 #[cfg(test)]
 mod tests {
+    use crate::test_utils::{BLOCK_SIZE, DummyBlockDevice};
+
     use super::super::only_sync;
     use super::*;
     use aligned::Aligned;
     use alloc::{vec, vec::Vec};
 
-    const SECTOR_OFFSET: usize = 100;
-    const BLOCK_SIZE: usize = 512;
-
-    #[derive(Debug)]
-    struct DummyBlockDevice {
-        blocks: Vec<[u8; BLOCK_SIZE]>,
-    }
-
-    #[only_sync]
-    impl BlockDevice<BLOCK_SIZE> for DummyBlockDevice {
-        type Error = ();
-        type Align = aligned::A4;
-
-        fn read(
-            &mut self,
-            block_address: u32,
-            data: &mut [Aligned<Self::Align, [u8; BLOCK_SIZE]>],
-        ) -> Result<(), Self::Error> {
-            data[0].copy_from_slice(&self.blocks[block_address as usize - SECTOR_OFFSET]);
-            Ok(())
-        }
-
-        fn write(
-            &mut self,
-            block_address: u32,
-            data: &[Aligned<Self::Align, [u8; BLOCK_SIZE]>],
-        ) -> Result<(), Self::Error> {
-            self.blocks[block_address as usize - SECTOR_OFFSET]
-                .copy_from_slice(&data[0].as_slice());
-            Ok(())
-        }
-
-        fn size(&mut self) -> Result<u64, Self::Error> {
-            todo!()
-        }
-    }
-
     #[only_sync]
     #[test]
     fn read_and_write_cache() {
-        let mut io = DummyBlockDevice {
-            blocks: vec![
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-            ],
-        };
+        let mut io = DummyBlockDevice::new(4);
         let mut cache = SlotCache::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
 
-        let slot = cache.read_mut(100, &mut io).unwrap();
+        let slot = cache.read_mut(0, &mut io).unwrap();
         slot.as_mut_slice()[..4].copy_from_slice(&[1, 2, 3, 4]);
         cache.flush(&mut io).unwrap();
 
@@ -306,31 +264,43 @@ mod tests {
     #[only_sync]
     #[test]
     fn evicted_cache_should_flush() {
-        let mut io = DummyBlockDevice {
-            blocks: vec![
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-            ],
-        };
+        let mut io = DummyBlockDevice::new(8);
         let mut cache = SlotCache::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
 
-        let slot0 = cache.read_mut(100, &mut io).unwrap();
+        let slot0 = cache.read_mut(0, &mut io).unwrap();
         slot0.as_mut_slice()[..4].copy_from_slice(&[1, 2, 3, 4]);
-        let slot1 = cache.read_mut(101, &mut io).unwrap();
+        let slot1 = cache.read_mut(1, &mut io).unwrap();
         slot1.as_mut_slice()[..4].copy_from_slice(&[5, 6, 7, 8]);
-        let slot2 = cache.read_mut(102, &mut io).unwrap();
+        let slot2 = cache.read_mut(2, &mut io).unwrap();
         slot2.as_mut_slice()[..4].copy_from_slice(&[9, 10, 11, 12]);
-        let slot3 = cache.read_mut(103, &mut io).unwrap();
+        let slot3 = cache.read_mut(3, &mut io).unwrap();
         slot3.as_mut_slice()[..4].copy_from_slice(&[13, 14, 15, 16]);
-        let slot4 = cache.read_mut(104, &mut io).unwrap();
+        let slot4 = cache.read_mut(4, &mut io).unwrap();
         slot4.as_mut_slice()[..4].copy_from_slice(&[17, 18, 19, 20]);
 
         assert_eq!(&io.blocks[0][..4], &[1, 2, 3, 4]);
+    }
+
+    #[only_sync]
+    #[test]
+    fn cache_hit_returns_the_slot_holding_that_sector() {
+        let mut io = DummyBlockDevice::new(8);
+        for (i, block) in io.blocks.iter_mut().enumerate() {
+            // used to uniquely each block
+            block[0] = i as u8;
+        }
+        let mut cache = SlotCache::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
+
+        // fill every slot
+        for sector in 0..4u32 {
+            let slot = cache.read(sector, &mut io).unwrap();
+            assert_eq!(slot.as_slice()[0], sector as u8, "miss for sector {sector}");
+        }
+
+        // reread them out of order
+        for sector in [2u32, 0, 3, 1, 3, 3, 0] {
+            let slot = cache.read(sector, &mut io).unwrap();
+            assert_eq!(slot.as_slice()[0], sector as u8, "hit for sector {sector}");
+        }
     }
 }

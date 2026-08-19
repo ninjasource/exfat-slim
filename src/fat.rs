@@ -104,3 +104,58 @@ where
         }
     }
 }
+
+#[allow(unused)]
+#[cfg(test)]
+mod tests {
+    use super::super::only_sync;
+    use super::*;
+    const END_OF_CHAIN: u32 = 0xFFFF_FFFF;
+
+    use crate::{
+        blocking::file::FileDirty,
+        test_utils::{BLOCK_SIZE, DummyBlockDevice},
+    };
+
+    #[only_sync]
+    #[test]
+    fn fat_chain_crosses_fat_sector_boundary() {
+        // arrange - a 512 byte sector holds 128 u23 entries to cluster 128 is
+        // the first entry of the second fat sector
+        let mut io = DummyBlockDevice::new(4);
+        let mut fat = Fat::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
+        fat.start_of_fat_sector = Some(0);
+        let mut touched = FileDirty::new();
+
+        // act - link 126 -> 127 -> 128 -> 129 -> end of chain
+        fat.set(&mut io, &mut touched, 126, 127).unwrap();
+        fat.set(&mut io, &mut touched, 127, 128).unwrap();
+        fat.set(&mut io, &mut touched, 128, 129).unwrap();
+        fat.set(&mut io, &mut touched, 129, END_OF_CHAIN).unwrap();
+
+        // confirm that nothing reaches the device until a flush
+        assert_eq!(io.blocks[0][504..512], [0u8; 8]);
+        fat.flush(&mut io).unwrap();
+
+        // entries in the correct place in the correct sector
+        assert_eq!(&io.blocks[0][504..508], &127u32.to_le_bytes()); // cluster 126
+        assert_eq!(&io.blocks[0][508..512], &128u32.to_le_bytes()); // cluster 127
+        assert_eq!(&io.blocks[1][0..4], &129u32.to_le_bytes()); // cluster 128
+        assert_eq!(&io.blocks[1][4..8], &END_OF_CHAIN.to_le_bytes()); // cluster 129
+
+        // walk across sector boundary works as expected
+        assert_eq!(
+            fat.next_cluster_in_fat_chain(126, &mut io).unwrap(),
+            Some(127)
+        );
+        assert_eq!(
+            fat.next_cluster_in_fat_chain(127, &mut io).unwrap(),
+            Some(128)
+        );
+        assert_eq!(
+            fat.next_cluster_in_fat_chain(128, &mut io).unwrap(),
+            Some(129)
+        );
+        assert_eq!(fat.next_cluster_in_fat_chain(129, &mut io).unwrap(), None);
+    }
+}

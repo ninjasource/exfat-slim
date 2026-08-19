@@ -1007,49 +1007,15 @@ where
 #[allow(unused)]
 #[cfg(test)]
 mod tests {
-    use crate::blocking::file_system;
+    use crate::{
+        blocking::file_system,
+        test_utils::{BLOCK_SIZE, DummyBlockDevice},
+    };
 
     use super::super::only_sync;
     use super::*;
     use aligned::Aligned;
     use alloc::{vec, vec::Vec};
-
-    const SECTOR_OFFSET: usize = 0;
-    const BLOCK_SIZE: usize = 512;
-
-    #[derive(Debug)]
-    struct DummyBlockDevice {
-        blocks: Vec<[u8; BLOCK_SIZE]>,
-    }
-
-    #[only_sync]
-    impl BlockDevice<BLOCK_SIZE> for DummyBlockDevice {
-        type Error = ();
-        type Align = aligned::A4;
-
-        fn read(
-            &mut self,
-            block_address: u32,
-            data: &mut [Aligned<Self::Align, [u8; BLOCK_SIZE]>],
-        ) -> Result<(), Self::Error> {
-            data[0].copy_from_slice(&self.blocks[block_address as usize - SECTOR_OFFSET]);
-            Ok(())
-        }
-
-        fn write(
-            &mut self,
-            block_address: u32,
-            data: &[Aligned<Self::Align, [u8; BLOCK_SIZE]>],
-        ) -> Result<(), Self::Error> {
-            self.blocks[block_address as usize - SECTOR_OFFSET]
-                .copy_from_slice(&data[0].as_slice());
-            Ok(())
-        }
-
-        fn size(&mut self) -> Result<u64, Self::Error> {
-            todo!()
-        }
-    }
 
     #[only_sync]
     #[test]
