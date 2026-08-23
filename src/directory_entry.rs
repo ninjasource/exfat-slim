@@ -29,7 +29,8 @@ pub enum Error {
 /// Entry Type (identifies what kind of 32 byte entry this is)
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) enum EntryType {
-    UnusedOrEndOfDirectory,
+    EndOfDirectory,
+    Unused(u8),
     AllocationBitmap,
     UpcaseTable,
     VolumeLabel,
@@ -203,7 +204,9 @@ impl FileNameDirEntry {
 impl From<u8> for EntryType {
     fn from(value: u8) -> Self {
         match value {
-            0x00 => Self::UnusedOrEndOfDirectory,
+            0x00 => Self::EndOfDirectory,
+            // InUse bit clear and holds the original byte
+            x if x & 0x80 == 0 => Self::Unused(x),
             0x81 => Self::AllocationBitmap,
             0x82 => Self::UpcaseTable,
             0x83 => Self::VolumeLabel,
@@ -220,7 +223,8 @@ impl From<u8> for EntryType {
 impl EntryType {
     pub(crate) fn serialize(&self) -> u8 {
         match self {
-            Self::UnusedOrEndOfDirectory => 0x00,
+            Self::EndOfDirectory => 0x00,
+            Self::Unused(x) => *x,
             Self::AllocationBitmap => 0x81,
             Self::UpcaseTable => 0x82,
             Self::VolumeLabel => 0x83,
@@ -495,7 +499,7 @@ impl<const SIZE: usize> DirectoryEntryChain<SIZE> {
         while let Some((entry, location)) = self.next(fs).await? {
             let entry_type_val = entry[0];
             match EntryType::from(entry_type_val) {
-                EntryType::UnusedOrEndOfDirectory if is_end_of_directory(entry) => {
+                EntryType::EndOfDirectory if is_end_of_directory(entry) => {
                     return Ok(None);
                 }
                 EntryType::FileAndDirectory => {
@@ -765,6 +769,8 @@ impl DirSetWriter {
     fn next_dir_entry_location<const SIZE: usize>(&mut self) {
         self.current.dir_entry_offset += 1;
         if self.current.dir_entry_offset == SIZE / RAW_ENTRY_LEN {
+            // this assumes the set does not cross a cluster boundary (sectors within a cluster are contiguous)
+            // TODO: fix this when this crate adds the ability to create multi cluster directories
             self.current.sector_id += 1;
             self.current.dir_entry_offset = 0;
         }
@@ -799,19 +805,6 @@ impl DirSetWriter {
         slice[offset..offset + RAW_ENTRY_LEN].copy_from_slice(file_dir);
         slice[offset + 2..offset + 4].copy_from_slice(&self.checksum.to_le_bytes());
         touched.insert(TouchedSector::new(TouchedKind::Dir, sector_id));
-        Ok(())
-    }
-
-    #[bisync]
-    pub async fn finish_no_checksum<D, const SIZE: usize, const N: usize>(
-        self,
-        fs: &mut FileSystem<D, SIZE, N>,
-        touched: &mut impl Touched,
-    ) -> ExFatResult<(), D, SIZE>
-    where
-        D: BlockDevice<SIZE>,
-    {
-        touched.flush(fs).await?;
         Ok(())
     }
 }

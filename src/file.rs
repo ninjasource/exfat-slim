@@ -24,7 +24,7 @@ use super::{
     utils::split_path,
 };
 
-#[derive(Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct OpenOptions {
     pub read: bool,
     pub write: bool,

@@ -354,24 +354,12 @@ where
         let file_details = self.find_file_inner(from_path, None).await?;
         let mut touched = FileDirty::new();
 
-        let mut dir_set_writer = DirSetWriter::new(file_details.location);
-        let dir_entry = [0u8; RAW_ENTRY_LEN];
-
-        for _ in 0..file_details.secondary_count + 1 {
-            dir_set_writer
-                .add(self, &mut touched, &dir_entry, false)
-                .await?;
-        }
-
-        dir_set_writer
-            .finish_no_checksum(self, &mut touched)
-            .await?;
-
         let (dir_path, file_or_dir_name) = split_path(to_path);
 
         // find directory or recursively create it if it does not already exist
         let directory_cluster_id = self.get_or_create_directory(&mut touched, dir_path).await?;
 
+        // create a new dir entry and point it at the same file or directory as the old one
         self.create_file_dir_entry_at(
             &mut touched,
             file_or_dir_name,
@@ -383,6 +371,11 @@ where
             file_details.data_length,
         )
         .await?;
+
+        // remove the old dir entry
+        let num_entries = file_details.secondary_count as usize + 1;
+        self.mark_directory_entry_set_unused(&mut touched, file_details.location, num_entries)
+            .await?;
 
         touched.flush(self).await?;
 
@@ -751,9 +744,33 @@ where
         self.dev
     }
 
-    #[inline(always)]
-    fn mark_dir_entry_free(dir_entry: &mut [u8; RAW_ENTRY_LEN]) {
-        dir_entry[0] = 0x01;
+    #[bisync]
+    async fn mark_directory_entry_set_unused(
+        &mut self,
+        touched: &mut impl Touched,
+        location: Location,
+        num_entries: usize,
+    ) -> ExFatResult<(), D, SIZE> {
+        let mut sector_id = location.sector_id;
+        let mut offset = location.dir_entry_offset;
+        let entries_per_sector = SIZE / RAW_ENTRY_LEN;
+
+        for _ in 0..num_entries {
+            if offset == entries_per_sector {
+                // this assumes the set does not cross a cluster boundary (sectors within a cluster are contiguous)
+                // TODO: fix this when this crate adds the ability to create multi cluster directories
+                sector_id += 1;
+                offset = 0;
+            }
+
+            let slot = self.data_blocks.read_mut(sector_id, &mut self.dev).await?;
+            slot.as_mut_slice()[offset * RAW_ENTRY_LEN] &= 0x7F;
+            touched.insert(TouchedSector::new(TouchedKind::Dir, sector_id));
+
+            offset += 1;
+        }
+
+        Ok(())
     }
 
     #[bisync]
@@ -802,11 +819,8 @@ where
             while let Some((dir_entry, _location)) = reader.next(self).await? {
                 let entry_type_val = dir_entry[0];
                 match EntryType::from(entry_type_val) {
-                    EntryType::UnusedOrEndOfDirectory => {
-                        // TODO: consider checking for end of directory
-                        // as this cluster may contain junk from previous use after the end of directory marker
-                        continue;
-                    }
+                    EntryType::EndOfDirectory if is_end_of_directory(dir_entry) => break,
+                    EntryType::EndOfDirectory | EntryType::Unused(_) => continue,
                     _ => return Err(ExFatError::DirectoryNotEmpty),
                 }
             }
@@ -828,33 +842,9 @@ where
             .free(&mut self.dev, &mut touched, &mut self.fat, &chain)
             .await?;
 
-        let mut sector_id = file_details.location.sector_id;
-        let dir_entry_offset = file_details.location.dir_entry_offset;
-
-        let mut count = None;
-        let mut from = dir_entry_offset;
-        loop {
-            let slot = self.data_blocks.read_mut(sector_id, &mut self.dev).await?;
-            let (dir_entries, _remainder) = slot.as_mut_slice().as_chunks_mut::<RAW_ENTRY_LEN>();
-
-            let count = count.get_or_insert_with(|| {
-                let file_dir_entry = FileDirEntry::from(&dir_entries[dir_entry_offset]);
-                file_dir_entry.secondary_count as usize
-            });
-
-            let to = (from + *count).min(dir_entries.len());
-            for dir_entry in &mut dir_entries[from..to] {
-                Self::mark_dir_entry_free(dir_entry);
-                *count -= 1;
-            }
-
-            if *count == 0 {
-                break;
-            } else {
-                sector_id += 1;
-                from = 0;
-            }
-        }
+        let num_entries = file_details.secondary_count as usize + 1;
+        self.mark_directory_entry_set_unused(&mut touched, file_details.location, num_entries)
+            .await?;
 
         touched.flush(self).await?;
 
@@ -873,7 +863,7 @@ where
         while let Some((entry, location)) = entries.next(self).await? {
             let entry_type_val = entry[0];
             match EntryType::from(entry_type_val) {
-                EntryType::UnusedOrEndOfDirectory => {
+                EntryType::EndOfDirectory | EntryType::Unused(_) => {
                     if start.is_none() {
                         start = Some(location)
                     }
@@ -963,7 +953,7 @@ where
                 let entry: UpcaseTableDirEntry = chunk.into();
                 upcase_table_dir_entry = Some(entry);
             }
-            EntryType::UnusedOrEndOfDirectory if is_end_of_directory(chunk) => {
+            EntryType::EndOfDirectory if is_end_of_directory(chunk) => {
                 break;
             }
             _ => {} // ignore
@@ -1018,7 +1008,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::{
-        blocking::file_system,
+        blocking::{directory::MAX_NAME_LEN, file_system},
         test_utils::{BLOCK_SIZE, DummyBlockDevice},
     };
 
@@ -1026,6 +1016,121 @@ mod tests {
     use super::*;
     use aligned::Aligned;
     use alloc::{vec, vec::Vec};
+
+    #[only_sync]
+    fn empty_fs() -> FileSystem<DummyBlockDevice, BLOCK_SIZE, 4> {
+        let mut io = DummyBlockDevice::new(512); // 8 clusters
+        io.blocks[1][0] = 1; // cluster 2 (root dir) allocated
+        let mut fs = FileSystem::<_, _, 4>::new(io);
+        fs.is_mounted = true;
+        fs.fs.first_cluster_of_root_dir = 2;
+        fs.upcase_table = UpcaseTable::default();
+        fs.allocator.bitmap.first_sector = 1;
+        fs.allocator.bitmap.num_sectors = 1;
+        fs.allocator.bitmap.cluster_count = 8;
+        fs
+    }
+
+    #[only_sync]
+    fn list_names(fs: &mut FileSystem<DummyBlockDevice, BLOCK_SIZE, 4>, path: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut name_buf = [0u8; MAX_NAME_LEN];
+        let mut iter = fs.read_dir((path)).unwrap();
+        while let Some(entry) = iter.next_entry(fs, &mut name_buf).unwrap() {
+            names.push(String::from(entry.name));
+        }
+
+        names
+    }
+
+    #[only_sync]
+    #[test]
+    fn check_for_entry_type_mapping_errors() {
+        // test every byte combination
+        for b in 0..=u8::MAX {
+            assert_eq!(EntryType::from(b).serialize(), b, "byte {b:#04x}");
+        }
+
+        // test boundary conditions
+        assert!(matches!(EntryType::from(0x05), EntryType::Unused(0x05)));
+        assert!(matches!(EntryType::from(0x00), EntryType::EndOfDirectory));
+        assert!(matches!(EntryType::from(0x85), EntryType::FileAndDirectory));
+    }
+
+    // this ensures that deleting a directory entry does not make the dir entry scanner stop scanning
+    // this would be the case if we simply write zeros (which would be interpreted as an end of directory marker)
+    #[only_sync]
+    #[test]
+    fn removing_file_keeps_later_dir_entries_visible() {
+        let mut fs = empty_fs();
+        let create = OpenOptions::new().create(true).write(true);
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs.open(name, create).unwrap().close(&mut fs).unwrap();
+        }
+
+        // remove the first file in the dir
+        fs.remove_file("a.txt").unwrap();
+
+        // check that b.txt and c.txt are still discoverable
+        assert_eq!(list_names(&mut fs, ""), ["b.txt", "c.txt"]);
+
+        let root = &fs.dev.blocks[0];
+        assert_eq!([root[0], root[32], root[64]], [0x05, 0x40, 0x41]);
+        assert_eq!(&root[66..70], &[b'a', 0, b'.', 0], "payload untouched");
+    }
+
+    #[only_sync]
+    #[test]
+    fn deleted_slot_is_reused_by_next_create() {
+        let mut fs = empty_fs();
+        let create = OpenOptions::new().create(true).write(true);
+        for name in ["a.txt", "b.txt"] {
+            fs.open(name, create).unwrap().close(&mut fs).unwrap();
+        }
+        fs.remove_file("a.txt").unwrap();
+        fs.open("d.txt", create).unwrap().close(&mut fs).unwrap();
+
+        // if d.txt wasn't created in a.txt's place this wouldn't be a valid FileDirectoryEntryType
+        assert_eq!(fs.dev.blocks[0][0], 0x85);
+        assert_eq!(list_names(&mut fs, ""), ["d.txt", "b.txt"]);
+    }
+
+    #[only_sync]
+    #[test]
+    fn can_remove_dir_after_contents_deleted() {
+        let mut fs = empty_fs();
+        fs.create_directory("my_dir").unwrap();
+        let create = OpenOptions::new().create(true).write(true);
+        fs.open("my_dir/a.txt", create)
+            .unwrap()
+            .close(&mut fs)
+            .unwrap();
+
+        // attempt to delete a dir that is not empty should fail
+        assert!(matches!(
+            fs.remove_dir("my_dir"),
+            Err(ExFatError::DirectoryNotEmpty)
+        ));
+
+        // attempt to delete an empty dir should not fail and actually delete the directory
+        fs.remove_file("my_dir/a.txt").unwrap();
+        fs.remove_dir("my_dir").unwrap();
+        assert!(!fs.exists("my_dir").unwrap());
+    }
+
+    #[only_sync]
+    #[test]
+    fn renaming_a_file_keeps_later_entries_visible() {
+        let mut fs = empty_fs();
+        let create = OpenOptions::new().create(true).write(true);
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs.open(name, create).unwrap().close(&mut fs).unwrap();
+        }
+
+        fs.rename("a.txt", "z.txt").unwrap();
+
+        assert_eq!(list_names(&mut fs, ""), ["b.txt", "c.txt", "z.txt"]);
+    }
 
     #[only_sync]
     #[test]
