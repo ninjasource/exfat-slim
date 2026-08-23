@@ -783,17 +783,16 @@ where
             return Ok(file_details.first_cluster);
         }
 
-        let num_clusters = (cursor / self.fs.cluster_length as u64) as u32;
+        let num_clusters = ((cursor - 1) / self.fs.cluster_length as u64) as u32;
 
         if file_details
             .flags
             .contains(GeneralSecondaryFlags::NoFatChain)
         {
-            let cluster_id = file_details.first_cluster + num_clusters;
-            Ok(cluster_id)
+            Ok(file_details.first_cluster + num_clusters)
         } else {
             let mut cluster_id = file_details.first_cluster;
-            for _i in 0..num_clusters - 1 {
+            for _i in 0..num_clusters {
                 if let Some(x) = self
                     .fat
                     .next_cluster_in_fat_chain(cluster_id, &mut self.dev)
