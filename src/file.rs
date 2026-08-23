@@ -7,7 +7,7 @@ use crate::timestamp::{EncodedTimestamp, Timestamp};
 
 use super::{
     BlockDevice,
-    allocation::{AllocatedRun, StoredChain},
+    allocation::{AllocatedRun, SearchPolicy, StoredChain},
     bisync,
     directory_entry::{
         DirSetWriter,
@@ -859,7 +859,7 @@ impl File {
 
         let run = fs
             .allocator
-            .find_free_clusters(&mut fs.dev, num_clusters)
+            .find_free_clusters(&mut fs.dev, None, num_clusters, SearchPolicy::LongestRun)
             .await?;
 
         if run.cluster_count != num_clusters {

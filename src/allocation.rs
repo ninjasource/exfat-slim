@@ -153,6 +153,9 @@ pub(crate) enum StoredChain {
 pub(crate) struct AllocationBitmapSlim {
     pub first_sector: u32,
     pub num_sectors: u32,
+    // from boot sector cluster_count
+    // bits in the bitmap past this are padding and should never be allocated
+    pub cluster_count: u32,
 }
 
 #[derive(Debug)]
@@ -230,22 +233,25 @@ where
         count: u32,
     ) -> ExFatResult<AllocatedRun, D, SIZE> {
         let run = match chain {
-            StoredChain::Empty => self.find_free_clusters(io, count).await?,
+            StoredChain::Empty => {
+                self.find_free_clusters(io, None, count, SearchPolicy::LongestRun)
+                    .await?
+            }
 
             StoredChain::Contiguous {
                 first,
                 cluster_count,
             } => {
-                self.find_free_clusters_from(
+                self.find_free_clusters(
                     io,
-                    first + cluster_count,
+                    Some(first + cluster_count),
                     count,
                     SearchPolicy::FirstRun,
                 )
                 .await?
             }
             StoredChain::Fat { last, .. } => {
-                self.find_free_clusters_from(io, last + 1, count, SearchPolicy::FirstRun)
+                self.find_free_clusters(io, Some(last + 1), count, SearchPolicy::FirstRun)
                     .await?
             }
         };
@@ -283,20 +289,24 @@ where
             } => {
                 let mut cluster_id = *first;
 
-                while let Some(next_cluster_id) =
-                    fat.next_cluster_in_fat_chain(cluster_id, io).await?
-                {
+                // bounded by cluster count so that we cant get in an infinite
+                // loop with a cycle caused by a corrupt fat chain
+                for _ in 0..*_cluster_count {
+                    let next_cluster_id = fat.next_cluster_in_fat_chain(cluster_id, io).await?;
+
                     let run = AllocatedRun {
                         first_cluster: cluster_id,
                         cluster_count: 1,
                     };
+
                     self.mark_allocated(io, touched, &run, false).await?;
                     fat.set(io, touched, cluster_id, NO_CLUSTER_ID).await?;
-                    cluster_id = next_cluster_id;
-                }
 
-                // the last cluster
-                fat.set(io, touched, cluster_id, NO_CLUSTER_ID).await?;
+                    match next_cluster_id {
+                        Some(next) => cluster_id = next,
+                        None => break,
+                    }
+                }
             }
         }
         Ok(())
@@ -338,8 +348,13 @@ where
 
         // check that the whole run fits in allocation bitmap
         // remember that BitmapPos is relative to the start of the bitmap so we can use num_sectors
-        let last_cluster = run.first_cluster + run.cluster_count - 1;
-        if BitmapPos::<SIZE>::of(last_cluster).sector >= self.bitmap.num_sectors {
+        //let last_cluster = run.first_cluster + run.cluster_count - 1;
+        let Some(last_cluster) = run.first_cluster.checked_add(run.cluster_count - 1) else {
+            return Err(ExFatError::InvalidClusterId(run.first_cluster));
+        };
+        if last_cluster >= FIRST_CLUSTER_ID + self.bitmap.cluster_count
+            || BitmapPos::<SIZE>::of(last_cluster).sector >= self.bitmap.num_sectors
+        {
             return Err(ExFatError::InvalidClusterId(run.first_cluster));
         }
 
@@ -367,19 +382,21 @@ where
 
         let first_sector = self.bitmap.first_sector;
         let num_sectors = self.bitmap.num_sectors;
+        let end_cluster = FIRST_CLUSTER_ID + self.bitmap.cluster_count;
         let start = BitmapPos::<SIZE>::of(from_cluster);
 
-        let mut cluster_id = BitmapPos::<SIZE>::first_cluster_of(start.sector);
+        if from_cluster >= end_cluster || start.sector >= num_sectors {
+            // nothing free after from_cluster.
+            // let the called decide wether to wrap
+            return Err(ExFatError::DiskFull);
+        }
 
+        let mut cluster_id = BitmapPos::<SIZE>::first_cluster_of(start.sector);
         let mut first_cluster = None;
         let mut count = 0;
         let mut longest = None;
 
-        if start.sector >= num_sectors {
-            return Err(ExFatError::InvalidClusterId(from_cluster));
-        }
-
-        for sector in start.sector..num_sectors {
+        'scan: for sector in start.sector..num_sectors {
             let slot = self.cache.read(first_sector + sector, io).await?;
             let (chunks, _remainder) = slot.as_slice().as_chunks::<4>();
 
@@ -401,6 +418,11 @@ where
                         if cluster_id < from_cluster {
                             cluster_id += 1;
                             continue;
+                        }
+
+                        if cluster_id >= end_cluster {
+                            // everything from here is just padding
+                            break 'scan;
                         }
 
                         if is_free(*byte, bit) {
@@ -440,18 +462,18 @@ where
     pub(crate) async fn find_free_clusters(
         &mut self,
         io: &mut D,
+        from_cluster: Option<u32>,
         num_clusters: u32,
+        policy: SearchPolicy,
     ) -> ExFatResult<AllocatedRun, D, SIZE> {
-        let from_cluster = self.next_search_cluster;
-        let policy = SearchPolicy::LongestRun;
-
+        let from_cluster = from_cluster.unwrap_or(self.next_search_cluster);
         let run = match self
             .find_free_clusters_from(io, from_cluster, num_clusters, policy)
             .await
         {
             Ok(run) => run,
             Err(ExFatError::DiskFull) if from_cluster > FIRST_CLUSTER_ID => {
-                self.find_free_clusters_from(io, from_cluster, num_clusters, policy)
+                self.find_free_clusters_from(io, FIRST_CLUSTER_ID, num_clusters, policy)
                     .await?
             }
             Err(e) => return Err(e),
@@ -482,6 +504,7 @@ mod tests {
         let mut alloc = Allocator::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
         alloc.bitmap.first_sector = 1;
         alloc.bitmap.num_sectors = 1;
+        alloc.bitmap.cluster_count = BLOCK_SIZE as u32 * 8; // heap fills the entire bitmap sector
         let mut touched = FileDirty::new();
 
         // act
@@ -506,6 +529,7 @@ mod tests {
         let mut alloc = Allocator::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
         alloc.bitmap.first_sector = 1;
         alloc.bitmap.num_sectors = 2;
+        alloc.bitmap.cluster_count = alloc.bitmap.num_sectors * BLOCK_SIZE as u32 * 8; // heap fills the entire bitmap sector
         let mut touched = FileDirty::new();
         let run = AllocatedRun {
             first_cluster: 4094,
@@ -587,5 +611,69 @@ mod tests {
                 "cluster_id {first_cluster} count {cluster_count}"
             );
         }
+    }
+
+    #[only_sync]
+    #[test]
+    fn do_not_allocate_past_end_of_cluster_heap() {
+        let mut io = DummyBlockDevice::new(4);
+        let mut alloc = Allocator::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
+        alloc.bitmap.first_sector = 1;
+        alloc.bitmap.num_sectors = 1;
+        alloc.bitmap.cluster_count = 10; // clusters 2..=11 (the rest of the sector is padding)
+        let mut touched = FileDirty::new();
+
+        // allocate all 10 available clusters
+        let run = alloc
+            .allocate(&mut io, &mut touched, &StoredChain::Empty, 12)
+            .unwrap();
+        assert_eq!(run.first_cluster, 2);
+        assert_eq!(run.cluster_count, 10);
+
+        // allocate one more
+        assert!(matches!(
+            alloc.allocate(&mut io, &mut touched, &StoredChain::Empty, 1),
+            Err(ExFatError::DiskFull)
+        ));
+
+        // attempt to mark allocated past valid cluster
+        let run = AllocatedRun {
+            first_cluster: 12,
+            cluster_count: 1,
+        };
+        assert!(matches!(
+            alloc.mark_allocated(&mut io, &mut touched, &run, true),
+            Err(ExFatError::InvalidClusterId(12))
+        ));
+    }
+
+    #[only_sync]
+    #[test]
+    fn search_wraps_to_start_of_heap_when_end_is_full() {
+        let mut io = DummyBlockDevice::new(4);
+        let mut alloc = Allocator::<DummyBlockDevice, BLOCK_SIZE, 4>::new();
+        alloc.bitmap.first_sector = 1;
+        alloc.bitmap.num_sectors = 1;
+        alloc.bitmap.cluster_count = 8; // clusters 2..=9 (the rest of the sector is padding)
+        let mut touched = FileDirty::new();
+
+        // fill the heap then free the first 3 clusters
+        alloc
+            .allocate(&mut io, &mut touched, &StoredChain::Empty, 8)
+            .unwrap();
+        let freed = AllocatedRun {
+            first_cluster: 2,
+            cluster_count: 3,
+        };
+        alloc
+            .mark_allocated(&mut io, &mut touched, &freed, false)
+            .unwrap();
+
+        // the internal next_search_cluster cursor will be at 10 so the search should wrap
+        let run = alloc
+            .allocate(&mut io, &mut touched, &StoredChain::Empty, 2)
+            .unwrap();
+        assert_eq!(run.first_cluster, 2);
+        assert_eq!(run.cluster_count, 2);
     }
 }

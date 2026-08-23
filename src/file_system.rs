@@ -5,7 +5,7 @@ use alloc::{string::String, vec::Vec};
 
 use super::{
     BlockDevice,
-    allocation::{AllocationBitmap, Allocator, StoredChain},
+    allocation::{AllocationBitmap, Allocator, SearchPolicy, StoredChain},
     bisync,
     boot_sector::BootSector,
     directory::{DirectoryIterator, ExactNameFilter, directory_list, get_leaf_file_entry},
@@ -45,6 +45,9 @@ pub(crate) struct FileSystemDetails {
     /// number of bytes in a cluster
     pub cluster_length: u32,
 
+    /// number of clusters in the cluster heap
+    pub cluster_count: u32,
+
     /// first cluster of root directory
     pub first_cluster_of_root_dir: u32,
 }
@@ -56,6 +59,7 @@ impl FileSystemDetails {
             fat_offset: 0,
             sectors_per_cluster: 64,
             cluster_length: 32768,
+            cluster_count: 0,
             first_cluster_of_root_dir: 0,
         }
     }
@@ -66,6 +70,7 @@ impl FileSystemDetails {
             cluster_heap_offset: boot_sector.cluster_heap_offset,
             sectors_per_cluster: boot_sector.sectors_per_cluster,
             cluster_length,
+            cluster_count: boot_sector.cluster_count,
             fat_offset: boot_sector.fat_offset,
             first_cluster_of_root_dir: boot_sector.first_cluster_of_root_dir,
         }
@@ -165,11 +170,13 @@ where
             alloc_bitmap,
         } = read_file_system_metadata(&mut self.dev).await?;
         self.fat.start_of_fat_sector = Some(details.fat_offset);
+        self.allocator.bitmap.cluster_count = details.cluster_count;
         self.fs = details;
         self.allocator.bitmap.first_sector = self
             .fs
             .get_heap_sector_id::<D, SIZE>(alloc_bitmap.first_cluster)?;
         self.allocator.bitmap.num_sectors = alloc_bitmap.num_sectors;
+
         self.upcase_table = upcase_table;
         self.is_mounted = true;
         Ok(())
@@ -609,7 +616,10 @@ where
                 }
                 None => {
                     // directory does not exist, create it
-                    let run = self.allocator.find_free_clusters(&mut self.dev, 1).await?;
+                    let run = self
+                        .allocator
+                        .find_free_clusters(&mut self.dev, None, 1, SearchPolicy::LongestRun)
+                        .await?;
                     self.allocator
                         .mark_allocated(&mut self.dev, touched, &run, true)
                         .await?;
@@ -1062,6 +1072,7 @@ mod tests {
         fs.upcase_table = UpcaseTable::default();
         fs.allocator.bitmap.first_sector = 1;
         fs.allocator.bitmap.num_sectors = 1;
+        fs.allocator.bitmap.cluster_count = 2;
         let options = OpenOptions::new().create(true).write(true);
 
         // act
