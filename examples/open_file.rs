@@ -1,7 +1,11 @@
 mod common;
 
 use crate::common::{BLOCK_SIZE, N, asynchronous::InMemoryBlockDevice};
-use exfat_slim::asynchronous::{error::ExFatError, file::OpenOptions, file_system::{ExFatResult, FileSystem},};
+use exfat_slim::asynchronous::{
+    error::ExFatError,
+    file::OpenOptions,
+    file_system::{ExFatResult, FileSystem},
+};
 use log::info;
 
 #[tokio::main(flavor = "current_thread")]
@@ -41,7 +45,10 @@ async fn main() -> ExFatResult<(), InMemoryBlockDevice, BLOCK_SIZE> {
 
     // attempt to read a file when read not enabled
     let contents = file.read_to_string(&mut fs).await;
-    assert!(matches!(contents, Err(ExFatError::ReadNotEnabled)));
+    assert!(
+        matches!(contents, Err(ExFatError::ReadNotEnabled)),
+        "{contents:?}"
+    );
     info!("confirmed behaviour:  cannot read because read not enabled");
     file.close(&mut fs).await?;
 

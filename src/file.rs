@@ -565,6 +565,10 @@ impl File {
     where
         D: BlockDevice<SIZE>,
     {
+        if !self.open_options.read {
+            return Err(ExFatError::ReadNotEnabled);
+        }
+
         let mut filled = 0;
         while filled < buf.len() {
             match self.read(fs, &mut buf[filled..]).await? {
