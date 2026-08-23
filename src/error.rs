@@ -74,4 +74,7 @@ pub enum ExFatError<E> {
 
     #[error("supplied buffer to decode file name into was too small")]
     FileNameBufferTooSmall,
+
+    #[error("growing a directory not yet supported")]
+    DirectoryFull,
 }

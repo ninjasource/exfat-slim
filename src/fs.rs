@@ -118,6 +118,9 @@ pub enum Error {
 
     #[error("supplied buffer to decode file name into was too small")]
     FileNameBufferTooSmall,
+
+    #[error("growing a directory not yet supported")]
+    DirectoryFull,
 }
 
 impl<E> From<ExFatError<E>> for Error
@@ -166,6 +169,7 @@ where
             ExFatError::WriteNotEnabled => Error::WriteNotEnabled,
             ExFatError::Unexpected(reason) => Error::Unexpected(reason),
             ExFatError::FileNameBufferTooSmall => Error::FileNameBufferTooSmall,
+            ExFatError::DirectoryFull => Error::DirectoryFull,
         }
     }
 }
@@ -914,7 +918,7 @@ where
         }
         Op::OpenFile { path, options } => {
             let file = file_system.open(&path, options).await?;
-            let handle = FileHandle(files.add(file).unwrap());
+            let handle = FileHandle(files.add(file)?);
             Resp::FileOpen { handle }
         }
         Op::ReadFileToString { handle } => {
@@ -961,7 +965,7 @@ where
         }
         Op::OpenDirectory { path } => {
             let dir = file_system.read_dir(&path).await?;
-            let handle = DirectoryHandle(dirs.add(dir).unwrap());
+            let handle = DirectoryHandle(dirs.add(dir)?);
             Resp::DirectoryOpen { handle }
         }
         Op::DirectoryNextEntry { handle } => {

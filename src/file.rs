@@ -885,7 +885,9 @@ impl File {
             .await?;
 
         if run.cluster_count != num_clusters {
-            unimplemented!("writing to a file using the fat chain is not yet supported")
+            // TODO: writing to a file using the fat chain is not yet supported
+            // for now just return the error below
+            return Err(ExFatError::DiskFull);
         }
 
         // find directory or recursively create it if it does not already exist

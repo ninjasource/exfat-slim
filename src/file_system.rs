@@ -883,7 +883,7 @@ where
 
         match start {
             Some(location) => Ok(location),
-            None => unimplemented!("growing a directory not yet supported"),
+            None => Err(ExFatError::DirectoryFull),
         }
     }
 }
