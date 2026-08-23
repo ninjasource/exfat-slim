@@ -21,7 +21,7 @@ pub mod blocking {
     pub mod file;
     pub mod file_system;
     mod slot_cache;
-    mod upcase_table;
+    pub(crate) mod upcase_table;
     pub mod utils;
     //#[cfg(test)]
     //mod mocks;
@@ -41,7 +41,7 @@ pub mod asynchronous {
     #[cfg(feature = "embassy")]
     pub mod fs;
     mod slot_cache;
-    mod upcase_table;
+    pub(crate) mod upcase_table;
     pub mod utils;
 
     pub use block_device_driver::BlockDevice;

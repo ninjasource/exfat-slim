@@ -11,6 +11,7 @@ use super::{
 const MIN_CLUSER_ID: u32 = 2;
 const CLUSTER_LEN: u32 = 0xFFFFFFF6;
 const ENTRY_SIZE: usize = size_of::<u32>();
+pub(crate) const END_OF_CHAIN: u32 = 0xFFFF_FFFF;
 
 #[derive(Debug)]
 pub struct Fat<D, const SIZE: usize, const N: usize>
@@ -110,7 +111,6 @@ where
 mod tests {
     use super::super::only_sync;
     use super::*;
-    const END_OF_CHAIN: u32 = 0xFFFF_FFFF;
 
     use crate::{
         blocking::file::{FileDirty, NO_CLUSTER_ID},

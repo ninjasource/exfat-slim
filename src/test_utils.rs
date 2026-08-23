@@ -1,4 +1,6 @@
-use crate::blocking::BlockDevice;
+use crate::blocking::{
+    BlockDevice, directory::MAX_NAME_LEN, file_system::FileSystem, upcase_table::UpcaseTable,
+};
 
 use super::*;
 use aligned::Aligned;
@@ -45,4 +47,31 @@ impl BlockDevice<BLOCK_SIZE> for DummyBlockDevice {
     fn size(&mut self) -> Result<u64, Self::Error> {
         todo!()
     }
+}
+
+pub(crate) fn empty_fs() -> FileSystem<DummyBlockDevice, BLOCK_SIZE, 4> {
+    let mut io = DummyBlockDevice::new(512); // 8 clusters
+    io.blocks[1][0] = 1; // cluster 2 (root dir) allocated
+    let mut fs = FileSystem::<_, _, 4>::new(io);
+    fs.is_mounted = true;
+    fs.fs.first_cluster_of_root_dir = 2;
+    fs.upcase_table = UpcaseTable::default();
+    fs.allocator.bitmap.first_sector = 1;
+    fs.allocator.bitmap.num_sectors = 1;
+    fs.allocator.bitmap.cluster_count = 8;
+    fs
+}
+
+pub(crate) fn list_names(
+    fs: &mut FileSystem<DummyBlockDevice, BLOCK_SIZE, 4>,
+    path: &str,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut name_buf = [0u8; MAX_NAME_LEN];
+    let mut iter = fs.read_dir(path).unwrap();
+    while let Some(entry) = iter.next_entry(fs, &mut name_buf).unwrap() {
+        names.push(String::from(entry.name));
+    }
+
+    names
 }

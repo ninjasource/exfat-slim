@@ -3,6 +3,7 @@ use aligned::Aligned;
 #[cfg(feature = "alloc")]
 use alloc::{string::String, vec, vec::Vec};
 
+use super::fat::END_OF_CHAIN;
 use crate::timestamp::{EncodedTimestamp, Timestamp};
 
 use super::{
@@ -621,13 +622,30 @@ impl File {
             .contains(GeneralSecondaryFlags::NoFatChain);
 
         if has_fat_chain {
-            let mut cluster_id = self.current_cluster;
-            for cluster_next in run.first_cluster..run.first_cluster + run.cluster_count {
-                fs.fat
-                    .set(&mut fs.dev, &mut self.touched, cluster_id, cluster_next)
-                    .await?;
-                cluster_id = cluster_next;
+            // we cannot use self.current_cluster because the cursor may not be at the end of the file
+            let mut prev_cluster = match &self.chain {
+                StoredChain::Empty => None,
+                StoredChain::Contiguous {
+                    first,
+                    cluster_count,
+                } => Some(first + cluster_count - 1),
+                StoredChain::Fat { last, .. } => Some(*last),
+            };
+
+            for next_cluster in run.first_cluster..run.first_cluster + run.cluster_count {
+                if let Some(prev_cluster) = prev_cluster {
+                    fs.fat
+                        .set(&mut fs.dev, &mut self.touched, prev_cluster, next_cluster)
+                        .await?;
+                }
+
+                prev_cluster = Some(next_cluster);
             }
+
+            let last = run.first_cluster + run.cluster_count - 1;
+            fs.fat
+                .set(&mut fs.dev, &mut self.touched, last, END_OF_CHAIN)
+                .await?;
         }
 
         let old_chain = self.chain.clone();
@@ -957,10 +975,20 @@ impl File {
                 .set(GeneralSecondaryFlags::NoFatChain, false);
             self.touched.is_dir_entry_dirty = true;
 
-            for cluster_id in self.details.first_cluster..self.current_cluster {
-                fs.fat
-                    .set(&mut fs.dev, &mut self.touched, cluster_id, cluster_id + 1)
-                    .await?;
+            // note that we cannot use current_cluster here because the cursor may not be at the end of the file
+            match self.chain {
+                StoredChain::Contiguous {
+                    first,
+                    cluster_count,
+                } => {
+                    let tail = first + cluster_count - 1;
+                    for cluster_id in first..tail {
+                        fs.fat
+                            .set(&mut fs.dev, &mut self.touched, cluster_id, cluster_id + 1)
+                            .await?;
+                    }
+                }
+                _ => return Ok(()),
             }
         }
 
@@ -1056,5 +1084,54 @@ impl File {
                 }
             }
         }
+    }
+}
+
+#[allow(unused)]
+#[cfg(test)]
+mod tests {
+    use super::super::only_sync;
+    use super::*;
+    use crate::test_utils::empty_fs;
+
+    #[only_sync]
+    #[test]
+    fn fragmented_write_terminates_fat_chain_correctly() {
+        // arrange that cluster 4 is already allocated before we start writing to cluster 3
+        // the plan is to write to fill up cluster 3 and 5 as a result
+        let mut fs = empty_fs();
+        fs.fat.start_of_fat_sector = Some(400);
+        let cluster_len = fs.fs.cluster_length as usize;
+        fs.dev.blocks[1][0] |= 0b0000_0100; // mark cluster 4 as allocated
+
+        // act - make two writes which will trigger the creation of a fragmented file
+        let create = OpenOptions::new().create(true).write(true);
+        let mut file = fs.open("fragmented.txt", create).unwrap();
+        file.write(&mut fs, &vec![0xAA; cluster_len]).unwrap(); // fill cluster 3
+        file.write(&mut fs, &vec![0xBB; cluster_len]).unwrap(); // forces jump to cluster 5
+        file.close(&mut fs).unwrap();
+
+        // assert that the fat table is correct
+        let fat = &fs.dev.blocks[400];
+        assert_eq!(
+            &fat[3 * 4..3 * 4 + 4],
+            &5u32.to_le_bytes(),
+            "cluster 3 -> 5"
+        );
+        assert_eq!(
+            &fat[5 * 4..5 * 4 + 4],
+            &0xFFFF_FFFFu32.to_le_bytes(),
+            "cluster 5 -> END_OF_CHAIN"
+        );
+
+        // assert that the entire file can be read correctly
+        let options = OpenOptions::new().read(true);
+        let mut file = fs.open("fragmented.txt", options).unwrap();
+        let mut buf = vec![0u8; 2 * cluster_len];
+        file.read(&mut fs, &mut buf).unwrap();
+        assert!(
+            buf[..cluster_len].iter().all(|&b| b == 0xAA)
+                && buf[cluster_len..].iter().all(|&b| b == 0xBB)
+        );
     }
 }
