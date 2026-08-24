@@ -186,8 +186,8 @@ impl TouchedKind {
     fn rank(&self) -> u8 {
         match self {
             Self::Data => 0,
-            Self::Fat => 1,
-            Self::Bitmap => 2,
+            Self::Bitmap => 1,
+            Self::Fat => 2,
             Self::Dir => 3,
             Self::None => 4,
         }
