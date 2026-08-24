@@ -12,12 +12,14 @@ pub(crate) const BLOCK_SIZE: usize = 512;
 #[derive(Debug)]
 pub(crate) struct DummyBlockDevice {
     pub blocks: Vec<[u8; BLOCK_SIZE]>,
+    pub write_count: usize,
 }
 
 impl DummyBlockDevice {
     pub fn new(count: usize) -> Self {
         Self {
             blocks: vec![[0u8; BLOCK_SIZE]; count],
+            write_count: 0,
         }
     }
 }
@@ -41,6 +43,7 @@ impl BlockDevice<BLOCK_SIZE> for DummyBlockDevice {
         data: &[Aligned<Self::Align, [u8; BLOCK_SIZE]>],
     ) -> Result<(), Self::Error> {
         self.blocks[block_address as usize - SECTOR_OFFSET].copy_from_slice(&data[0].as_slice());
+        self.write_count += 1;
         Ok(())
     }
 

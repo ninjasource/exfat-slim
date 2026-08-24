@@ -254,7 +254,7 @@ impl<const NUM_SECTORS: usize> Touched for FileDirty<NUM_SECTORS> {
 
         self.sectors.clear();
         self.overflowed = false;
-        self.is_dir_entry_dirty = true;
+        self.is_dir_entry_dirty = false;
         Ok(())
     }
 
@@ -1135,5 +1135,31 @@ mod tests {
             buf[..cluster_len].iter().all(|&b| b == 0xAA)
                 && buf[cluster_len..].iter().all(|&b| b == 0xBB)
         );
+    }
+
+    #[only_sync]
+    #[test]
+    fn flush_without_changes_does_not_rewrite_dir_entry() {
+        let mut fs = empty_fs();
+        let create = OpenOptions::new().create(true).write(true);
+        let mut file = fs.open("hello.txt", create).unwrap();
+        file.write(&mut fs, b"foo").unwrap();
+        file.flush(&mut fs).unwrap();
+        let write_count = fs.dev.write_count;
+
+        // check if the write count changes after another flush (that should do nothing)
+        file.flush(&mut fs).unwrap();
+        assert_eq!(
+            fs.dev.write_count, write_count,
+            "flush without changes should not write dir entries"
+        );
+
+        file.write(&mut fs, b"bla").unwrap();
+        file.flush(&mut fs).unwrap();
+        assert!(
+            fs.dev.write_count > write_count,
+            "flush after write should save dir entry"
+        );
+        file.close(&mut fs).unwrap();
     }
 }

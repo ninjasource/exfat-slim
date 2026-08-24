@@ -1114,14 +1114,7 @@ mod tests {
     #[only_sync]
     #[test]
     fn open_file_creates_empty_file() {
-        let mut io = DummyBlockDevice {
-            blocks: vec![
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-                [0; BLOCK_SIZE],
-            ],
-        };
+        let mut io = DummyBlockDevice::new(4);
         let mut fs = FileSystem::<_, _, 4>::new(io);
         fs.is_mounted = true;
         fs.fs.first_cluster_of_root_dir = 2;
@@ -1146,9 +1139,7 @@ mod tests {
     #[test]
     fn write_text_to_file() {
         // arrange
-        let mut io = DummyBlockDevice {
-            blocks: vec![[0; BLOCK_SIZE]; 128], // 2 clusters
-        };
+        let mut io = DummyBlockDevice::new(128); // 2 clusters
         io.blocks[1][0] = 1; // mark the first cluster (cluster 2) as allocated
         let mut fs = FileSystem::<_, _, 4>::new(io);
         fs.is_mounted = true;
