@@ -756,16 +756,12 @@ impl File {
         let data_length = self.details.data_length;
 
         // allocate new clusters if required
-        let used_in_cluster = (data_length % fs.fs.cluster_length as u64) as u32;
-        let last_cluster_is_full = data_length > 0 && used_in_cluster == 0;
-        let free_in_last_cluster = if self.current_cluster == NO_CLUSTER_ID || last_cluster_is_full
-        {
-            0
-        } else {
-            (fs.fs.cluster_length - used_in_cluster) as usize
-        };
-        if buf.len() > free_in_last_cluster {
-            self.allocate_clusters_for(fs, buf.len() - free_in_last_cluster)
+        // be aware that we may be somewhere in the middle of the file (the cursor may not be eof)
+        let cluster_length = fs.fs.cluster_length as u64;
+        let capacity = data_length.div_ceil(cluster_length) * cluster_length;
+        let end_of_write = self.cursor + buf.len() as u64;
+        if end_of_write > capacity {
+            self.allocate_clusters_for(fs, (end_of_write - capacity) as usize)
                 .await?;
         }
 
@@ -1094,7 +1090,7 @@ impl File {
 mod tests {
     use super::super::only_sync;
     use super::*;
-    use crate::test_utils::empty_fs;
+    use crate::test_utils::{empty_fs, read_file};
 
     #[only_sync]
     #[test]
@@ -1161,5 +1157,75 @@ mod tests {
             "flush after write should save dir entry"
         );
         file.close(&mut fs).unwrap();
+    }
+
+    #[only_sync]
+    #[test]
+    fn overwrite_in_place_does_not_allocate() {
+        let mut fs = empty_fs();
+        let cl = fs.fs.cluster_length as usize;
+        let create = OpenOptions::new().create(true).write(true);
+        let mut file = fs.open("a.bin", create).unwrap();
+        file.write(&mut fs, &vec![0xAA; cl]).unwrap(); // fills cluster 3 exactly
+        file.close(&mut fs).unwrap();
+        let bitmap_before = fs.dev.blocks[1][0];
+
+        let rw = OpenOptions::new().read(true).write(true);
+        let mut file = fs.open("a.bin", rw).unwrap();
+        file.write(&mut fs, &vec![0xBB; cl]).unwrap(); // full in-place overwrite
+        file.close(&mut fs).unwrap();
+
+        assert_eq!(
+            fs.dev.blocks[1][0], bitmap_before,
+            "in-place overwrite must not allocate clusters (bitmap {:#010b} was {:#010b})",
+            fs.dev.blocks[1][0], bitmap_before,
+        );
+        let buf = read_file(&mut fs, "a.bin");
+        assert_eq!(buf, vec![0xBB; cl]);
+    }
+
+    #[only_sync]
+    #[test]
+    fn overwrite_extending_past_eof_allocates_only_the_overhang() {
+        let mut fs = empty_fs();
+        let cl = fs.fs.cluster_length as usize;
+        let create = OpenOptions::new().create(true).write(true);
+        let mut file = fs.open("b.bin", create).unwrap();
+        file.write(&mut fs, &vec![0xAA; cl]).unwrap();
+        file.seek(&mut fs, (cl / 2) as u64).unwrap();
+        file.write(&mut fs, &vec![0xBB; cl]).unwrap(); // needs one more cluster
+        file.close(&mut fs).unwrap();
+
+        assert_eq!(fs.dev.blocks[1][0], 0b0000_0111, "clusters 2,3,4 only");
+        let data = read_file(&mut fs, "b.bin");
+        assert_eq!(data.len(), cl + cl / 2);
+        assert!(data[..cl / 2].iter().all(|&b| b == 0xAA));
+        assert!(data[cl / 2..].iter().all(|&b| b == 0xBB));
+    }
+
+    #[only_sync]
+    #[test]
+    fn write_after_truncate_allocates_and_marks_the_bitmap() {
+        let mut fs = empty_fs();
+        let cl = fs.fs.cluster_length as usize;
+        let create = OpenOptions::new().create(true).write(true);
+        let mut file = fs.open("a.bin", create).unwrap();
+        file.write(&mut fs, &vec![0xAA; cl]).unwrap();
+        file.close(&mut fs).unwrap();
+
+        let truncate = OpenOptions::new().write(true).truncate(true);
+        let mut file = fs.open("a.bin", truncate).unwrap();
+        file.write(&mut fs, b"hello").unwrap();
+        file.close(&mut fs).unwrap();
+
+        assert_eq!(
+            fs.dev.blocks[1][0].count_ones(),
+            2,
+            "bitmap must show root + one data cluster, got {:#010b}",
+            fs.dev.blocks[1][0]
+        );
+
+        let buf = read_file(&mut fs, "a.bin");
+        assert_eq!(&buf, b"hello");
     }
 }

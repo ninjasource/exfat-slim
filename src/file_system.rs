@@ -431,7 +431,7 @@ where
         let cluster_count = file_details
             .data_length
             .div_ceil(self.fs.cluster_length as u64) as u32;
-        let is_empty = file_details.first_cluster == NO_CLUSTER_ID;
+        let is_empty = file_details.first_cluster == NO_CLUSTER_ID || cluster_count == 0;
 
         let chain = if is_empty {
             StoredChain::Empty
@@ -491,6 +491,13 @@ where
         }
         let mut touched = FileDirty::new();
 
+        // capture the original chain before changes
+        let stored_chain = self.get_stored_chain(file_details).await?;
+
+        file_details.data_length = length;
+        file_details.valid_data_length = file_details.valid_data_length.min(length);
+        file_details.first_cluster = NO_CLUSTER_ID;
+
         let mut chain = DirectoryEntryChain::new_from_file_details(file_details, &self.fs);
         let mut count = 0;
         let mut dir_set_writer = DirSetWriter::new(file_details.location);
@@ -510,6 +517,7 @@ where
                     let mut stream_ext: StreamExtensionDirEntry = dir_entry.into();
                     stream_ext.data_length = file_details.data_length;
                     stream_ext.valid_data_length = file_details.valid_data_length;
+                    stream_ext.first_cluster = file_details.first_cluster;
                     dir_set_writer
                         .add(self, &mut touched, &stream_ext.serialize(), false)
                         .await?;
@@ -531,10 +539,9 @@ where
         file_details.data_length = length;
         file_details.valid_data_length = file_details.valid_data_length.min(length);
 
-        // mark all clusters as free
-        let chain = self.get_stored_chain(file_details).await?;
+        // mark all clusters as free - use the originally captured chain from the beginning
         self.allocator
-            .free(&mut self.dev, &mut touched, &mut self.fat, &chain)
+            .free(&mut self.dev, &mut touched, &mut self.fat, &stored_chain)
             .await?;
 
         touched.flush(self).await?;

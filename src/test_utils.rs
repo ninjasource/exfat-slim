@@ -1,5 +1,6 @@
 use crate::blocking::{
-    BlockDevice, directory::MAX_NAME_LEN, file_system::FileSystem, upcase_table::UpcaseTable,
+    BlockDevice, directory::MAX_NAME_LEN, file::OpenOptions, file_system::FileSystem,
+    upcase_table::UpcaseTable,
 };
 
 use super::*;
@@ -50,6 +51,18 @@ impl BlockDevice<BLOCK_SIZE> for DummyBlockDevice {
     fn size(&mut self) -> Result<u64, Self::Error> {
         todo!()
     }
+}
+
+pub(crate) fn read_file(
+    fs: &mut FileSystem<DummyBlockDevice, BLOCK_SIZE, 4>,
+    path: &str,
+) -> Vec<u8> {
+    let options = OpenOptions::new().read(true);
+    let mut file = fs.open(path, options).unwrap();
+    let len = file.metadata().len();
+    let mut buf = vec![0u8; len as usize];
+    file.read(fs, &mut buf).unwrap();
+    buf
 }
 
 pub(crate) fn empty_fs() -> FileSystem<DummyBlockDevice, BLOCK_SIZE, 4> {
