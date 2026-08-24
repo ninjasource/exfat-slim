@@ -350,10 +350,16 @@ where
     #[bisync]
     pub async fn rename(&mut self, from_path: &str, to_path: &str) -> ExFatResult<(), D, SIZE> {
         self.mount().await?;
+
         // in exFAT a directory cannot have a directory and file with the same name in it so no need to filter here
         let file_details = self.find_file_inner(from_path, None).await?;
-        let mut touched = FileDirty::new();
 
+        // don't allow moving to a file that already exists
+        if self.find_file_inner(to_path, None).await.is_ok() {
+            return Err(ExFatError::AlreadyExists);
+        }
+
+        let mut touched = FileDirty::new();
         let (dir_path, file_or_dir_name) = split_path(to_path);
 
         // find directory or recursively create it if it does not already exist
