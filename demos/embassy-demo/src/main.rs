@@ -2,7 +2,6 @@
 
 #![no_std]
 #![no_main]
-#![macro_use]
 #![allow(static_mut_refs)]
 
 extern crate alloc;
