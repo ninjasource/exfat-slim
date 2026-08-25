@@ -36,11 +36,11 @@ pub fn read_rtc_calendar() -> (i32, u32, u32, u32, u32, u32) {
         (tr, dr)
     };
 
-    let second = bcd2bin(((tr >> 0) & 0x7f) as u8) as u32;
+    let second = bcd2bin((tr & 0x7f) as u8) as u32;
     let minute = bcd2bin(((tr >> 8) & 0x7f) as u8) as u32;
     let hour = bcd2bin(((tr >> 16) & 0x3f) as u8) as u32;
 
-    let day = bcd2bin(((dr >> 0) & 0x3f) as u8) as u32;
+    let day = bcd2bin((dr & 0x3f) as u8) as u32;
     let month = bcd2bin(((dr >> 8) & 0x1f) as u8) as u32;
     let year = 2000 + bcd2bin(((dr >> 16) & 0xff) as u8) as i32;
 
@@ -62,11 +62,11 @@ fn read_rtc_calendar_and_ssr_stable() -> (i32, u32, u32, u32, u32, u32, u32, u32
         let dr2 = rtc.dr().read().0;
 
         if tr1 == tr2 && dr1 == dr2 && ssr1 == ssr2 {
-            let second = bcd2bin(((tr1 >> 0) & 0x7f) as u8) as u32;
+            let second = bcd2bin((tr1 & 0x7f) as u8) as u32;
             let minute = bcd2bin(((tr1 >> 8) & 0x7f) as u8) as u32;
             let hour = bcd2bin(((tr1 >> 16) & 0x3f) as u8) as u32;
 
-            let day = bcd2bin(((dr1 >> 0) & 0x3f) as u8) as u32;
+            let day = bcd2bin((dr1 & 0x3f) as u8) as u32;
             let month = bcd2bin(((dr1 >> 8) & 0x1f) as u8) as u32;
             let year = 2000 + bcd2bin(((dr1 >> 16) & 0xff) as u8) as i32;
 
@@ -80,7 +80,7 @@ fn read_rtc_calendar_and_ssr_stable() -> (i32, u32, u32, u32, u32, u32, u32, u32
 pub fn rtc_timestamp_now() -> Timestamp {
     let (year, month, day, hour, minute, second, ssr, prediv_s) =
         read_rtc_calendar_and_ssr_stable();
-    let centis = ((prediv_s - ssr) as u32 * 100 / (prediv_s as u32 + 1)) as u8;
+    let centis = ((prediv_s - ssr) * 100 / (prediv_s + 1)) as u8;
     let timestamp = Timestamp {
         year: year as u16,
         month: month as u8,

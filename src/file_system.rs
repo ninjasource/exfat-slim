@@ -753,7 +753,30 @@ where
         Ok(file_details)
     }
 
-    pub fn unmount(self) -> D {
+    // do not make this public as it should only be used by the unmount mechanic
+    // since the file_system does not currently keep track of open files it cannot close them on flush.
+    // all public functions on the file_system like `write`` flush file system metadata anyway
+    #[bisync]
+    async fn flush(&mut self) -> ExFatResult<(), D, SIZE> {
+        self.fat.flush(&mut self.dev).await?;
+        self.allocator.flush(&mut self.dev).await?;
+        self.data_blocks.flush(&mut self.dev).await?;
+        Ok(())
+    }
+
+    /// unmounts the file system and returns the device back to the user.
+    /// IMPORTANT: it is up to the caller to ensure that all open files have been closed.
+    /// it is not necessary to unmount the file system for consistency for example if you need to reboot
+    /// However, a reboot SHOULD close all open files beforehand
+    #[bisync]
+    pub async fn unmount(mut self) -> D {
+        // as a defense in depth precaution we flush all the caches before unmounting
+        // however, this should not be necessary if the user closed all the files
+        // data may still be lost despite the flush below if files are not closed so don't rely on it.
+        if self.flush().await.is_err() {
+            crate::warn!("unmount: flushing leftover dirty sectors failed - possible data loss");
+        }
+
         self.dev
     }
 
@@ -1183,5 +1206,44 @@ mod tests {
         // there are 64 sectors in a cluster here and clusters start at 2
         let data = &fs.dev.blocks[64][..5];
         assert_eq!(data, b"world");
+    }
+
+    // only to be used with the removed_file_stays_removed_after_remount test
+    #[only_sync]
+    fn remount(io: DummyBlockDevice) -> FileSystem<DummyBlockDevice, BLOCK_SIZE, 4> {
+        let mut fs = FileSystem::<_, _, 4>::new(io);
+        fs.is_mounted = true;
+        fs.fs.first_cluster_of_root_dir = 2;
+        fs.upcase_table = UpcaseTable::default();
+        fs.allocator.bitmap.first_sector = 1;
+        fs.allocator.bitmap.cluster_count = 8;
+        fs.allocator.bitmap.num_sectors = 1;
+        fs
+    }
+
+    // this ensures that the cache is cleared between remounts
+    #[only_sync]
+    #[test]
+    fn removed_file_stays_removed_after_remount() {
+        let mut fs = empty_fs();
+        let options = OpenOptions::new().create(true).write(true);
+        let mut file = fs.open("hello.txt", options).unwrap();
+        file.write(&mut fs, b"foo").unwrap();
+        file.close(&mut fs).unwrap();
+
+        let io = fs.unmount();
+        let mut fs = remount(io);
+        assert!(
+            fs.exists("hello.txt").unwrap(),
+            "created file lost by remount"
+        );
+
+        fs.remove_file("hello.txt").unwrap();
+        let io = fs.unmount();
+        let mut fs = remount(io);
+        assert!(
+            !fs.exists("hello.txt").unwrap(),
+            "deleted file survived remount indicating that cache was not cleared"
+        );
     }
 }

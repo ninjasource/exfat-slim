@@ -64,7 +64,7 @@ impl<'a> SdBlockDevice<'a> {
         let mbr = MasterBootRecord::from_bytes(&*data_block).unwrap();
         let entries = mbr.partition_table_entries();
         let num_entries = entries.len();
-        let entry = entries.get(0).unwrap();
+        let entry = entries.first().unwrap();
         let offset = entry.logical_block_address;
 
         info!(

@@ -219,6 +219,7 @@ enum Op {
     RemoveDir { path: String },
     Write { path: String, buffer: Vec<u8> },
     CloseDirectory { handle: u32 },
+    Shutdown,
 }
 
 struct Req {
@@ -613,6 +614,23 @@ pub async fn write(path: &str, buffer: impl Into<Cow<'_, [u8]>>) -> Result<(), E
     }
 }
 
+/// call this before a system shutdown or restart to automatically close any open files
+/// if you know that all your files have been closed correctly then this is a no-operation
+pub async fn shutdown() -> Result<(), Error> {
+    let token = ReplyPool::acquire().await;
+    let req = Req {
+        op: Op::Shutdown,
+        reply: Some(token),
+    };
+    REQ.send(req).await;
+    let resp = ReplyPool::wait(token).await?;
+
+    match resp {
+        Resp::Ok => Ok(()),
+        _ => Err(Error::UnexpectedResponse),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ReplyToken {
     pub slot: u8,
@@ -718,6 +736,10 @@ impl<T> Handles<T> {
         self.handles
             .get_mut(&handle)
             .ok_or(Error::InvalidFileHandle)
+    }
+
+    pub fn take_any(&mut self) -> Option<T> {
+        self.handles.pop_first().map(|(_, item)| item)
     }
 }
 
@@ -834,6 +856,7 @@ where
             match file_system.mount().await {
                 Ok(()) => {
                     self.files.clear();
+                    self.directories.clear();
                     self.file_system = Some(file_system);
                     Ok((
                         self.file_system.as_mut().unwrap(),
@@ -842,7 +865,7 @@ where
                     ))
                 }
                 Err(e) => {
-                    let dev = file_system.unmount();
+                    let dev = file_system.unmount().await;
                     self.dev = Some(dev);
                     return Err(e);
                 }
@@ -854,11 +877,32 @@ where
         }
     }
 
-    pub fn unmount(&mut self) {
+    pub async fn unmount(&mut self) {
         if let Some(file_system) = self.file_system.take() {
-            let dev = file_system.unmount();
+            let dev = file_system.unmount().await;
             self.dev = Some(dev);
         }
+
+        // we don't want to keep stale handles around
+        self.files.clear();
+        self.directories.clear();
+    }
+
+    pub async fn shutdown(&mut self) -> ExFatResult<(), D, SIZE> {
+        let mut first_error = Ok(());
+        if let Some(fs) = self.file_system.as_mut() {
+            while let Some(file) = self.files.take_any() {
+                if let Err(e) = file.close(fs).await
+                    && first_error.is_ok()
+                {
+                    first_error = Err(e);
+                }
+            }
+            self.directories.clear();
+        }
+
+        self.unmount().await;
+        first_error
     }
 }
 
@@ -882,7 +926,7 @@ pub async fn fs_actor_task<D, const SIZE: usize, const N: usize>(
                 }
             }
             Err(Error::NoCard) => {
-                fs_manager.unmount();
+                fs_manager.unmount().await;
                 info!("no card, unmounted");
                 if let Some(reply) = reply {
                     ReplyPool::complete(reply, Err(Error::NoCard))
@@ -905,6 +949,12 @@ where
     D: BlockDevice<SIZE>,
     D::Error: BlockDeviceError,
 {
+    // handled up here because we don't want to remount just to unmount on shutdown
+    if let Op::Shutdown = op {
+        fs_manager.shutdown().await?;
+        return Ok(Resp::Ok);
+    }
+
     let (file_system, files, dirs) = fs_manager.mount().await?;
 
     let resp = match op {
@@ -1010,6 +1060,10 @@ where
         }
         Op::CloseDirectory { handle } => {
             dirs.remove(handle)?;
+            Resp::Ok
+        }
+        Op::Shutdown => {
+            // unreachable, handled before attempting to mount above
             Resp::Ok
         }
     };

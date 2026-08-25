@@ -335,7 +335,7 @@ impl File {
             current_cluster: cluster_id,
             remaining_bytes_in_cluster,
             cursor,
-            open_options: open_options.clone(),
+            open_options: *open_options,
             chain,
             touched: FileDirty::new(),
         }

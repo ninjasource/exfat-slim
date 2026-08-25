@@ -30,7 +30,7 @@ use embassy_stm32::{
     sdmmc::{self, Sdmmc},
 };
 use embassy_time::{Duration, Timer};
-use exfat_slim::asynchronous::file::OpenOptions;
+use exfat_slim::asynchronous::{file::OpenOptions, fs};
 
 use crate::{
     logger_fs::{flush_logs, logger_loop},
@@ -211,6 +211,7 @@ async fn daily_reset_task() -> ! {
                 );
 
                 flush_logs().await;
+                fs::shutdown().await.ok();
                 Timer::after_millis(100).await;
                 on_system_restart();
             }
