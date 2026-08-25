@@ -1,5 +1,5 @@
 # exfat-slim
-An exFAT file system library written in safe Rust for embedded environments. Both async and blocking support with no std library or allocator required.
+An exFAT file system library written in safe Rust for embedded environments. Both async and blocking support with no std library required (allocator optional).
 
 ## Introduction
 
@@ -51,14 +51,13 @@ There is no unsafe Rust in the codebase (excl. dependencies)
 
 - Return zeros where user attempts to read past valid_data_length in file (see File::read function)
 - Truncate to specified length to preallocate a file
-- Better test coverage
 - Maintain list of locked open files
 
 ## Why build this
 
 I wanted to build a `no_std` file system library with the same ergonomics of the Rust standard library. I also wanted to support both a blocking and async api.
-There is no LLM generated code in this repo for two reasons. 
-One is that I enjoy writing software (even the typing bit) and I wrote this code for the learning experience it gave me rather than getting things done.
+This entire repo was written by hand by me and only recently checked for bugs with the help of an LLM in a readonly capacity. I used it very carefully and explicitly and never automatically - again, all hand written and fussed over by me. 
+This was done for two reasons. One is that I enjoy writing software (even the typing bit) and I wrote this code for the learning experience it gave me rather than getting things done.
 Secondly, I respect the people who have to read my code and I personally find it easier to read a codebase when I can trust that it is hallucination free. 
 I am not knocking the amazing coding agents out there right now, its just that it is difficult to trust what you see because not all llm agents do the same job of things.
 
@@ -83,8 +82,9 @@ Listing all files and folders in the folder "/temp2/hello2"
     let path = "/temp2/hello2";
 
     let mut dir = fs.read_dir(path).await?;
-    while let Some(entry) = dir.next_entry(&mut fs).await? {
-        println!("name: {:?}", entry.file_name());
+    let mut name_buf = [0u8; MAX_NAME_LEN];
+    while let Some(entry) = dir.next_entry(&mut fs, &mut name_buf).await? {
+        println!("name: {:?}", entry.name);
     }
 ```
 
@@ -133,7 +133,6 @@ As per the license, this codebase comes with no guarantees and I don't accept an
 Read functions do not mutate the file system so are considered safer than write functions if you are concerned about data corruption or loss. 
 The library should not panic and if it does as a result of a badly formed file system then this is a bug, please report it. 
 I have attempted to replicate how the Rust standard library exposes a file system so that the API feels familiar. 
-As a result I have chosen to require an allocator. 
 If you create a file in a nested directory the library will attempt to create all the required directories if they do not exist.
 
 ## Contribution
