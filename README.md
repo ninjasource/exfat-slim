@@ -155,3 +155,24 @@ It is zipped because it contains mostly zeros. You can use a crate like `mbr-nos
 ```bash
  source ./run_all_examples.sh
 ```
+
+## Changelog
+
+Version `0.6.0`
+
+### Breaking
+
+`FileSystem::unmount` now flushes sector caches before returning the device. If using the `asynchronous` module that means the function becomes async.
+
+### Additions
+
+Added timestamps to files and directories for reads and writes meaning that you need to provide a time source
+
+### Bug fixes
+
+- Fixed directory corruption when deleting and renaming files
+- Fixed remove_file not actually deleting file
+- Fixed FAT chain termination issue
+- Fixed edge cases around the bitmap and file truncation
+- The public API could panic but now returns an Error for unimplemented features
+- Added a lot more unit tests
