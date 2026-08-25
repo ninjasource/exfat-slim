@@ -180,7 +180,7 @@ impl OpenOptions {
         let req = Req {
             op: Op::OpenFile {
                 path: path.to_string(),
-                options: self.clone(),
+                options: *self,
             },
             reply: Some(token),
         };
@@ -867,11 +867,11 @@ where
                 Err(e) => {
                     let dev = file_system.unmount().await;
                     self.dev = Some(dev);
-                    return Err(e);
+                    Err(e)
                 }
             }
         } else if let Some(file_system) = self.file_system.as_mut() {
-            return Ok((file_system, &mut self.files, &mut self.directories));
+            Ok((file_system, &mut self.files, &mut self.directories))
         } else {
             panic!("neither dev or file_system are set")
         }

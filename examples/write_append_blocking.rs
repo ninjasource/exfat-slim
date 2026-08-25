@@ -2,7 +2,7 @@ mod common;
 
 use crate::common::{BLOCK_SIZE, N, blocking::InMemoryBlockDevice};
 use exfat_slim::blocking::file::OpenOptions;
-use exfat_slim::blocking::{ file_system::{ExFatResult, FileSystem},};
+use exfat_slim::blocking::file_system::{ExFatResult, FileSystem};
 use log::info;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};

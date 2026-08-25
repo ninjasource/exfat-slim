@@ -316,7 +316,7 @@ impl File {
         file_details: &FileDetails,
         cluster_id: u32,
         cluster_length: u32,
-        open_options: &OpenOptions,
+        open_options: OpenOptions,
         chain: StoredChain,
     ) -> Self {
         let cursor = if open_options.append {
@@ -335,7 +335,7 @@ impl File {
             current_cluster: cluster_id,
             remaining_bytes_in_cluster,
             cursor,
-            open_options: *open_options,
+            open_options,
             chain,
             touched: FileDirty::new(),
         }
@@ -1227,5 +1227,84 @@ mod tests {
 
         let buf = read_file(&mut fs, "a.bin");
         assert_eq!(&buf, b"hello");
+    }
+
+    #[only_sync]
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn reading_a_write_only_file_fails_even_at_eof() {
+        let mut fs = empty_fs();
+        let create = OpenOptions::new().create(true).write(true);
+        let mut file = fs.open("write_only.txt", create).unwrap();
+        file.write(&mut fs, b"hello").unwrap();
+        file.close(&mut fs).unwrap();
+
+        // reopen file with cursor at the end
+        let append = OpenOptions::new().write(true).append(true);
+        let mut file = fs.open("write_only.txt", append).unwrap();
+
+        // attempt to read to string should fail
+        let result = file.read_to_string(&mut fs);
+        assert!(
+            matches!(result, Err(ExFatError::ReadNotEnabled)),
+            "read_to_string on write-only handle should fail, got: {result:?}"
+        );
+
+        // attempt to read to buffer should fail
+        let mut buf = Vec::new();
+        let result = file.read_to_end(&mut fs, &mut buf);
+        assert!(
+            matches!(result, Err(ExFatError::ReadNotEnabled)),
+            "read_to_end on write-only handle should fail, got: {result:?}"
+        );
+
+        // attempt to read to buffer should fail
+        let result = file.read(&mut fs, &mut [0u8; 4]);
+        assert!(
+            matches!(result, Err(ExFatError::ReadNotEnabled)),
+            "read on write-only handle should fail, got: {result:?}"
+        );
+
+        // attempt to read into empty buffer should fail
+        let result = file.read(&mut fs, &mut []);
+        assert!(
+            matches!(result, Err(ExFatError::ReadNotEnabled)),
+            "read on write-only handle should fail, got: {result:?}"
+        );
+    }
+
+    #[only_sync]
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn allocated_reads() {
+        let mut fs = empty_fs();
+        let create = OpenOptions::new().create(true).write(true);
+        let mut file = fs.open("temp.txt", create).unwrap();
+        file.write(&mut fs, b"hello").unwrap();
+        file.close(&mut fs).unwrap();
+
+        // reopen file
+        let read = OpenOptions::new().read(true);
+        let mut file = fs.open("temp.txt", read).unwrap();
+
+        // read to string
+        let result = file.read_to_string(&mut fs).unwrap();
+        assert_eq!(result, "hello");
+
+        // reopen file
+        let read = OpenOptions::new().read(true);
+        let mut file = fs.open("temp.txt", read).unwrap();
+
+        // read into buf
+        let mut buf = Vec::new();
+        let len = file.read_to_end(&mut fs, &mut buf).unwrap();
+        assert_eq!(buf.len(), len);
+        assert_eq!(len, 5);
+        assert_eq!(&buf, b"hello");
+
+        // cursor is already at the end, more reading returns zero bytes
+        let mut buf = Vec::new();
+        let len = file.read_to_end(&mut fs, &mut buf).unwrap();
+        assert_eq!(len, 0);
     }
 }

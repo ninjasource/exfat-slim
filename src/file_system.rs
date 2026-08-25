@@ -236,7 +236,7 @@ where
             &file_details,
             cluster_id,
             self.fs.cluster_length,
-            &options,
+            options,
             chain,
         ))
     }

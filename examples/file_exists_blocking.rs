@@ -1,7 +1,7 @@
 mod common;
 
 use crate::common::{BLOCK_SIZE, N, blocking::InMemoryBlockDevice};
-use exfat_slim::blocking::{file_system::{ExFatResult, FileSystem},};
+use exfat_slim::blocking::file_system::{ExFatResult, FileSystem};
 use log::info;
 
 // in order to use this library in a blocking way just use the `blocking` module above instead of the `asynchronous` one

@@ -1,7 +1,7 @@
 mod common;
 
 use crate::common::{BLOCK_SIZE, N, asynchronous::InMemoryBlockDevice};
-use exfat_slim::asynchronous::{ file_system::{ExFatResult, FileSystem},};
+use exfat_slim::asynchronous::file_system::{ExFatResult, FileSystem};
 use log::info;
 
 #[tokio::main(flavor = "current_thread")]

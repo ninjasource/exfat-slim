@@ -12,7 +12,7 @@ use std::str::from_utf8;
 
 use crate::common::{BLOCK_SIZE, N, asynchronous::InMemoryBlockDevice};
 use exfat_slim::asynchronous::file::OpenOptions;
-use exfat_slim::asynchronous::{file_system::{ExFatResult, FileSystem},};
+use exfat_slim::asynchronous::file_system::{ExFatResult, FileSystem};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
