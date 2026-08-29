@@ -822,9 +822,8 @@ mod tests {
         assert!(entry_set.len().is_multiple_of(RAW_ENTRY_LEN));
         let mut writer = DirSetWriter::new(Location::new(0, 0));
 
-        for (i, entry) in entry_set.chunks_exact(RAW_ENTRY_LEN).enumerate() {
-            let raw: &RawDirEntry = &entry.try_into().unwrap();
-            writer.add_no_write::<512>(raw, i == 0);
+        for (i, dir_entry) in entry_set.as_chunks::<RAW_ENTRY_LEN>().0.iter().enumerate() {
+            writer.add_no_write::<512>(dir_entry, i == 0);
         }
 
         let stored = u16::from_le_bytes([entry_set[2], entry_set[3]]);
@@ -889,9 +888,8 @@ mod tests {
         changed[3] = 0xAD;
         let mut writer = DirSetWriter::new(Location::new(0, 0));
 
-        for (i, entry) in changed.chunks_exact(RAW_ENTRY_LEN).enumerate() {
-            let raw: &RawDirEntry = &entry.try_into().unwrap();
-            writer.add_no_write::<512>(raw, i == 0);
+        for (i, dir_entry) in changed.as_chunks::<RAW_ENTRY_LEN>().0.iter().enumerate() {
+            writer.add_no_write::<512>(dir_entry, i == 0);
         }
 
         assert_eq!(writer.checksum, 0x77F0);
@@ -904,9 +902,8 @@ mod tests {
         changed[40] ^= 0x01;
         let mut writer = DirSetWriter::new(Location::new(0, 0));
 
-        for (i, entry) in changed.chunks_exact(RAW_ENTRY_LEN).enumerate() {
-            let raw: &RawDirEntry = &entry.try_into().unwrap();
-            writer.add_no_write::<512>(raw, i == 0);
+        for (i, dir_entry) in changed.as_chunks::<RAW_ENTRY_LEN>().0.iter().enumerate() {
+            writer.add_no_write::<512>(dir_entry, i == 0);
         }
 
         assert_ne!(writer.checksum, 0x77F0);

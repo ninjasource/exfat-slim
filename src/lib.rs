@@ -7,7 +7,9 @@ extern crate alloc;
 
 #[path = "."]
 pub mod blocking {
-    pub use bisync::synchronous::*;
+    #[allow(unused_imports)]
+    pub(crate) use ::exfat_slim_macros::internal_noop as only_sync;
+    pub(crate) use ::exfat_slim_macros::internal_strip_async as bisync;
 
     mod block_device;
     pub use block_device::BlockDevice;
@@ -23,13 +25,14 @@ pub mod blocking {
     mod slot_cache;
     pub(crate) mod upcase_table;
     pub mod utils;
-    //#[cfg(test)]
-    //mod mocks;
 }
 
 #[path = "."]
 pub mod asynchronous {
-    pub use bisync::asynchronous::*;
+    #[allow(unused_imports)]
+    pub(crate) use ::exfat_slim_macros::internal_delete as only_sync;
+    pub(crate) use ::exfat_slim_macros::internal_noop as bisync;
+
     mod allocation;
     pub mod boot_sector;
     pub mod directory;
@@ -45,9 +48,6 @@ pub mod asynchronous {
     pub mod utils;
 
     pub use block_device_driver::BlockDevice;
-
-    //#[cfg(test)]
-    //mod mocks;
 }
 
 pub mod timestamp;

@@ -12,7 +12,7 @@ pub mod blocking;
 pub const BLOCK_SIZE: usize = 512;
 pub const N: usize = 4; // cache size
 
-pub(crate) const EXAMPLE_EXFAT_IMAGE: &'static str =
+pub(crate) const EXAMPLE_EXFAT_IMAGE: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/examples/common/sd.img.gz");
 
 pub(crate) fn print(direction: &str, sector_id_with_offset: u32, sector_id: u32, is_cached: bool) {

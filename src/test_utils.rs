@@ -43,7 +43,7 @@ impl BlockDevice<BLOCK_SIZE> for DummyBlockDevice {
         block_address: u32,
         data: &[Aligned<Self::Align, [u8; BLOCK_SIZE]>],
     ) -> Result<(), Self::Error> {
-        self.blocks[block_address as usize - SECTOR_OFFSET].copy_from_slice(&data[0].as_slice());
+        self.blocks[block_address as usize - SECTOR_OFFSET].copy_from_slice(data[0].as_slice());
         self.write_count += 1;
         Ok(())
     }

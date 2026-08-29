@@ -1,0 +1,13 @@
+[package]
+name = "exfat-slim-macros"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/ninjasource/exfat-slim.git"
+description = "Proc-macro helpers to support the exfat-slim library"
+
+[lib]
+proc-macro = true
+
+[dependencies]

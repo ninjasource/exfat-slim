@@ -1,7 +1,8 @@
 [package]
 name = "exfat-slim"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
+rust-version = "1.89"
 authors = ["David Haig"]
 license = "Apache-2.0"
 repository = "https://github.com/ninjasource/exfat-slim.git"
@@ -17,11 +18,11 @@ thiserror = { version = "2.0", default-features = false }
 bitflags = { version = "2.10.0", default-features = false }
 defmt = { version = "1", default-features = false, optional = true }
 log = { version = "0.4", optional = true, default-features = false }
-bisync = { version = "0.3.0", default-features = false }
+exfat-slim-macros = { version = "=0.1.0", path = "macros" }
 embassy-sync = { version = "0.7.2", default-features = false, optional = true }
 static_cell = { version = "2", default-features = false, optional = true }
 block-device-driver = { version = "0.2.0", default-features = false }
-aligned = "0.4.2"
+aligned = { version = "0.4.2", default-features = false }
 
 [dev-dependencies]
 mbr-nostd = "0.1"
@@ -44,6 +45,9 @@ alloc = []
 defmt = ["dep:defmt"]
 log = ["dep:log"]
 embassy = ["dep:embassy-sync", "dep:static_cell", "alloc"]
+
+[workspace]
+members = ["macros"]
 
 [[example]]
 name = "append_file_blocking"
